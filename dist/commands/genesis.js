@@ -1,0 +1,580 @@
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
+import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
+import { pollUntilDone } from "../lib/poll.js";
+import { formatGenesisRun, formatError } from "../lib/format.js";
+import { formatCcCommand } from "../lib/cc-command.js";
+import { resolveActiveBrand } from "../lib/layout.js";
+import { captureReelAndWrite } from "../lib/reel-write.js";
+import { captureSwipeAndWrite } from "../lib/ad-library-write.js";
+export const helpText = `
+exodus genesis — write ads with the Genesis writer (Mario + Infeed, 1 pass each by default)
+
+Genesis is the one writing pipeline (Mario + Infeed voices → body copy → QA →
+Google Doc). Every mode below feeds that same writer; they differ only in where
+the inspiration comes from.
+
+Usage:
+  exodus genesis run --brief <file|"text">   Write from a typed brief
+  exodus genesis --reel "<url>"              Mode 1: transcribe a reel → idea bank → write ads
+  exodus genesis --swipe-url "<url>"         Swipe: scrape a Facebook Ad Library link → idea bank → write ads
+  exodus genesis --from-bank                 Mode 2: list banked reels to write from
+  exodus genesis --from-bank --idea <id>     Mode 2: write from a specific banked reel
+  exodus genesis --list-swipes               Swipe: list saved competitor ads to write from
+  exodus genesis --swipe <id>                Swipe: write from a saved competitor ad (model after it)
+  exodus genesis scrape [--organic]          Mode 3: fill the idea bank for the active brand
+  exodus genesis connect-instagram           Mode 3: connect this brand's Instagram account
+
+Source (choose one):
+  --brief <file|"text">       Typed brief (file path or inline string)
+  --reel "<url>"              Instagram or TikTok reel URL to model
+  --swipe-url "<url>"         Facebook Ad Library link to swipe (scrape → hook → write)
+  --from-bank [--idea <id>]   Idea bank: list with no id, or write from <id>
+  --swipe <id>                Saved swipe (competitor ad): write modeled after <id>
+  --list-swipes               List saved swipes for your tracked competitors
+
+Options:
+  --steering "<text>"         With --swipe-url: what to model from the ad (angle,
+                              tone, structure) — folded into the brief as direction.
+  --seeds <file|"text">       Per-run creative seeds (brief mode). File: one per
+                              line OR a JSON array. Inline: a single seed.
+  --awareness <level>         unaware | problem-aware (default) | solution-aware | product-aware
+  --passes <n>                Writing passes per bot — Mario + Infeed (1-5, default 1 = 2 variants)
+  --variants <n>              Advanced: raw total variant count (1-10); overrides --passes
+  --ad-account <id>           Meta ad account ID for the top-ads-biased track
+  --limit <n>                 Rows when listing the bank (default 20)
+  --no-wait                   Return immediately with the run ID
+  --wait                      Poll until the run completes (default)
+
+Scrape (Mode 3) options:
+  --organic                   Authenticated FYP walk via the connected IG account
+  --term "<search>"           Fresh ScrapeCreators discovery scoped to a term (no IG login needed)
+  --smoke                     With --organic: shorter verification walk
+  --username <handle>         With connect-instagram: the IG handle being connected
+
+Examples:
+  exodus genesis run --brief brief.txt --seeds seeds.txt
+  exodus genesis --reel "https://www.instagram.com/reel/Cabc123/"
+  exodus genesis --swipe-url "https://www.facebook.com/ads/library/?id=2119680725509450"
+  exodus genesis --from-bank
+  exodus genesis --from-bank --idea kn7abc... --awareness solution-aware
+  exodus genesis --list-swipes
+  exodus genesis --swipe kn7abc... --awareness solution-aware
+  exodus genesis connect-instagram --username mybrandhandle
+  exodus genesis scrape --organic
+`.trim();
+function resolveTextFlag(raw) {
+    if (typeof raw !== "string" || raw.trim() === "")
+        return undefined;
+    const candidate = resolve(process.cwd(), raw);
+    if (existsSync(candidate)) {
+        return readFileSync(candidate, "utf8").trim();
+    }
+    return raw.trim();
+}
+function resolveSeedsFlag(raw) {
+    const text = resolveTextFlag(raw);
+    if (!text)
+        return undefined;
+    if (text.startsWith("[")) {
+        try {
+            const parsed = JSON.parse(text);
+            if (Array.isArray(parsed)) {
+                return parsed.filter((s) => typeof s === "string" && s.trim().length > 0);
+            }
+        }
+        catch {
+        }
+    }
+    return text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+export function buildBriefBody(brief, opts) {
+    const body = {
+        brief,
+        awarenessLevel: opts.awarenessLevel,
+        inputMethod: "brief",
+    };
+    if (opts.seeds && opts.seeds.length > 0)
+        body.seeds = opts.seeds;
+    if (typeof opts.variantCount === "number")
+        body.variantCount = opts.variantCount;
+    if (opts.adAccountId)
+        body.adAccountId = opts.adAccountId;
+    if (typeof opts.stopAtHooks === "boolean")
+        body.stopAtHooks = opts.stopAtHooks;
+    return body;
+}
+export function buildPasteBody(text, opts) {
+    const body = {
+        brief: text,
+        awarenessLevel: opts.awarenessLevel,
+        inputMethod: "paste",
+        sourcePayload: { winningAd: text },
+    };
+    if (opts.seeds && opts.seeds.length > 0)
+        body.seeds = opts.seeds;
+    if (typeof opts.variantCount === "number")
+        body.variantCount = opts.variantCount;
+    if (opts.adAccountId)
+        body.adAccountId = opts.adAccountId;
+    return body;
+}
+export function resolveSwipeText(swipe) {
+    const transcript = typeof swipe.transcript === "string" ? swipe.transcript.trim() : "";
+    if (transcript)
+        return transcript;
+    return [swipe.headline, swipe.bodyText, swipe.ctaText]
+        .map((s) => (typeof s === "string" ? s.trim() : ""))
+        .filter((s) => s.length > 0)
+        .join("\n\n");
+}
+function parseOpts(flags) {
+    const awarenessLevel = flags["awareness"] ?? "problem-aware";
+    const seeds = resolveSeedsFlag(flags["seeds"]);
+    let variantCount;
+    if (typeof flags["variants"] === "string") {
+        const n = parseInt(flags["variants"], 10);
+        variantCount = Number.isNaN(n) ? 2 : Math.max(1, Math.min(10, n));
+    }
+    else {
+        let passes = 1;
+        if (typeof flags["passes"] === "string") {
+            const p = parseInt(flags["passes"], 10);
+            passes = Number.isNaN(p) ? 1 : Math.max(1, Math.min(5, p));
+        }
+        variantCount = passes * 2;
+    }
+    const adAccountId = typeof flags["ad-account"] === "string" ? flags["ad-account"] : undefined;
+    let stopAtHooks;
+    if (flags["stop-at-hooks"] === true)
+        stopAtHooks = true;
+    else if (flags["auto-hooks"] === true)
+        stopAtHooks = false;
+    return { awarenessLevel, seeds, variantCount, adAccountId, stopAtHooks };
+}
+export function resolveGenesisAction(flags) {
+    const opts = parseOpts(flags);
+    const reel = typeof flags["reel"] === "string" && flags["reel"].trim() ? flags["reel"].trim() : undefined;
+    const swipeUrl = typeof flags["swipe-url"] === "string" && flags["swipe-url"].trim()
+        ? flags["swipe-url"].trim()
+        : undefined;
+    const steering = typeof flags["steering"] === "string" && flags["steering"].trim()
+        ? flags["steering"].trim()
+        : undefined;
+    const brief = resolveTextFlag(flags["brief"]);
+    const idea = typeof flags["idea"] === "string" && flags["idea"].trim() ? flags["idea"].trim() : undefined;
+    const wantsBank = flags["from-bank"] === true || !!idea;
+    const swipeId = typeof flags["swipe"] === "string" && flags["swipe"].trim() ? flags["swipe"].trim() : undefined;
+    const wantsSwipe = flags["list-swipes"] === true || flags["swipe"] === true || !!swipeId;
+    const sources = [
+        reel ? "reel" : null,
+        swipeUrl ? "swipe-url" : null,
+        brief ? "brief" : null,
+        wantsBank ? "bank" : null,
+        wantsSwipe ? "swipe" : null,
+    ].filter(Boolean);
+    if (sources.length === 0) {
+        return {
+            kind: "error",
+            message: 'No source. Use one of: --brief <file|"text">, --reel "<url>", --swipe-url "<fb-url>", --from-bank [--idea <id>], or --swipe <id> / --list-swipes.',
+        };
+    }
+    if (sources.length > 1) {
+        return {
+            kind: "error",
+            message: "Choose one source: --brief, --reel, --swipe-url, --from-bank/--idea, or --swipe/--list-swipes.",
+        };
+    }
+    const limit = typeof flags["limit"] === "string" ? Math.max(1, parseInt(flags["limit"], 10) || 20) : 20;
+    if (reel)
+        return { kind: "reel", urls: [reel], opts };
+    if (swipeUrl)
+        return { kind: "swipe-url", urls: [swipeUrl], opts, steering };
+    if (brief)
+        return { kind: "submit", body: buildBriefBody(brief, opts) };
+    if (swipeId)
+        return { kind: "from-swipe", swipeId, opts };
+    if (wantsSwipe)
+        return { kind: "list-swipes", limit };
+    if (idea)
+        return { kind: "from-bank", ideaId: idea, opts };
+    return { kind: "list-bank", limit };
+}
+function parsePositional() {
+    const args = process.argv.slice(3);
+    const out = [];
+    let i = 0;
+    while (i < args.length) {
+        const a = args[i];
+        if (a.startsWith("--")) {
+            const next = args[i + 1];
+            i += next !== undefined && !next.startsWith("--") ? 2 : 1;
+            continue;
+        }
+        out.push(a);
+        i++;
+    }
+    return out;
+}
+export async function run(flags) {
+    const cc = formatCcCommand(process.argv.slice(2));
+    const sub = parsePositional()[0];
+    if (sub === "connect-instagram")
+        return runConnectInstagram(flags, cc);
+    if (sub === "scrape")
+        return runScrape(flags, cc);
+    if (sub === "hook-pref")
+        return runHookPref();
+    const action = resolveGenesisAction(flags);
+    const noWait = flags["wait"] === false || flags["no-wait"] === true;
+    switch (action.kind) {
+        case "error":
+            console.error(`Error: ${action.message}`);
+            process.exit(1);
+            return;
+        case "reel":
+            return runReel(action.urls, action.opts, { noWait, cc });
+        case "swipe-url":
+            return runSwipeUrl(action.urls, action.opts, action.steering, { noWait, cc });
+        case "list-bank":
+            return listBank(action.limit);
+        case "from-bank":
+            return runFromBank(action.ideaId, action.opts, { noWait, cc });
+        case "list-swipes":
+            return listSwipes(action.limit);
+        case "from-swipe":
+            return runFromSwipe(action.swipeId, action.opts, { noWait, cc });
+        case "submit":
+            return submitGenesis(action.body, { noWait, cc });
+    }
+}
+async function listBank(limit) {
+    const res = await apiGet(`/api/v2/scout/bank?limit=${limit}`);
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    const ideas = Array.isArray(res.data.ideas) ? res.data.ideas : [];
+    if (ideas.length === 0) {
+        console.log("Bank is empty.");
+        console.log('Fill it with: exodus genesis scrape   (or paste a reel: exodus genesis --reel "<url>")');
+        return;
+    }
+    console.log(`## Idea Bank (${ideas.length} reel${ideas.length === 1 ? "" : "s"})`);
+    console.log("");
+    for (const i of ideas) {
+        const hook = i.hook ?? "(no hook)";
+        const user = typeof i.sourceUsername === "string" && i.sourceUsername.length > 0
+            ? `  @${i.sourceUsername.replace(/^@+/, "")}`
+            : "";
+        const score = typeof i.relevanceScore === "number" ? ` score=${i.relevanceScore.toFixed(2)}` : "";
+        const used = typeof i.useCount === "number" && i.useCount > 0 ? " · used" : "";
+        console.log(`  • ${hook}${user}${score}`);
+        console.log(`    id: ${i._id ?? "?"}  [${i.status ?? "new"}${used}]`);
+        if (i.sourceUrl)
+            console.log(`    ${i.sourceUrl}`);
+    }
+    console.log("");
+    console.log("Write from one:  exodus genesis --from-bank --idea <id>");
+}
+async function runFromBank(ideaId, opts, rt) {
+    const res = await apiPost("/api/v2/scout/bank/ideas", { ideaIds: [ideaId] }, { ccCommand: rt.cc });
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    const idea = (res.data.ideas ?? [])[0];
+    if (!idea) {
+        console.error(`No banked idea found for id "${ideaId}". List the bank: exodus genesis --from-bank`);
+        process.exit(1);
+    }
+    if (!idea.sourceUrl) {
+        console.error(`Banked idea "${ideaId}" has no source reel URL to write from.`);
+        process.exit(1);
+    }
+    console.log(`Writing from banked reel: ${idea.sourceUrl}`);
+    return runReel([idea.sourceUrl], opts, rt);
+}
+async function runReel(urls, opts, rt) {
+    console.log(`Transcribing ${urls.length === 1 ? "the reel" : `${urls.length} reels`} → idea → Genesis…`);
+    const result = await captureReelAndWrite(urls, { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount }, { cc: rt.cc });
+    for (const f of result.bankedFailed) {
+        console.error(`  ✗ couldn't pull an idea from ${f} (private, region-locked, or no transcript?)`);
+    }
+    if (result.dispatched.length === 0) {
+        console.error("No reel produced a usable idea — nothing to write.");
+        process.exit(1);
+    }
+    for (const d of result.dispatched) {
+        console.log(`  ✓ banked ${d.key} from the reel → Genesis run ${d.runId}`);
+    }
+    if (rt.noWait || result.dispatched.length !== 1) {
+        console.log("");
+        console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
+        return;
+    }
+    console.log("");
+    await waitForGenesisRun(result.dispatched[0].runId);
+}
+async function runSwipeUrl(urls, opts, steering, rt) {
+    console.log(`Swiping ${urls.length === 1 ? "the ad" : `${urls.length} ads`} → idea → Genesis…`);
+    const result = await captureSwipeAndWrite(urls, { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, steering }, { cc: rt.cc });
+    for (const f of result.bankedFailed) {
+        console.error(`  ✗ couldn't pull an idea from ${f} (inactive, image-only, or not in the Ad Library index?)`);
+    }
+    if (result.dispatched.length === 0) {
+        console.error("No ad produced a usable idea — nothing to write.");
+        process.exit(1);
+    }
+    for (const d of result.dispatched) {
+        console.log(`  ✓ swiped ${d.key} from the ad → Genesis run ${d.runId}`);
+    }
+    if (rt.noWait || result.dispatched.length !== 1) {
+        console.log("");
+        console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
+        return;
+    }
+    console.log("");
+    await waitForGenesisRun(result.dispatched[0].runId);
+}
+function snippet(text, max = 80) {
+    if (typeof text !== "string")
+        return "";
+    const oneLine = text.replace(/\s+/g, " ").trim();
+    return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+async function listSwipes(limit) {
+    const res = await apiGet(`/api/v2/swipe-library?limit=${limit}`);
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    const swipes = Array.isArray(res.data.swipes) ? res.data.swipes : [];
+    if (swipes.length === 0) {
+        console.log("No saved swipes for your tracked competitors.");
+        console.log("Collect competitor ads first from the swipe library in the dashboard.");
+        return;
+    }
+    console.log(`## Swipe Library (${swipes.length} ad${swipes.length === 1 ? "" : "s"})`);
+    console.log("");
+    for (const s of swipes) {
+        const brand = s.brandName ?? "(unknown brand)";
+        const fmt = s.format ? ` [${s.format}]` : "";
+        const preview = snippet(resolveSwipeText(s));
+        console.log(`  • ${brand}${fmt}`);
+        if (preview)
+            console.log(`    ${preview}`);
+        console.log(`    id: ${s._id ?? "?"}`);
+    }
+    console.log("");
+    console.log("Write from one:  exodus genesis --swipe <id>");
+}
+async function runFromSwipe(swipeId, opts, rt) {
+    const res = await apiPost("/api/v2/swipe-library/get", { ids: [swipeId] }, { ccCommand: rt.cc });
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    const swipe = (res.data.swipes ?? [])[0];
+    if (!swipe) {
+        console.error(`No saved swipe found for id "${swipeId}". List them: exodus genesis --list-swipes`);
+        process.exit(1);
+    }
+    const text = resolveSwipeText(swipe);
+    if (!text) {
+        console.error(`Swipe "${swipeId}" has no usable text (no transcript, headline, or body) to write from.`);
+        process.exit(1);
+    }
+    console.log(`Writing from swipe: ${swipe.brandName ?? "competitor ad"}${swipe.format ? ` [${swipe.format}]` : ""}`);
+    return submitGenesis(buildPasteBody(text, opts), rt);
+}
+async function submitGenesis(body, rt) {
+    const res = await apiPost("/api/v2/genesis", body, {
+        ccCommand: rt.cc,
+    });
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    const runId = res.data.runId;
+    if (!runId) {
+        console.error("No runId returned from /api/v2/genesis");
+        process.exit(1);
+    }
+    console.log(`Genesis run started: ${runId}`);
+    if (body.seeds && body.seeds.length > 0)
+        console.log(`Seeds supplied: ${body.seeds.length}`);
+    if (typeof body.variantCount === "number")
+        console.log(`Variant count: ${body.variantCount}`);
+    if (rt.noWait) {
+        console.log(`Run ID: ${runId}`);
+        return;
+    }
+    await waitForGenesisRun(runId);
+}
+async function waitForGenesisRun(runId) {
+    console.log("Polling for completion (variants run in parallel and finish around the same time; more passes just means more variants)...");
+    const result = await pollUntilDone({
+        path: `/api/v2/genesis?id=${runId}`,
+        timeoutMs: 60 * 60 * 1000,
+        intervalMs: 5_000,
+        terminalStatuses: ["awaiting_hook_selection"],
+        onProgress: (data) => {
+            const status = data["status"];
+            const currentStep = data["currentStep"];
+            if (status) {
+                process.stdout.write(`\r  ${status}${currentStep ? ` — ${currentStep}` : ""}        `);
+            }
+        },
+    });
+    console.log();
+    if (result.data["status"] === "awaiting_hook_selection") {
+        const dashboardUrl = getDashboardUrl();
+        console.log(`\n⏸  Paused for hook selection.`);
+        console.log(`Pick your hooks here: ${dashboardUrl}/runs/${runId}`);
+        console.log(`(The pipeline resumes automatically once you choose.)`);
+        return;
+    }
+    console.log(formatGenesisRun(result.data));
+    if (!result.ok)
+        process.exit(1);
+}
+async function runHookPref() {
+    const positionals = parsePositional();
+    const pref = positionals[1];
+    if (pref === undefined) {
+        const res = await apiGet("/api/v2/genesis/hook-pref");
+        if (!res.ok) {
+            console.log(`Error: ${res.data.error ?? "Unknown error"}`);
+            process.exit(1);
+        }
+        const cur = res.data.preference ?? null;
+        if (cur === null) {
+            console.log("unset");
+            console.log("No saved hook preference. Runs require --stop-at-hooks or --auto-hooks until one is set.");
+        }
+        else {
+            console.log(cur);
+        }
+        return;
+    }
+    if (pref !== "manual" && pref !== "auto") {
+        console.error('Usage: exodus genesis hook-pref [manual|auto]   (no arg prints the current value)');
+        console.error('  manual  Pause each run at hook selection so you choose hooks.');
+        console.error('  auto    Skip hook selection and let the pipeline pick automatically.');
+        process.exit(1);
+    }
+    const res = await apiPost("/api/v2/genesis/hook-pref", { preference: pref });
+    if (!res.ok) {
+        console.log(`Error: ${res.data.error ?? "Unknown error"}`);
+        process.exit(1);
+    }
+    console.log(`Hook preference set to "${pref}".`);
+    if (pref === "manual") {
+        console.log("Future runs will pause at hook selection for your input.");
+    }
+    else {
+        console.log("Future runs will select hooks automatically without pausing.");
+    }
+}
+function requireActiveBrand() {
+    const slug = resolveActiveBrand().slug;
+    if (!slug) {
+        console.error("No active brand. Pick one first:  exodus brand use <slug>");
+        process.exit(1);
+    }
+    return slug;
+}
+async function runConnectInstagram(flags, cc) {
+    const client = requireActiveBrand();
+    const start = await apiPost("/api/v2/genesis/instagram/connect/start", { client }, { ccCommand: cc });
+    if (!start.ok || !start.data.liveViewUrl) {
+        console.log(formatError(start));
+        process.exit(1);
+    }
+    console.log(`\nConnecting an Instagram account to brand "${client}".`);
+    console.log("\n1. Open this link in your browser:\n");
+    console.log(`   ${start.data.liveViewUrl}\n`);
+    console.log('2. Go to instagram.com and log into the account for THIS brand.');
+    console.log("3. Scroll your feed for a bit so the algorithm learns the niche.");
+    console.log("4. Come back here and press Enter.\n");
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        await rl.question("Press Enter once you're logged in and done grooming... ");
+        let username = typeof flags["username"] === "string" ? flags["username"].trim() : "";
+        while (!username) {
+            username = (await rl.question("Instagram handle you just logged in as (e.g. mybrand): ")).trim();
+        }
+        const finish = await apiPost("/api/v2/genesis/instagram/connect/finish", { client, igUsername: username }, { ccCommand: cc });
+        if (!finish.ok) {
+            console.log(formatError(finish));
+            process.exit(1);
+        }
+        console.log(`\n✓ Instagram @${username.replace(/^@+/, "")} connected to "${client}".`);
+        console.log("Fill the idea bank now:  exodus genesis scrape --organic");
+    }
+    finally {
+        rl.close();
+    }
+}
+async function runScrape(flags, cc) {
+    const client = requireActiveBrand();
+    const noWait = flags["wait"] === false || flags["no-wait"] === true;
+    if (flags["organic"] === true) {
+        const smoke = flags["smoke"] === true;
+        const res = await apiPost("/api/v2/scout/organic", { client, ...(smoke ? { smoke: true } : {}) }, { ccCommand: cc });
+        if (!res.ok || !res.data.runId) {
+            console.log(formatError(res));
+            process.exit(1);
+        }
+        console.log(`Organic scrape started for "${client}": ${res.data.runId}${smoke ? " (smoke)" : ""}`);
+        return pollScrape(res.data.runId, noWait, 1_800_000);
+    }
+    const term = typeof flags["term"] === "string" ? flags["term"] : undefined;
+    const body = { sourceMode: "fresh", client };
+    if (term)
+        body.term = term;
+    const res = await apiPost("/api/v2/scout", body, { ccCommand: cc });
+    if (!res.ok || !res.data.runId) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    console.log(`Discovery scrape started for "${client}": ${res.data.runId}`);
+    return pollScrape(res.data.runId, noWait, 1_200_000);
+}
+async function pollScrape(runId, noWait, timeoutMs) {
+    if (noWait) {
+        console.log(`Run ID: ${runId}`);
+        console.log(`Check status: exodus status --type scout --id ${runId}`);
+        return;
+    }
+    console.log("Polling for completion...");
+    const result = await pollUntilDone({
+        path: `/api/v2/scout?runId=${runId}`,
+        intervalMs: 15_000,
+        timeoutMs,
+        onProgress: (data) => {
+            const status = data["status"];
+            const captured = data["organicCaptured"];
+            const qualified = data["organicQualified"];
+            const counts = captured !== undefined || qualified !== undefined
+                ? ` captured=${captured ?? 0} qualified=${qualified ?? 0}`
+                : "";
+            if (status)
+                process.stdout.write(`\r  status: ${status}${counts}              `);
+        },
+    });
+    console.log();
+    if (result.timedOut) {
+        console.log(`Timed out waiting. Check later: exodus status --type scout --id ${runId}`);
+    }
+    else {
+        console.log(`Done. Banked reels are ready to write: exodus genesis --from-bank`);
+    }
+    if (!result.ok && !result.timedOut)
+        process.exit(1);
+}

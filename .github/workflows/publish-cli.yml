@@ -1,0 +1,37 @@
+name: Publish @aicopycoders/exodus
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: read
+  id-token: write   # required for npm provenance via OIDC trusted publishing
+jobs:
+  publish:
+    # Guard: only the public mirror has trusted publishing configured. This keeps
+    # the workflow dormant if it ever lands in the private monorepo.
+    if: github.repository == 'aicopycoders/exodus'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
+      - run: npm ci
+      - name: Publish (prerelease -> 'beta' dist-tag, else 'latest')
+        # A version with a prerelease suffix (e.g. 2026.6.2700-beta.1) publishes
+        # under the `beta` dist-tag so it never becomes `latest` for customers;
+        # testers opt in with `npx @aicopycoders/exodus@beta`. Plain CalVer -> latest.
+        # provenance:true + id-token:write attach the attestation automatically;
+        # trusted publishing means no NODE_AUTH_TOKEN.
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "Prerelease $VERSION -> publishing under dist-tag 'beta'"
+            npm publish --tag beta
+          else
+            echo "Release $VERSION -> publishing under dist-tag 'latest'"
+            npm publish
+          fi

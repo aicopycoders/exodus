@@ -1,0 +1,4 @@
+# Never commit real credentials. Only .env.example is tracked.
+.env
+# Re-include the template even though the repo root ignores .env* :
+!.env.example

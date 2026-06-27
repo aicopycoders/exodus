@@ -1,0 +1,33 @@
+{
+  "name": "@aicopycoders/exodus",
+  "version": "2026.6.2700-beta.1",
+  "description": "CLI + Claude Code skills for the Copycoders Exodus ad pipeline",
+  "type": "module",
+  "bin": {
+    "exodus": "dist/bin/exodus.js"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "bundle-assets": "node scripts/bundle-assets.mjs",
+    "prepack": "npm run build && npm run bundle-assets",
+    "dev": "tsx bin/exodus.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

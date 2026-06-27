@@ -1,0 +1,4 @@
+export declare const AD_TYPES: readonly ["before-after", "native-news", "testimonial", "bold", "meme", "screenshot", "hero", "holding-sign", "handwritten", "comment", "breaking-news", "lofi", "comparison", "infographic", "headline", "collage", "product-breakdown", "scientific", "animation", "founder-note", "carousel", "statistics", "post-it-notes", "happy-avatar", "problem-solution", "writing-on-body", "multi-testimonial", "receipt", "step-by-step", "sale-promotional-offer", "cost-of-inaction", "ugc", "quiz-interactive"];
+export type AdType = (typeof AD_TYPES)[number];
+export declare const AD_TYPE_NAMES: Record<AdType, string>;
+export declare const REPTILE_TRIGGERS: readonly ["ultra-real", "bizarre", "voyeur", "suffering", "gory", "sexual", "primal-fear", "odd-contrast", "inside-joke", "time-warp", "victory-lap", "selfie", "uncanny-objects"];
