@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { skillsDir, referencesDir } from "./assets.js";
+import { skillsDir, referencesDir, docsDir } from "./assets.js";
 export const ENV_SCAFFOLD = `# Exodus config — paste your dashboard .env block below this line.
 # Get it from your Exodus dashboard -> Settings -> Claude Code -> "Copy .env block".
 # ONE key covers every brand you own; switch brands with brand subfolders or
@@ -50,6 +50,25 @@ export function writeReferences(root, srcOverride) {
     const dest = path.join(root, "references");
     fs.rmSync(dest, { recursive: true, force: true });
     fs.cpSync(src, dest, { recursive: true });
+}
+export function writeDocs(root, srcOverride) {
+    let src;
+    try {
+        src = docsDir(srcOverride);
+    }
+    catch {
+        return [];
+    }
+    if (!fs.existsSync(src))
+        return [];
+    const names = [];
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".md"))
+            continue;
+        fs.copyFileSync(path.join(src, entry.name), path.join(root, entry.name));
+        names.push(entry.name);
+    }
+    return names.sort();
 }
 export function ensureBaseDirs(root) {
     const out = path.join(root, "output");

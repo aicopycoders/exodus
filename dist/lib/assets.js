@@ -21,3 +21,6 @@ export function skillsDir(override) {
 export function referencesDir(override) {
     return path.join(assetsRoot(override), "references");
 }
+export function docsDir(override) {
+    return path.join(assetsRoot(override), "docs");
+}

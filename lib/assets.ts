@@ -30,3 +30,7 @@ export function skillsDir(override?: string): string {
 export function referencesDir(override?: string): string {
   return path.join(assetsRoot(override), "references");
 }
+
+export function docsDir(override?: string): string {
+  return path.join(assetsRoot(override), "docs");
+}

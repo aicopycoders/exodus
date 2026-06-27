@@ -9,17 +9,22 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const exodusDir = dirname(dirname(fileURLToPath(import.meta.url))); // exodus/
 const repoRoot = dirname(exodusDir);
 const skillsSrc = join(repoRoot, "workspace", ".claude", "skills");
 const refsSrc = join(repoRoot, "workspace", "references");
+const docSrcs = [
+  join(repoRoot, "workspace", "CLAUDE.md"),
+  join(repoRoot, "workspace", "PIPELINES.md"),
+];
 
 const assetsDir = join(exodusDir, "assets");
 const skillsDest = join(assetsDir, "skills");
 const refsDest = join(assetsDir, "references");
+const docsDest = join(assetsDir, "docs");
 
 // ── Forbidden patterns (client-name leak-check) ───────────────────────────
 const FORBIDDEN = [/grounding co\b/i, /grounding company/i];
@@ -57,7 +62,12 @@ if (!existsSync(skillsSrc)) {
   cpSync(skillsSrc, skillsDest, { recursive: true });
   if (existsSync(refsSrc)) cpSync(refsSrc, refsDest, { recursive: true });
 
-  console.log(`bundle-assets: copied skills -> ${skillsDest}`);
+  mkdirSync(docsDest, { recursive: true });
+  for (const docSrc of docSrcs) {
+    if (existsSync(docSrc)) cpSync(docSrc, join(docsDest, basename(docSrc)));
+  }
+
+  console.log(`bundle-assets: copied skills + docs -> ${assetsDir}`);
 }
 
 // ── Leak-check: scan every file in assetsDir ────────────────────────────

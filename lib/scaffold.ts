@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { skillsDir, referencesDir } from "./assets.js";
+import { skillsDir, referencesDir, docsDir } from "./assets.js";
 
 // Comment-only .env — never ships a secret. The dashboard's "Copy .env block"
 // fills the real values in below the marker line.
@@ -52,6 +52,26 @@ export function writeReferences(root: string, srcOverride?: string): void {
   const dest = path.join(root, "references");
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
+}
+
+// Workspace orientation docs (CLAUDE.md, PIPELINES.md) — the in-folder operating
+// context Claude/operators read while working. Overwrite on refresh, like skills.
+// Tolerant of an absent docs dir (older bundles / public-repo edge cases).
+export function writeDocs(root: string, srcOverride?: string): string[] {
+  let src: string;
+  try {
+    src = docsDir(srcOverride);
+  } catch {
+    return []; // no bundled docs — nothing to write
+  }
+  if (!fs.existsSync(src)) return [];
+  const names: string[] = [];
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    fs.copyFileSync(path.join(src, entry.name), path.join(root, entry.name));
+    names.push(entry.name);
+  }
+  return names.sort();
 }
 
 export function ensureBaseDirs(root: string): void {

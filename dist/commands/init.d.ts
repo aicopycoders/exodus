@@ -3,6 +3,7 @@ export interface InitResult {
     existing: boolean;
     envCreated: boolean;
     skills: string[];
+    docs: string[];
 }
 export declare function scaffoldInit(root: string): InitResult;
 export declare function syncBrands(root: string): Promise<{

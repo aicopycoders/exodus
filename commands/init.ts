@@ -5,6 +5,7 @@ import {
   ensureGitignore,
   writeSkills,
   writeReferences,
+  writeDocs,
   ensureBaseDirs,
 } from "../lib/scaffold.js";
 import { loadWorkspaceEnv } from "../lib/load-env.js";
@@ -27,6 +28,7 @@ export interface InitResult {
   existing: boolean;
   envCreated: boolean;
   skills: string[];
+  docs: string[];
 }
 
 // Pure core: no console output, returns what happened. `root` is the workspace
@@ -38,7 +40,8 @@ export function scaffoldInit(root: string): InitResult {
   ensureGitignore(root);
   const skills = writeSkills(root);
   writeReferences(root);
-  return { existing, envCreated, skills };
+  const docs = writeDocs(root);
+  return { existing, envCreated, skills, docs };
 }
 
 export async function syncBrands(
@@ -71,6 +74,9 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     `${r.existing ? "Refreshed" : "Initialized"} Exodus workspace at ${root}`,
   );
   console.log(`  Installed ${r.skills.length} skills into .claude/skills/`);
+  if (r.docs.length) {
+    console.log(`  Installed workspace docs: ${r.docs.join(", ")}`);
+  }
 
   const brands = await syncBrands(root);
   if ("synced" in brands && brands.synced.length) {

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { writeEnvScaffold, ensureGitignore, writeSkills, writeReferences, ensureBaseDirs, } from "../lib/scaffold.js";
+import { writeEnvScaffold, ensureGitignore, writeSkills, writeReferences, writeDocs, ensureBaseDirs, } from "../lib/scaffold.js";
 import { loadWorkspaceEnv } from "../lib/load-env.js";
 import { ensureBrandDir } from "../lib/layout.js";
 export const helpText = `
@@ -22,7 +22,8 @@ export function scaffoldInit(root) {
     ensureGitignore(root);
     const skills = writeSkills(root);
     writeReferences(root);
-    return { existing, envCreated, skills };
+    const docs = writeDocs(root);
+    return { existing, envCreated, skills, docs };
 }
 export async function syncBrands(root) {
     loadWorkspaceEnv(root);
@@ -48,6 +49,9 @@ export async function run(flags) {
     const r = scaffoldInit(root);
     console.log(`${r.existing ? "Refreshed" : "Initialized"} Exodus workspace at ${root}`);
     console.log(`  Installed ${r.skills.length} skills into .claude/skills/`);
+    if (r.docs.length) {
+        console.log(`  Installed workspace docs: ${r.docs.join(", ")}`);
+    }
     const brands = await syncBrands(root);
     if ("synced" in brands && brands.synced.length) {
         console.log(`  Synced ${brands.synced.length} brand folder(s): ${brands.synced.join(", ")}`);
