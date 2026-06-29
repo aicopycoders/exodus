@@ -44,7 +44,7 @@ export async function captureReelAndWrite(urls, opts, rt = {}) {
     if (found.size === 0)
         return { dispatched: [], bankedFailed };
     const keys = [...found.values()];
-    const dispatch = await apiPost("/api/v2/idea-bank/dispatch", { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount }, { ccCommand: rt.cc });
+    const dispatch = await apiPost("/api/v2/idea-bank/dispatch", { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, stopAtHooks: opts.stopAtHooks }, { ccCommand: rt.cc });
     if (!dispatch.ok) {
         console.log(formatError(dispatch));
         process.exit(1);

@@ -20,6 +20,18 @@ export interface GenesisBody {
 }
 export declare function buildBriefBody(brief: string, opts: GenesisOpts): GenesisBody;
 export declare function buildPasteBody(text: string, opts: GenesisOpts): GenesisBody;
+export declare const VARIANT_CAP = 10;
+export declare function parseHookSelection(raw: string): number[];
+export declare function buildContinueBody(runId: string, selection: number[]): {
+    runId: string;
+    selectedHookIndices: number[];
+};
+export declare function exceedsVariantCap(count: number): boolean;
+export declare function buildRegenerateBody(runId: string, steering?: string): {
+    runId: string;
+    steering?: string;
+};
+export declare function formatHookPool(hooks: string[]): string;
 export interface SwipeRow {
     _id?: string;
     brandName?: string;

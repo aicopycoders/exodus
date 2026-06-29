@@ -28,6 +28,7 @@ export type IdeaAction = {
     keys: string[];
     awarenessLevel: string;
     variantCount?: number;
+    stopAtHooks?: boolean;
 } | {
     kind: "rm";
     key: string;
@@ -41,6 +42,7 @@ export type IdeaAction = {
     write: boolean;
     awarenessLevel: string;
     variantCount?: number;
+    stopAtHooks?: boolean;
 } | {
     kind: "swipe";
     limit?: number;

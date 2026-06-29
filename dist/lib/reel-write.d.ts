@@ -9,6 +9,7 @@ export interface ReelWriteResult {
 export declare function captureReelAndWrite(urls: string[], opts: {
     awarenessLevel: string;
     variantCount?: number;
+    stopAtHooks?: boolean;
 }, rt?: {
     cc?: string;
 }): Promise<ReelWriteResult>;

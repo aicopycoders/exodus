@@ -52,7 +52,7 @@ export async function captureSwipeAndWrite(urls, opts, rt = {}) {
                 console.error(`  (couldn't attach steering to ${key}: ${formatError(noted)})`);
         }
     }
-    const dispatch = await apiPost("/api/v2/idea-bank/dispatch", { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount }, { ccCommand: rt.cc });
+    const dispatch = await apiPost("/api/v2/idea-bank/dispatch", { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, stopAtHooks: opts.stopAtHooks }, { ccCommand: rt.cc });
     if (!dispatch.ok) {
         console.log(formatError(dispatch));
         process.exit(1);

@@ -10,6 +10,7 @@ export declare function captureSwipeAndWrite(urls: string[], opts: {
     awarenessLevel: string;
     variantCount?: number;
     steering?: string;
+    stopAtHooks?: boolean;
 }, rt?: {
     cc?: string;
 }): Promise<SwipeWriteResult>;

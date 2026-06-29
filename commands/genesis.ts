@@ -38,6 +38,7 @@ Source (choose one):
 Options:
   --steering "<text>"         With --swipe-url: what to model from the ad (angle,
                               tone, structure) — folded into the brief as direction.
+                              With regenerate: re-roll guidance for the hook pool.
   --seeds <file|"text">       Per-run creative seeds (brief mode). File: one per
                               line OR a JSON array. Inline: a single seed.
   --awareness <level>         unaware | problem-aware (default) | solution-aware | product-aware
@@ -151,7 +152,84 @@ export function buildPasteBody(text: string, opts: GenesisOpts): GenesisBody {
   if (opts.seeds && opts.seeds.length > 0) body.seeds = opts.seeds;
   if (typeof opts.variantCount === "number") body.variantCount = opts.variantCount;
   if (opts.adAccountId) body.adAccountId = opts.adAccountId;
+  if (typeof opts.stopAtHooks === "boolean") body.stopAtHooks = opts.stopAtHooks;
   return body;
+}
+
+// ── Hook gate (in-Claude-Code review) ───────────────────────────
+//
+// The pipeline-variant cap. Selecting more than this many hooks would be
+// silently truncated by the backend (genesis-pipeline-continue), so the CLI/
+// skill warns and confirms instead. Mirror of the cap in the Trigger pipeline.
+export const VARIANT_CAP = 10;
+
+/**
+ * Parse a user hook selection ("1,3,5" / "1 3 5") into the 1-based numbers the
+ * user typed (matching the printed numbered list). Throws on empty input or any
+ * non-positive / non-integer token so the caller can show usage. Order is
+ * preserved here; dedupe + sort happen in buildContinueBody.
+ */
+export function parseHookSelection(raw: string): number[] {
+  const tokens = raw
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) {
+    throw new Error("No hooks selected. Give the numbers to write, e.g. --hooks 1,3,5");
+  }
+  const nums = tokens.map((t) => {
+    if (!/^\d+$/.test(t)) {
+      throw new Error(`"${t}" is not a hook number. Pick from the printed list, e.g. --hooks 1,3,5`);
+    }
+    const n = parseInt(t, 10);
+    if (n < 1) {
+      throw new Error(`Hook numbers start at 1 (got "${t}").`);
+    }
+    return n;
+  });
+  return nums;
+}
+
+/**
+ * Build the POST /api/v2/genesis/continue request body. The user picks 1-based
+ * numbers (as printed); the API expects 0-based indices into the pool. Dedupe +
+ * sort ascending so the body is canonical regardless of how the user typed it.
+ */
+export function buildContinueBody(
+  runId: string,
+  selection: number[],
+): { runId: string; selectedHookIndices: number[] } {
+  const indices = Array.from(new Set(selection.map((n) => n - 1))).sort((a, b) => a - b);
+  return { runId, selectedHookIndices: indices };
+}
+
+/** True when a selection exceeds the pipeline variant cap (warn, don't truncate). */
+export function exceedsVariantCap(count: number): boolean {
+  return count > VARIANT_CAP;
+}
+
+/**
+ * Build the POST /api/v2/genesis/regenerate request body. Steering is optional:
+ * a bare `regenerate` re-rolls with the brand steering, while `--steering "…"`
+ * adds the strategist's re-roll guidance (additive on the backend). The
+ * steering field is omitted entirely when empty/whitespace so a bare re-roll
+ * sends a clean body.
+ */
+export function buildRegenerateBody(
+  runId: string,
+  steering?: string,
+): { runId: string; steering?: string } {
+  const trimmed = typeof steering === "string" ? steering.trim() : "";
+  return trimmed ? { runId, steering: trimmed } : { runId };
+}
+
+/**
+ * Render the hook pool as a flat, 1-based numbered list — hook text ONLY. No
+ * ratings, tags, voice labels, or agent opinion (locked decision, spec §5). The
+ * driving skill prints this verbatim and the user picks by number.
+ */
+export function formatHookPool(hooks: string[]): string {
+  return hooks.map((h, i) => `  ${i + 1}. ${h}`).join("\n");
 }
 
 /** Fields of a swipeAd the CLI needs to turn a swipe into writable ad text. */
@@ -319,6 +397,9 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   if (sub === "connect-instagram") return runConnectInstagram(flags, cc);
   if (sub === "scrape") return runScrape(flags, cc);
   if (sub === "hook-pref") return runHookPref();
+  if (sub === "continue") return runContinue(flags, cc);
+  if (sub === "regenerate") return runRegenerate(flags, cc);
+  if (sub === "hooks") return runHooks(flags);
 
   // Otherwise (no subcommand, or "run"): the writing modes (1, 2, brief).
   const action = resolveGenesisAction(flags);
@@ -427,7 +508,7 @@ async function runReel(
   );
   const result = await captureReelAndWrite(
     urls,
-    { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount },
+    { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, stopAtHooks: opts.stopAtHooks },
     { cc: rt.cc },
   );
   for (const f of result.bankedFailed) {
@@ -468,7 +549,7 @@ async function runSwipeUrl(
   );
   const result = await captureSwipeAndWrite(
     urls,
-    { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, steering },
+    { awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, steering, stopAtHooks: opts.stopAtHooks },
     { cc: rt.cc },
   );
   for (const f of result.bankedFailed) {
@@ -611,10 +692,18 @@ async function waitForGenesisRun(runId: string): Promise<void> {
   });
   console.log();
   if (result.data["status"] === "awaiting_hook_selection") {
+    const pool = Array.isArray((result.data as Record<string, unknown>)["hookPool"])
+      ? ((result.data as Record<string, unknown>)["hookPool"] as string[])
+      : [];
     const dashboardUrl = getDashboardUrl();
-    console.log(`\n⏸  Paused for hook selection.`);
-    console.log(`Pick your hooks here: ${dashboardUrl}/runs/${runId}`);
-    console.log(`(The pipeline resumes automatically once you choose.)`);
+    console.log(`\n⏸  Paused for hook selection (${pool.length} hook${pool.length === 1 ? "" : "s"}).`);
+    if (pool.length > 0) {
+      console.log("");
+      console.log(formatHookPool(pool));
+      console.log("");
+    }
+    console.log(`Write the ones you want:  exodus genesis continue --id ${runId} --hooks 1,3,5`);
+    console.log(`(Prefer the dashboard? ${dashboardUrl}/runs/${runId})`);
     return;
   }
   console.log(formatGenesisRun(result.data));
@@ -667,6 +756,123 @@ async function runHookPref(): Promise<void> {
   } else {
     console.log("Future runs will select hooks automatically without pausing.");
   }
+}
+
+/**
+ * `exodus genesis hooks --id <runId>` — re-fetch and print the hook pool for a
+ * paused run. The recovery/fresh-session path: re-hydrate the numbered list so
+ * the user (or a cold agent) can pick without the original pause output.
+ */
+async function runHooks(flags: Record<string, string | boolean>): Promise<void> {
+  const runId = typeof flags["id"] === "string" ? (flags["id"] as string).trim() : "";
+  if (!runId) {
+    console.error("Usage: exodus genesis hooks --id <runId>");
+    process.exit(1);
+  }
+  const res = await apiGet<{ status?: string; hookPool?: string[]; error?: string }>(
+    `/api/v2/genesis?id=${runId}`,
+  );
+  if (!res.ok) {
+    console.log(formatError(res));
+    process.exit(1);
+  }
+  if (res.data.status !== "awaiting_hook_selection") {
+    console.log(`Run ${runId} is not awaiting hook selection (status: ${res.data.status ?? "unknown"}).`);
+    return;
+  }
+  const pool = Array.isArray(res.data.hookPool) ? res.data.hookPool : [];
+  if (pool.length === 0) {
+    console.log("No hooks available for this run.");
+    return;
+  }
+  console.log(`Hooks for run ${runId} (${pool.length}):`);
+  console.log("");
+  console.log(formatHookPool(pool));
+  console.log("");
+  console.log(`Write the ones you want:  exodus genesis continue --id ${runId} --hooks 1,3,5`);
+}
+
+/**
+ * `exodus genesis continue --id <runId> --hooks 1,3,5` — resume a paused run
+ * with the chosen hooks (one ad per hook), then poll to completion. The user
+ * picks 1-based numbers from the printed list; the API takes 0-based indices.
+ */
+async function runContinue(
+  flags: Record<string, string | boolean>,
+  cc: string | undefined,
+): Promise<void> {
+  const runId = typeof flags["id"] === "string" ? (flags["id"] as string).trim() : "";
+  if (!runId) {
+    console.error("Usage: exodus genesis continue --id <runId> --hooks 1,3,5");
+    process.exit(1);
+  }
+  const raw = typeof flags["hooks"] === "string" ? (flags["hooks"] as string) : "";
+  let selection: number[];
+  try {
+    selection = parseHookSelection(raw);
+  } catch (e) {
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+    return;
+  }
+
+  if (exceedsVariantCap(selection.length)) {
+    console.error(
+      `Warning: you picked ${selection.length} hooks but the pipeline writes at most ${VARIANT_CAP}. ` +
+        `The ${VARIANT_CAP} lowest-numbered picks will be written and the rest dropped. ` +
+        `Re-run with ${VARIANT_CAP} or fewer to control exactly which.`,
+    );
+  }
+
+  const body = buildContinueBody(runId, selection);
+  const res = await apiPost<{ ok?: boolean; error?: string }>(
+    "/api/v2/genesis/continue",
+    body,
+    { ccCommand: cc },
+  );
+  if (!res.ok) {
+    console.log(formatError(res));
+    process.exit(1);
+  }
+  console.log(`Resuming run ${runId} with ${body.selectedHookIndices.length} hook${body.selectedHookIndices.length === 1 ? "" : "s"}…`);
+  await waitForGenesisRun(runId);
+}
+
+/**
+ * `exodus genesis regenerate --id <runId> [--steering "…"]` — re-roll the hook
+ * pool of a paused run, optionally with steering ("lead with the cost, not the
+ * shame"). The run re-fires Phase 1 and re-pauses; we poll until it lands back
+ * at the gate and reprint the fresh numbered pool so the user can pick or
+ * re-roll again. Unlimited rounds.
+ */
+async function runRegenerate(
+  flags: Record<string, string | boolean>,
+  cc: string | undefined,
+): Promise<void> {
+  const runId = typeof flags["id"] === "string" ? (flags["id"] as string).trim() : "";
+  if (!runId) {
+    console.error("Usage: exodus genesis regenerate --id <runId> [--steering \"…\"]");
+    process.exit(1);
+  }
+  const steering = typeof flags["steering"] === "string" ? (flags["steering"] as string) : undefined;
+  const body = buildRegenerateBody(runId, steering);
+  const res = await apiPost<{ ok?: boolean; error?: string }>(
+    "/api/v2/genesis/regenerate",
+    body,
+    { ccCommand: cc },
+  );
+  if (!res.ok) {
+    console.log(formatError(res));
+    process.exit(1);
+  }
+  console.log(
+    body.steering
+      ? `Regenerating hooks for run ${runId} with steering…`
+      : `Regenerating hooks for run ${runId}…`,
+  );
+  // The run re-pauses at awaiting_hook_selection; waitForGenesisRun treats that
+  // as terminal and reprints the fresh pool.
+  await waitForGenesisRun(runId);
 }
 
 /** Resolve the active brand slug (folder > pointer) or exit with guidance. */

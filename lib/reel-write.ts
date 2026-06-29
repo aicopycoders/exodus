@@ -52,7 +52,7 @@ async function listOrganic(): Promise<OrganicIdeaRow[]> {
  */
 export async function captureReelAndWrite(
   urls: string[],
-  opts: { awarenessLevel: string; variantCount?: number },
+  opts: { awarenessLevel: string; variantCount?: number; stopAtHooks?: boolean },
   rt: { cc?: string } = {},
 ): Promise<ReelWriteResult> {
   const wanted = urls.map((u) => u.trim()).filter(Boolean);
@@ -106,7 +106,7 @@ export async function captureReelAndWrite(
     error?: string;
   }>(
     "/api/v2/idea-bank/dispatch",
-    { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount },
+    { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, stopAtHooks: opts.stopAtHooks },
     { ccCommand: rt.cc },
   );
   if (!dispatch.ok) {

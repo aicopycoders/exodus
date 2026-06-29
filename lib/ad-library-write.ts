@@ -52,7 +52,7 @@ async function listAdLibrary(): Promise<AdLibraryIdeaRow[]> {
  */
 export async function captureSwipeAndWrite(
   urls: string[],
-  opts: { awarenessLevel: string; variantCount?: number; steering?: string },
+  opts: { awarenessLevel: string; variantCount?: number; steering?: string; stopAtHooks?: boolean },
   rt: { cc?: string } = {},
 ): Promise<SwipeWriteResult> {
   const wanted = urls.map((u) => u.trim()).filter(Boolean);
@@ -122,7 +122,7 @@ export async function captureSwipeAndWrite(
     error?: string;
   }>(
     "/api/v2/idea-bank/dispatch",
-    { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount },
+    { keys, awarenessLevel: opts.awarenessLevel, variantCount: opts.variantCount, stopAtHooks: opts.stopAtHooks },
     { ccCommand: rt.cc },
   );
   if (!dispatch.ok) {

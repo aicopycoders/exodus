@@ -18,8 +18,12 @@ Usage:
   exodus idea list [--source ..] [--since YYYY-MM-DD] [--status raw|writing|written|archived] [--limit n]
   exodus idea note <KEY> "<notes>"        Attach persistent steering to an idea
   exodus idea edit <KEY> "<new concept>"  Edit an idea's description
-  exodus idea write <KEYS> [--awareness <level>] [--passes n]   Fire-and-forget; one run per key (default 1 pass = 2 variants)
+  exodus idea write <KEYS> [--awareness <level>] [--passes n] [--stop-at-hooks|--auto-hooks]   Fire-and-forget; one run per key (default 1 pass = 2 variants)
   exodus idea rm <KEY> [--hard]           Archive (or hard-delete with --hard)
+
+Hook gate (write paths): --stop-at-hooks pauses each run for in-Claude-Code hook
+review; --auto-hooks auto-picks and writes straight through. Omit both to use your
+saved default (exodus genesis hook-pref). Applies to write and organic --write.
 
 Examples:
   exodus idea gambit "joint pain at 40, sleep angle, grounding vs pills"
@@ -48,10 +52,10 @@ export type IdeaAction =
   | { kind: "list"; source?: Source; since?: string; status?: string; limit?: number }
   | { kind: "note"; key: string; notes: string }
   | { kind: "edit"; key: string; description: string }
-  | { kind: "write"; keys: string[]; awarenessLevel: string; variantCount?: number }
+  | { kind: "write"; keys: string[]; awarenessLevel: string; variantCount?: number; stopAtHooks?: boolean }
   | { kind: "rm"; key: string; hard: boolean }
   | { kind: "gambit"; dump: string }
-  | { kind: "organic"; urls: string[]; write: boolean; awarenessLevel: string; variantCount?: number }
+  | { kind: "organic"; urls: string[]; write: boolean; awarenessLevel: string; variantCount?: number; stopAtHooks?: boolean }
   | { kind: "swipe"; limit?: number }
   | { kind: "error"; message: string };
 
@@ -79,6 +83,33 @@ function resolveVariantCount(flags: Record<string, string | boolean>): number {
     passes = Number.isNaN(p) ? 1 : Math.max(1, Math.min(5, p));
   }
   return passes * 2;
+}
+
+/**
+ * Resolve the hook gate from flags, mirroring `exodus genesis`: --stop-at-hooks
+ * → true (pause for in-CC hook review), --auto-hooks → false (auto-pick, write
+ * straight through). Returns undefined when neither is given so genesis.startRun
+ * falls back to the user's saved hook-pref (force-choice).
+ */
+function resolveStopAtHooks(flags: Record<string, string | boolean>): boolean | undefined {
+  if (flags["stop-at-hooks"] === true) return true;
+  if (flags["auto-hooks"] === true) return false;
+  return undefined;
+}
+
+/**
+ * `idea write`/`idea organic --write` dispatch N runs fire-and-forget, so they
+ * can't run the single-run interactive pick loop `exodus genesis` does. When the
+ * gate is on (manual), each run pauses at hook selection — point the user at the
+ * per-run resume commands so the in-CC review still works from here.
+ */
+function printHookPauseHint(dispatched: Array<{ key: string; runId: string }>): void {
+  if (dispatched.length === 0) return;
+  console.log("");
+  console.log("Hooks are gated (manual) — each run paused for hook selection. Review and write:");
+  for (const d of dispatched) {
+    console.log(`  exodus genesis hooks --id ${d.runId}    then  exodus genesis continue --id ${d.runId} --hooks 1,3,5`);
+  }
 }
 
 /** Map (positionals, flags) to a single action. Pure → unit-testable. */
@@ -148,6 +179,7 @@ export function resolveIdeaAction(
       keys,
       awarenessLevel: str(flags["awareness"]) ?? "problem-aware",
       variantCount: resolveVariantCount(flags),
+      stopAtHooks: resolveStopAtHooks(flags),
     };
   }
 
@@ -172,6 +204,7 @@ export function resolveIdeaAction(
       write: flags["write"] === true,
       awarenessLevel: str(flags["awareness"]) ?? "problem-aware",
       variantCount: resolveVariantCount(flags),
+      stopAtHooks: resolveStopAtHooks(flags),
     };
   }
 
@@ -271,7 +304,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         console.log(`Transcribing ${action.urls.length} reel(s) → ideas → Genesis…`);
         const result = await captureReelAndWrite(
           action.urls,
-          { awarenessLevel: action.awarenessLevel, variantCount: action.variantCount },
+          { awarenessLevel: action.awarenessLevel, variantCount: action.variantCount, stopAtHooks: action.stopAtHooks },
           { cc },
         );
         for (const f of result.bankedFailed) {
@@ -279,6 +312,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         }
         if (result.dispatched.length === 0) { console.error("No reel produced a usable idea — nothing written."); process.exit(1); }
         for (const d of result.dispatched) console.log(`  ✓ banked ${d.key} → Genesis run ${d.runId}`);
+        if (action.stopAtHooks === true) printHookPauseHint(result.dispatched);
         console.log("");
         console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
         return;
@@ -368,7 +402,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         error?: string;
       }>(
         "/api/v2/idea-bank/dispatch",
-        { keys: action.keys, awarenessLevel: action.awarenessLevel, variantCount: action.variantCount },
+        { keys: action.keys, awarenessLevel: action.awarenessLevel, variantCount: action.variantCount, stopAtHooks: action.stopAtHooks },
         { ccCommand: cc },
       );
       if (!res.ok) { console.log(formatError(res)); process.exit(1); }
@@ -377,6 +411,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       console.log(`Dispatched ${dispatched.length} run(s) — fire-and-forget.`);
       for (const d of dispatched) console.log(`  ${d.key} → run ${d.runId}`);
       for (const s of skipped) console.log(`  skipped ${s.key}: ${s.reason}`);
+      if (action.stopAtHooks === true) printHookPauseHint(dispatched);
       console.log("");
       console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
       return;

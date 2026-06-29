@@ -108,30 +108,36 @@ Awareness picks the primer; never mix buckets in one run. Detail in `references/
 
 ---
 
-## Stage C — Pick the pass count, then run Genesis
+## Stage C — Resolve the hook gate, then run Genesis
 
-Genesis writes in two voices — **MarioBot** and the **Infeed VSL bot**. The default is **one pass per bot = 2 variants** (1 Mario × Brand + 1 Infeed × Brand): the fastest read on both voices against the same brief. More passes widen coverage and bring in the Top-Ads-Biased primer.
+**First, resolve the hook-selection gate — it decides the whole shape of the run** (the `exodus-genesis` skill's "Hook selection mode" step). Run `npx @aicopycoders/exodus genesis hook-pref`:
 
-How many passes is the user's call, not yours — so **menu it** (one AskUserQuestion call) rather than assuming. Lead with the recommended default:
+- **`manual`** — the user reviews and picks the hooks **right here in Claude Code** (the primary venue). The run pauses, the CLI prints a numbered hook pool, the user picks, and each pick becomes one ad. **Passes do not apply — ad count = hooks chosen — so skip the passes menu entirely.** Fire with `--stop-at-hooks`.
+- **`auto`** — auto-pick the top hooks and write straight through. Passes apply here (see below). Fire with `--auto-hooks`.
+- **`unset`** — STOP and ask **mode only, two options, in-Claude-Code first**: *① Show me the hooks here — I'll pick · ② Just write the ads — auto-pick the hooks. (Prefer the dashboard? I'll give you the link.)* Then fire with the matching flag, and **after** the run kicks off, offer **once** to save it as the default (`genesis hook-pref <manual|auto>` — never "dashboard"). A run with no flag and no saved default hard-errors by design — don't skip this.
+
+**Passes (auto mode only).** Genesis writes body copy in two voices — **MarioBot** and the **Infeed VSL bot**. The default is **one pass per bot = 2 variants** (1 Mario × Brand + 1 Infeed × Brand). How many passes is the user's call — **menu it** (one AskUserQuestion call) rather than assuming, but only when the user chose auto:
 
 - **1 pass — 2 variants (recommended)** — one Mario, one Infeed, on the brand primer. Fast.
 - **2 passes — 4 variants** — adds a Mario + Infeed pair on the brand's top-performers primer.
 - **3+ passes — 6+ variants** — a wider sprint; "Other" takes a custom number.
 
-Skip the menu only if the user already said how many ("just give me two", "run a big batch"). Awareness you do *not* menu — that's your strategist call from Stage B; state it and move.
+Skip the passes menu if the user already said how many, or whenever the mode is manual. Awareness you do *not* menu — that's your strategist call from Stage B; state it and move.
 
-Hand off to the `exodus-genesis` skill — it owns the run (double-pass hooks, the built-in 15-point QA, the editing menu). Always background it; even the default run is ~12–15 min, past the 10-min foreground cap.
-
-**Before firing, resolve the hook-selection gate** (the `exodus-genesis` skill's "Hook selection mode" step): run `npx @aicopycoders/exodus genesis hook-pref` — if it prints `unset`, ask the user *"choose the hooks yourself, or auto-pick and write straight through?"* and pass `--stop-at-hooks` or `--auto-hooks` accordingly (offer to save the choice). A run with no flag and no saved default hard-errors by design — don't skip this.
+Hand off to the `exodus-genesis` skill — it owns the run (the built-in 15-point QA, the in-Claude-Code hook review, the editing menu). Always background it; even the default run is ~12–15 min, past the 10-min foreground cap.
 
 ```bash
-# Default — 1 pass per bot = 2 variants:
-npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level>
-# More coverage — 2 passes = 4 variants:
-npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --passes 2
+# Manual — review & pick hooks in Claude Code (one ad per pick; no passes):
+npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --stop-at-hooks
+# Auto — auto-pick and write straight through (default 1 pass = 2 variants):
+npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --auto-hooks
+# Auto, more coverage — 2 passes = 4 variants:
+npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --auto-hooks --passes 2
 # with seeds:
-npx @aicopycoders/exodus genesis run --brief "<brief>" --seeds /tmp/genesis-seeds.txt --awareness <level> --passes 2
+npx @aicopycoders/exodus genesis run --brief "<brief>" --seeds /tmp/genesis-seeds.txt --awareness <level> --stop-at-hooks
 ```
+
+When a manual run pauses, drive the in-Claude-Code pick loop from the `exodus-genesis` skill (§3b): print the numbered pool verbatim, let the user pick by number or natural language, then `genesis continue --id <runId> --hooks 1,3,5`.
 
 > "Genesis run started at problem-aware — 1 pass per bot (2 variants: Mario × Brand + Infeed × Brand). I'll surface the Doc when it lands."
 

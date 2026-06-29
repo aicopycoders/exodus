@@ -17,8 +17,12 @@ Usage:
   exodus idea list [--source ..] [--since YYYY-MM-DD] [--status raw|writing|written|archived] [--limit n]
   exodus idea note <KEY> "<notes>"        Attach persistent steering to an idea
   exodus idea edit <KEY> "<new concept>"  Edit an idea's description
-  exodus idea write <KEYS> [--awareness <level>] [--passes n]   Fire-and-forget; one run per key (default 1 pass = 2 variants)
+  exodus idea write <KEYS> [--awareness <level>] [--passes n] [--stop-at-hooks|--auto-hooks]   Fire-and-forget; one run per key (default 1 pass = 2 variants)
   exodus idea rm <KEY> [--hard]           Archive (or hard-delete with --hard)
+
+Hook gate (write paths): --stop-at-hooks pauses each run for in-Claude-Code hook
+review; --auto-hooks auto-picks and writes straight through. Omit both to use your
+saved default (exodus genesis hook-pref). Applies to write and organic --write.
 
 Examples:
   exodus idea gambit "joint pain at 40, sleep angle, grounding vs pills"
@@ -55,6 +59,22 @@ function resolveVariantCount(flags) {
         passes = Number.isNaN(p) ? 1 : Math.max(1, Math.min(5, p));
     }
     return passes * 2;
+}
+function resolveStopAtHooks(flags) {
+    if (flags["stop-at-hooks"] === true)
+        return true;
+    if (flags["auto-hooks"] === true)
+        return false;
+    return undefined;
+}
+function printHookPauseHint(dispatched) {
+    if (dispatched.length === 0)
+        return;
+    console.log("");
+    console.log("Hooks are gated (manual) — each run paused for hook selection. Review and write:");
+    for (const d of dispatched) {
+        console.log(`  exodus genesis hooks --id ${d.runId}    then  exodus genesis continue --id ${d.runId} --hooks 1,3,5`);
+    }
 }
 export function resolveIdeaAction(positionals, flags) {
     const sub = positionals[0];
@@ -116,6 +136,7 @@ export function resolveIdeaAction(positionals, flags) {
             keys,
             awarenessLevel: str(flags["awareness"]) ?? "problem-aware",
             variantCount: resolveVariantCount(flags),
+            stopAtHooks: resolveStopAtHooks(flags),
         };
     }
     if (sub === "rm") {
@@ -140,6 +161,7 @@ export function resolveIdeaAction(positionals, flags) {
             write: flags["write"] === true,
             awarenessLevel: str(flags["awareness"]) ?? "problem-aware",
             variantCount: resolveVariantCount(flags),
+            stopAtHooks: resolveStopAtHooks(flags),
         };
     }
     if (sub === "swipe") {
@@ -218,7 +240,7 @@ export async function run(flags) {
         case "organic": {
             if (action.write) {
                 console.log(`Transcribing ${action.urls.length} reel(s) → ideas → Genesis…`);
-                const result = await captureReelAndWrite(action.urls, { awarenessLevel: action.awarenessLevel, variantCount: action.variantCount }, { cc });
+                const result = await captureReelAndWrite(action.urls, { awarenessLevel: action.awarenessLevel, variantCount: action.variantCount, stopAtHooks: action.stopAtHooks }, { cc });
                 for (const f of result.bankedFailed) {
                     console.error(`  ✗ couldn't pull an idea from ${f} (private, region-locked, or no transcript?)`);
                 }
@@ -228,6 +250,8 @@ export async function run(flags) {
                 }
                 for (const d of result.dispatched)
                     console.log(`  ✓ banked ${d.key} → Genesis run ${d.runId}`);
+                if (action.stopAtHooks === true)
+                    printHookPauseHint(result.dispatched);
                 console.log("");
                 console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
                 return;
@@ -304,7 +328,7 @@ export async function run(flags) {
             return;
         }
         case "write": {
-            const res = await apiPost("/api/v2/idea-bank/dispatch", { keys: action.keys, awarenessLevel: action.awarenessLevel, variantCount: action.variantCount }, { ccCommand: cc });
+            const res = await apiPost("/api/v2/idea-bank/dispatch", { keys: action.keys, awarenessLevel: action.awarenessLevel, variantCount: action.variantCount, stopAtHooks: action.stopAtHooks }, { ccCommand: cc });
             if (!res.ok) {
                 console.log(formatError(res));
                 process.exit(1);
@@ -316,6 +340,8 @@ export async function run(flags) {
                 console.log(`  ${d.key} → run ${d.runId}`);
             for (const s of skipped)
                 console.log(`  skipped ${s.key}: ${s.reason}`);
+            if (action.stopAtHooks === true)
+                printHookPauseHint(dispatched);
             console.log("");
             console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
             return;

@@ -1,6 +1,6 @@
 ---
 name: exodus-genesis
-description: Run the standalone Exodus Genesis pipeline — Luke's full writing process across two voices (MarioBot + Infeed VSL) on the brand primer. The default is one pass per bot = 2 variants (1 Mario × Brand + 1 Infeed × Brand); the user can run more passes to widen coverage and bring in the Top-Ads-Biased primer. Includes the per-variant editing menu (Natural Language / Shorten / Cut / Simplify / Make Better). `--reel` also writes ads on the spot from a pasted Instagram/TikTok reel — it transcribes the reel into an idea and writes it through this same writer (just another input, nothing custom); to COLLECT reels/ideas into a bank to curate before writing, that's the `exodus-idea` skill. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("run the exodus genesis pipeline", "exodus, run another pass", "exodus, make me ads from this reel"), named this skill or /exodus-genesis, ran an `npx exodus` command, or the `exodus` hub skill routed here. Never claim generic requests ("run the Genesis pipeline", "write ads from this reel") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — never hijack their direct Genesis workflows into this pipeline.
+description: Run the standalone Exodus Genesis pipeline — Luke's full writing process. Hooks come from the dedicated new-hook-bot (a single ~10-hook pool); the human hook gate then lets the user review and pick those hooks RIGHT IN CLAUDE CODE (the primary venue; dashboard is ad-hoc) — each pick becomes one ad — or auto-pick and write straight through. Body copy is written across two voices (MarioBot + Infeed VSL) on the brand primer; in auto mode the default is one pass per bot = 2 variants and more passes widen coverage / bring in the Top-Ads-Biased primer (passes don't apply in manual mode). Includes the per-variant editing menu (Natural Language / Shorten / Cut / Simplify / Make Better). `--reel` also writes ads on the spot from a pasted Instagram/TikTok reel — it transcribes the reel into an idea and writes it through this same writer (just another input, nothing custom); to COLLECT reels/ideas into a bank to curate before writing, that's the `exodus-idea` skill. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("run the exodus genesis pipeline", "exodus, run another pass", "exodus, make me ads from this reel"), named this skill or /exodus-genesis, ran an `npx exodus` command, or the `exodus` hub skill routed here. Never claim generic requests ("run the Genesis pipeline", "write ads from this reel") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — never hijack their direct Genesis workflows into this pipeline.
 ---
 
 ```operator-guide
@@ -19,14 +19,21 @@ Optional:
 Returns:
   Google Doc with one tab per variant (Headlines + Hook + Body Copy)
   Per-variant editing menu surfaced on the dashboard run page
+
+Hook gate (manual mode — review hooks in Claude Code):
+  on pause the run prints a numbered hook pool, then:
+  genesis continue   --id <runId> --hooks 1,3,5       write the picked hooks (one ad each)
+  genesis regenerate --id <runId> [--steering "…"]    re-roll the pool (reject + steer)
+  genesis hooks      --id <runId>                      re-print the pool (fresh-session resume)
 ```
 
 # Genesis — Brief + Seeds → Mario + Infeed Variants → Editing Menu
 
 Luke's full Ad Writing Process end-to-end:
 
-- Two parallel hook voices (MarioBot + InfeedVSL) producing ~40 hooks total
-- Body-copy variants in two voices, **scaled by passes**:
+- Hook generation from the dedicated **new-hook-bot** (single source, ~10 strategically
+  ordered hooks) — the pool the user reviews at the hook gate
+- Body-copy variants in two voices, **scaled by passes** (auto mode):
   - **Mario × Brand primer** — established brand voice
   - **Infeed × Brand primer** — InfeedVSL voice on the same brand reference
   - **Top-Ads-Biased** — primed with the brand's actual top performers (CTR × spend),
@@ -41,9 +48,11 @@ How Much Coverage* below).
 
 > If the user hasn't named the pipeline specifically and just wants Exodus to "write some ads,"
 > start from the `exodus-write` skill — it walks brand → foundation → brief → here, and it owns the passes menu.
-> This skill owns the run once the brief, awareness, and pass count are settled. If the user
-> invoked Genesis directly and didn't say how many, surface the same quick passes menu (default
-> 1 pass = 2 variants, recommended) before firing — don't silently assume a big run.
+> This skill owns the run once the brief, awareness, and (in auto mode) pass count are settled.
+> **In manual mode the passes question disappears** — the ad count equals the number of hooks the
+> user picks, so don't ask "how many passes?" Passes only apply to **auto** mode (default 1 pass =
+> 2 variants, recommended); if the user is in auto and didn't say how many, surface the quick passes
+> menu before firing — don't silently assume a big run.
 
 ## Workflow
 
@@ -95,37 +104,77 @@ Save to `/tmp/genesis-seeds.txt` (one per line, `#` comments allowed), or pass `
 # Resolve hook mode FIRST (see "Hook selection mode" below) — these commands
 # assume a saved default exists, else add --stop-at-hooks or --auto-hooks or they error.
 
-# Default — 1 pass per bot = 2 variants (1 Mario × Brand + 1 Infeed × Brand):
-npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level>
-
-# More coverage — 2 passes = 4 variants (adds the Top-Ads-Biased pass):
-npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --passes 2
-
-# With seeds:
-npx @aicopycoders/exodus genesis run --brief "<brief>" --seeds /tmp/genesis-seeds.txt --awareness <level> --passes 2
-
-# Manual hook selection — pause after hook generation:
+# Manual (default) — pause so the user picks hooks IN CLAUDE CODE; one ad per pick.
+# Passes do NOT apply in manual mode (ad count = hooks chosen):
 npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --stop-at-hooks
 
-# Force auto-select (overrides a saved "manual" preference):
+# Auto — auto-pick the top N hooks (N = passes default) and write straight through:
 npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --auto-hooks
+
+# Auto, more coverage — 2 passes = 4 variants (adds the Top-Ads-Biased pass):
+npx @aicopycoders/exodus genesis run --brief "<brief>" --awareness <level> --auto-hooks --passes 2
+
+# With seeds:
+npx @aicopycoders/exodus genesis run --brief "<brief>" --seeds /tmp/genesis-seeds.txt --awareness <level> --stop-at-hooks
 ```
 
-`--brief` accepts inline text or a file path. `--passes <n>` (1–5) is the friendly knob; `--variants <n>` (1–10) is an advanced raw-total override that wins if both are given.
+`--brief` accepts inline text or a file path. `--passes <n>` (1–5) is the friendly knob (auto mode only); `--variants <n>` (1–10) is an advanced raw-total override that wins if both are given.
 
 **Hook selection mode — REQUIRED gate before EVERY run (do not skip):**
-The pipeline can pause after hook generation so the user picks which hooks become body copy — the human quality gate. You MUST resolve the mode **before** firing a run. A `genesis run` with **no** `--stop-at-hooks`/`--auto-hooks` **and** no saved preference now **hard-errors** (`Hook-selection preference not set`) **by design** — so the gate can't be silently skipped. If you see that error, you skipped this step; do it now.
+The pipeline can pause after hook generation so the user picks which hooks become body copy — the human quality gate, and **reviewing those hooks right here in Claude Code is the primary venue** (the dashboard is an ad-hoc escape hatch). You MUST resolve the mode **before** firing a run. A `genesis run` with **no** `--stop-at-hooks`/`--auto-hooks` **and** no saved preference now **hard-errors** (`Hook-selection preference not set`) **by design** — so the gate can't be silently skipped. If you see that error, you skipped this step; do it now.
 
 Resolve it in this order, every time, BEFORE you run:
 1. **Check the saved default:** run `npx @aicopycoders/exodus genesis hook-pref` (no argument). It prints `manual`, `auto`, or `unset` on the first line.
-2. **If it prints `manual` or `auto`:** just fire the run — the saved default applies, no flag needed.
-3. **If it prints `unset`:** STOP and ask the user once, plainly — *"Want to choose the hooks yourself before I write the copy, or have me auto-pick and write straight through?"* Then fire the run with the matching flag (`--stop-at-hooks` = they choose, `--auto-hooks` = auto), and after it starts, offer to save it as their default so you never ask again: `npx @aicopycoders/exodus genesis hook-pref <manual|auto>`. **Do NOT fire the run before they answer.**
+2. **If it prints `manual` or `auto`:** just fire the run — the saved default applies, no flag needed. (`manual` = review the hooks here in Claude Code.)
+3. **If it prints `unset`:** STOP and ask the user once — **mode only, two options, in-Claude-Code first:**
+   > ① **Show me the hooks here — I'll pick** (review in Claude Code) · ② **Just write the ads — auto-pick the hooks**
+   > *(Prefer the dashboard? Say so and I'll give you the link.)*
+
+   Don't ask "how many passes?" in this question — that only matters in auto mode. Fire the run with the matching flag (`--stop-at-hooks` = ①, `--auto-hooks` = ②). **Do NOT fire the run before they answer.** Then, **after** the run kicks off (a separate step), ask **once** whether to save it as the default so you never ask again: `npx @aicopycoders/exodus genesis hook-pref <manual|auto>`. (Only `manual`/`auto` are savable — never save "dashboard".)
 
 Flags:
-- **`--stop-at-hooks`** — pause after hook generation. The run lands in `awaiting_hook_selection` and the CLI prints a dashboard URL; the user picks hooks on the run-detail page and the pipeline continues automatically to body copy.
-- **`--auto-hooks`** — auto-pick the strongest hooks and write straight through (also overrides a saved "manual" default for this one run).
+- **`--stop-at-hooks`** — manual: pause after hook generation. The run lands in `awaiting_hook_selection` and **the CLI prints the hook pool as a numbered list** (see *Manual hook selection* below). Picking resumes the pipeline to body copy; rejecting re-rolls the pool (`regenerate`).
+- **`--auto-hooks`** — auto: pick the top N hooks in bot order and write straight through (also overrides a saved "manual" default for this one run). Stay silent — just deliver the Doc.
 
-> "Genesis run started at problem-aware — 1 pass per bot (2 variants: Mario × Brand + Infeed × Brand). I'll surface the Doc when it lands."
+### 3b. Manual hook selection — review and pick IN CLAUDE CODE
+
+When a manual run pauses, the `run` command prints the generated pool as a flat numbered list. Surface it to the user **verbatim — hook text only, numbered.** Do **not** add ratings, tags, voice labels, or your own opinion about which hooks are best; the user picks.
+
+```
+⏸  Paused for hook selection (10 hooks).
+
+  1. <hook text>
+  2. <hook text>
+  …
+```
+
+Then the user does one of two things — **pick** or **re-roll**:
+
+**A. Pick the hooks to write:**
+1. Ask the user which hooks to write — **by number ("1, 3, 5") or in natural language** ("the first one and the curiosity one about cortisol"). Resolve any natural-language reference to the actual hook numbers yourself.
+2. Each pick becomes one ad. If the user picks **more than 10**, warn and confirm before continuing — the pipeline caps at 10 and would drop the rest; don't let that happen silently.
+3. Write the chosen hooks:
+   ```bash
+   npx @aicopycoders/exodus genesis continue --id <runId> --hooks 1,3,5
+   ```
+   This resumes the run (one ad per hook) and polls to the Doc.
+
+**B. Reject the pool and re-roll (regenerate):** when the user says "these all suck, try again" — optionally with direction ("…and lead with the cost, not the shame"):
+```bash
+npx @aicopycoders/exodus genesis regenerate --id <runId> --steering "lead with the cost, not the shame"
+```
+- Drop `--steering` entirely for a plain "just try again" — it re-rolls on the brand steering alone.
+- The whole pool is **replaced** with a fresh set, the run re-pauses, and the new numbered list prints. Surface it the same way (verbatim, hook text only) and loop back to A or B. **Unlimited rounds** — keep re-rolling until the user picks or walks away.
+- Steering is **additive across rounds**: round 2's "punchier" stacks on round 1's "lead with the cost" — pass only the *new* direction each time; the backend accumulates.
+- If the user references a specific hook ("**7** is the closest but too aggressive"), **resolve that number to the real hook text yourself** and fold it into the steering you pass — e.g. `--steering "build on 'Your cortisol is wrecking your sleep' but soften the aggression"`. The CLI sends steering as plain text; the bot never sees your numbering.
+
+**Fresh session / lost the list?** Re-fetch and reprint the pool any time with:
+```bash
+npx @aicopycoders/exodus genesis hooks --id <runId>
+```
+A paused run resumes cleanly from a cold session this way — fetch the pool, then pick (`continue`) or re-roll (`regenerate`).
+
+> "Genesis paused with 10 hooks — here they are. Tell me which to write (numbers or describe them), or say the word and I'll re-roll the whole set."
 
 Status check (only if user asks): `npx @aicopycoders/exodus status --id <runId> --type genesis` — `--type genesis` required.
 
@@ -161,7 +210,9 @@ What still needs *your* judgment after the run: **verify any statistics, studies
 
 ## Common Failure Modes
 
-- **In-feed-vsl-bot fails** — InfeedVSL hook generation degrades to Mario-only; the Infeed variant still runs if recovered. Note in report.
+- **new-hook-bot fails** — hooks now come from a single source (no two-lane fallback), so a hook-gen failure fails the run cleanly with no pool. Re-run; if it persists, it's a Tool Feedback item.
+- **Empty hook bank** — if the brand's hook primer is empty the pool is generated from the brief alone (weaker hooks). Surface it so the user knows to fill the foundation.
+- **In-feed-vsl-bot fails** — affects **body copy** only (Phase 2): the Infeed variant degrades to Mario-only; the Infeed variant still runs if recovered. Note in report.
 - **Top-ads primer empty (2+ passes)** — the 2nd pass's two variants fall back to the brand primer. Pipeline completes; flag it.
 - **Pipeline timeout** — rare, and only realistic on a large pass count. Check run-detail for partial variants; trigger an editing pass from the UI to recover usable output.
 - **`status` 400 "Invalid generation ID format"** — missing `--type genesis`.
