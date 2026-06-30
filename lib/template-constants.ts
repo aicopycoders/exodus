@@ -42,6 +42,25 @@ export const AD_TYPES = [
   "cost-of-inaction",
   "ugc",
   "quiz-interactive",
+  // gen:new-bots:AD_TYPES — keep in lockstep with concepts.ts (#324)
+  "action-figure",
+  "at-home-routine",
+  "billboard",
+  "black-and-white",
+  "blurred",
+  "choose",
+  "cutout",
+  "drawing",
+  "facetime",
+  "marker",
+  "notes",
+  "photo",
+  "quadrant",
+  "search",
+  "thumbnail",
+  "xray",
+  "zoom-bubble",
+  // /gen:new-bots:AD_TYPES
 ] as const;
 
 export type AdType = (typeof AD_TYPES)[number];
@@ -80,6 +99,25 @@ export const AD_TYPE_NAMES: Record<AdType, string> = {
   "cost-of-inaction": "Cost of Inaction",
   ugc: "UGC",
   "quiz-interactive": "Quiz / Interactive Self-Selection",
+  // gen:new-bots:AD_TYPE_NAMES — keep in lockstep with concepts.ts (#324)
+  "action-figure": "Action Figure",
+  "at-home-routine": "At Home Routine",
+  billboard: "Billboard",
+  "black-and-white": "Black and White",
+  blurred: "Blurred",
+  choose: "Choose",
+  cutout: "Cutout",
+  drawing: "Drawing",
+  facetime: "FaceTime",
+  marker: "Marker",
+  notes: "Notes",
+  photo: "Photo",
+  quadrant: "Quadrant",
+  search: "Search",
+  thumbnail: "Thumbnail",
+  xray: "X-ray",
+  "zoom-bubble": "Zoom Bubble",
+  // /gen:new-bots:AD_TYPE_NAMES
 };
 
 export const REPTILE_TRIGGERS = [

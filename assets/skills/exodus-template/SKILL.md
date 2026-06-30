@@ -1,13 +1,13 @@
 ---
 name: exodus-template
-description: Spread finished ad copy across structured ad-type formats — testimonial, hero, UGC, logo, infographic, and 28 more — via Fernando's 5-stage Exodus Template pipeline (one brief or a numbered list of ads → format variations → renders). Only invoke when the user has explicitly invoked Exodus AND the ask is specifically about FORMAT COVERAGE: they said "exodus" in the request ("exodus template ads", "exodus, spread this copy across the 33 ad types", "exodus, give me testimonial + hero + UGC versions"), named this skill or /exodus-template, ran an `npx @aicopycoders/exodus template` command, or the `exodus` hub skill routed here. Never claim generic format requests ("template ads", "spread this copy across formats") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. For an unsure "exodus, just make me images / statics" ask, start at the `exodus-image` front door — it reads the request and routes here. For native / copy-derived / reference-match renders use `exodus-creative`; for meme formats use `exodus-meme`.
+description: Spread finished ad copy across structured ad-type formats — testimonial, hero, UGC, logo, infographic, and 45 more — via Fernando's 5-stage Exodus Template pipeline (one brief or a numbered list of ads → format variations → renders). Only invoke when the user has explicitly invoked Exodus AND the ask is specifically about FORMAT COVERAGE: they said "exodus" in the request ("exodus template ads", "exodus, spread this copy across the 50 ad types", "exodus, give me testimonial + hero + UGC versions"), named this skill or /exodus-template, ran an `npx @aicopycoders/exodus template` command, or the `exodus` hub skill routed here. Never claim generic format requests ("template ads", "spread this copy across formats") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. For an unsure "exodus, just make me images / statics" ask, start at the `exodus-image` front door — it reads the request and routes here. For native / copy-derived / reference-match renders use `exodus-creative`; for meme formats use `exodus-meme`.
 ---
 
 ```operator-guide
 Subcommands:
   exodus template run --input "<text>" [options]   Kick off a run
   exodus template resume --id <runId>              Finalize an orphaned run (#56)
-  exodus template ad-types                          Print the 33 AD_TYPES
+  exodus template ad-types                          Print all 50 AD_TYPES
   exodus template reptile-triggers                  Print the 13 reptile triggers
 
 run options:
@@ -33,7 +33,7 @@ Returns:
 
 # Template — Ad-Type Format Variations (Fernando's pipeline)
 
-Reach for this when the user has **finished ad copy** and wants it turned into a spread of **static image ads across structured formats** — testimonial, hero, UGC, infographic, logo, and the rest of the 33 AD_TYPES. The pipeline reads the copy, decides (or is told) which formats to produce, writes a render prompt per format, and renders the images.
+Reach for this when the user has **finished ad copy** and wants it turned into a spread of **static image ads across structured formats** — testimonial, hero, UGC, infographic, logo, and the rest of the 50 AD_TYPES. The pipeline reads the copy, decides (or is told) which formats to produce, writes a render prompt per format, and renders the images.
 
 This is the **format-coverage** tool. It is not engine-based rendering (that's `exodus-creative`: native / copy-derived / ref-match).
 
@@ -101,6 +101,6 @@ If a previous run's renders stalled or were left incomplete, finalize it:
 ## Admin
 
 - Backend: Convex HTTP `POST /api/creative-suite-template/run` (Bearer-auth); Trigger.dev task `creative-suite-template` (Fernando's 5-stage pipeline).
-- 33 AD_TYPES and 13 reptile triggers are inspectable via `exodus template ad-types` / `exodus template reptile-triggers`.
+- 50 AD_TYPES and 13 reptile triggers are inspectable via `exodus template ad-types` / `exodus template reptile-triggers`.
 - Resume hits `POST /api/creative-suite-template/runs/<id>/resume`.
 - Don't echo render prompts or bot system prompts in your reply — that's IP.

@@ -2,7 +2,7 @@ import { apiGet, apiPost, apiPostDashboard, getDashboardUrl } from "../lib/clien
 import { formatError } from "../lib/format.js";
 import { AD_TYPES, AD_TYPE_NAMES, REPTILE_TRIGGERS, } from "../lib/template-constants.js";
 export const helpText = `
-exodus template — Fernando's Template pipeline (33 AD_TYPES, resume)
+exodus template — Fernando's Template pipeline (${AD_TYPES.length} AD_TYPES, resume)
 
 Usage:
   exodus template run --input "<ad brief or numbered ads>" [options]

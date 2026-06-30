@@ -7,8 +7,8 @@
 // Subcommands:
 //   exodus template run [flags]                  Kick off a new run
 //   exodus template resume --id <runId>          Resume orphan renders (#56)
-//   exodus template ad-types                     Print the 33 AD_TYPES
-//   exodus template reptile-triggers             Print the 13 reptile triggers
+//   exodus template ad-types                     Print all AD_TYPES
+//   exodus template reptile-triggers             Print the reptile triggers
 //
 // Notes:
 // - No CLI-side status polling. The Convex HTTP route is POST-only; status
@@ -27,7 +27,7 @@ import {
 } from "../lib/template-constants.js";
 
 export const helpText = `
-exodus template — Fernando's Template pipeline (33 AD_TYPES, resume)
+exodus template — Fernando's Template pipeline (${AD_TYPES.length} AD_TYPES, resume)
 
 Usage:
   exodus template run --input "<ad brief or numbered ads>" [options]

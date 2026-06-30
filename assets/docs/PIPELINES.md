@@ -12,7 +12,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-genesis | Brief → Ad Copy (two voices; 1 pass = 2 variants, scalable via --passes) |
 | exodus-image | The front door for static images — routes to exodus-creative or exodus-template. Start here for "make me images / statics". |
 | exodus-creative | Creative-Suite Engines (native / copy-derived / ref-match) — when you've already picked an engine |
-| exodus-template | Ad-Type Format Variations across 33 structured formats |
+| exodus-template | Ad-Type Format Variations across 50 structured formats |
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
@@ -71,7 +71,7 @@ Examples:
 you want — "exodus, make me some statics from this ad", "exodus, render AD-001" —
 and Claude reads the request and runs the right engine: **exodus-creative**
 (renders straight from copy, or matches a reference image) or **exodus-template**
-(one piece of copy spread across 33 ad-type formats). You don't pick the engine;
+(one piece of copy spread across 50 ad-type formats). You don't pick the engine;
 the request decides it. Use the engines below directly only when you already know
 exactly which one you want.
 
@@ -113,13 +113,13 @@ Auth: Bearer (kickoff via Convex HTTP; status via dashboard route).
 
 ## exodus-template
 
-**What it does:** Turn finished ad copy into many static ad images spread across structured ad-type formats (testimonial, hero, UGC, logo, infographic, and 28 more). Runs Fernando's 5-stage Template pipeline — give it one brief or a numbered list of ads and it generates format variations, then renders them.
+**What it does:** Turn finished ad copy into many static ad images spread across structured ad-type formats (testimonial, hero, UGC, logo, infographic, and 45 more). Runs Fernando's 5-stage Template pipeline — give it one brief or a numbered list of ads and it generates format variations, then renders them.
 
 ```operator-guide
 Subcommands:
   exodus template run --input "<text>" [options]   Kick off a run
   exodus template resume --id <runId>              Finalize an orphaned run (#56)
-  exodus template ad-types                          Print the 33 AD_TYPES
+  exodus template ad-types                          Print all 50 AD_TYPES
   exodus template reptile-triggers                  Print the 13 reptile triggers
 
 run options:

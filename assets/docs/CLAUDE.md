@@ -55,9 +55,9 @@ These are the **Exodus** pipelines — the automatic system that drives the Gene
 | **Write** | `exodus-write` | **Start here for copywriting.** Say what you want ("exodus, write me some ads"); it routes new-brand → foundation → brief → genesis → Doc and sequences the whole flow. |
 | **Genesis** | `exodus-genesis` | Brief → ad copy in two voices (Mario + Infeed). Default 1 pass = 2 variants; scale with `--passes` (pass 2 adds the Top-Ads-biased primer). Also writes from a pasted reel (`--reel`). |
 | **Idea** | `exodus-idea` | The Idea Bank — capture reels/brain-dumps/swipes into formed ideas, curate them, then write the keepers through Genesis. Use when collecting and curating ideas rather than writing one ad on the spot. |
-| **Image** | `exodus-image` | **Start here for static images.** Say what you want; it reads the request and routes to the right engine — `exodus-creative` (renders from copy) or `exodus-template` (33 ad-type formats). |
+| **Image** | `exodus-image` | **Start here for static images.** Say what you want; it reads the request and routes to the right engine — `exodus-creative` (renders from copy) or `exodus-template` (50 ad-type formats). |
 | **Creative** | `exodus-creative` | A specific creative-suite engine (native / copy-derived renders from copy, or ref-match to a reference image) when you've already picked one. Otherwise start at **Image**. |
-| **Template** | `exodus-template` | Finished ad copy → many static ads across 33 structured formats (testimonial, hero, UGC…). Otherwise start at **Image**. |
+| **Template** | `exodus-template` | Finished ad copy → many static ads across 50 structured formats (testimonial, hero, UGC…). Otherwise start at **Image**. |
 | **Meme** | `exodus-meme` | Meme ads — recommends formats for a brief, then one batched run renders AI-image and classic Imgflip-template memes server-side. |
 | **Browse** | `exodus-browse` | View history and retrieve past outputs |
 | **Drive** | `exodus-drive` | Read/write Google Docs, Sheets, and Drive files via `npx @aicopycoders/exodus drive` (uses the dashboard's Google OAuth — no local CLI) |
