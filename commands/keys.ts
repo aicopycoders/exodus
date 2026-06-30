@@ -1,5 +1,6 @@
 import {
   PROVIDER_ENV_MAP,
+  SERVER_RESOLVED_PROVIDERS,
   fetchRemoteKeys,
   mapKeysToEnvVars,
   resolveEnvFilePath,
@@ -32,6 +33,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   openrouter: "OpenRouter",
   elevenlabs: "ElevenLabs",
   kie: "Kie.ai",
+  imgflip: "Imgflip",
 };
 
 async function status(): Promise<void> {
@@ -54,6 +56,15 @@ async function status(): Promise<void> {
     const dash = inDashboard ? "dashboard ✓" : "dashboard —";
     const local = localSet ? "local ✓" : "local —";
     console.log(`  ${label} ${dash}   ${local}   (${envName})`);
+  }
+  // Server-resolved providers (e.g. Imgflip for classic memes) live only in the
+  // dashboard and are read server-side per run — there's no local .env column to
+  // show, so render them separately rather than omitting them entirely (#325).
+  for (const provider of SERVER_RESOLVED_PROVIDERS) {
+    const inDashboard = provider in remote.keys;
+    const label = (PROVIDER_LABEL[provider] ?? provider).padEnd(11);
+    const dash = inDashboard ? "dashboard ✓" : "dashboard —";
+    console.log(`  ${label} ${dash}   server-side   (Settings → Keys; no .env)`);
   }
   if (remote.failed.length) {
     console.log(
@@ -84,7 +95,7 @@ async function pull(): Promise<void> {
     return;
   }
 
-  const { vars, skipped } = mapKeysToEnvVars(remote.keys);
+  const { vars, serverResolved, skipped } = mapKeysToEnvVars(remote.keys);
   const envPath = resolveEnvFilePath();
   const results = upsertEnvVars(envPath, vars);
 
@@ -96,6 +107,11 @@ async function pull(): Promise<void> {
   if (added.length) console.log(`  added:     ${added.join(", ")}`);
   if (updated.length) console.log(`  updated:   ${updated.join(", ")}`);
   if (unchanged.length) console.log(`  unchanged: ${unchanged.join(", ")}`);
+  if (serverResolved.length) {
+    console.log(
+      `  dashboard: ${serverResolved.join(", ")} — used server-side from Settings → Keys; no .env entry needed.`,
+    );
+  }
   if (skipped.length) {
     console.log(`  skipped:   ${skipped.join(", ")} (no known env var mapping)`);
   }

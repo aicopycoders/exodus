@@ -1,4 +1,4 @@
-import { PROVIDER_ENV_MAP, fetchRemoteKeys, mapKeysToEnvVars, resolveEnvFilePath, upsertEnvVars, } from "../lib/keys-sync.js";
+import { PROVIDER_ENV_MAP, SERVER_RESOLVED_PROVIDERS, fetchRemoteKeys, mapKeysToEnvVars, resolveEnvFilePath, upsertEnvVars, } from "../lib/keys-sync.js";
 export const helpText = `
 exodus keys — sync your provider API keys from the dashboard to local .env
 
@@ -24,6 +24,7 @@ const PROVIDER_LABEL = {
     openrouter: "OpenRouter",
     elevenlabs: "ElevenLabs",
     kie: "Kie.ai",
+    imgflip: "Imgflip",
 };
 async function status() {
     let remote;
@@ -45,6 +46,12 @@ async function status() {
         const dash = inDashboard ? "dashboard ✓" : "dashboard —";
         const local = localSet ? "local ✓" : "local —";
         console.log(`  ${label} ${dash}   ${local}   (${envName})`);
+    }
+    for (const provider of SERVER_RESOLVED_PROVIDERS) {
+        const inDashboard = provider in remote.keys;
+        const label = (PROVIDER_LABEL[provider] ?? provider).padEnd(11);
+        const dash = inDashboard ? "dashboard ✓" : "dashboard —";
+        console.log(`  ${label} ${dash}   server-side   (Settings → Keys; no .env)`);
     }
     if (remote.failed.length) {
         console.log(`\n⚠ Could not decrypt: ${remote.failed.join(", ")} — re-save in the dashboard.`);
@@ -69,7 +76,7 @@ async function pull() {
         }
         return;
     }
-    const { vars, skipped } = mapKeysToEnvVars(remote.keys);
+    const { vars, serverResolved, skipped } = mapKeysToEnvVars(remote.keys);
     const envPath = resolveEnvFilePath();
     const results = upsertEnvVars(envPath, vars);
     const added = results.filter((r) => r.action === "added").map((r) => r.name);
@@ -82,6 +89,9 @@ async function pull() {
         console.log(`  updated:   ${updated.join(", ")}`);
     if (unchanged.length)
         console.log(`  unchanged: ${unchanged.join(", ")}`);
+    if (serverResolved.length) {
+        console.log(`  dashboard: ${serverResolved.join(", ")} — used server-side from Settings → Keys; no .env entry needed.`);
+    }
     if (skipped.length) {
         console.log(`  skipped:   ${skipped.join(", ")} (no known env var mapping)`);
     }

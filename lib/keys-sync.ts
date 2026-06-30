@@ -24,6 +24,16 @@ export const PROVIDER_ENV_MAP: Record<string, string> = {
   kie: "KIE_API_KEY",
 };
 
+// Providers the dashboard stores but that have NO local `.env` mapping by
+// design — they're resolved server-side per run from the member's encrypted
+// dashboard keys (strict BYOK), never read from process.env on the local host.
+// `imgflip` is a username+password JSON blob, not a flat API key, and the old
+// shared-account env fallback (IMGFLIP_USERNAME / IMGFLIP_PASSWORD) was removed
+// (see src/lib/meme/imgflip.ts). So `keys pull` must NOT write it to `.env` and
+// must NOT report it as an unknown-mapping skip — it's expected + already usable
+// from the dashboard. (#325)
+export const SERVER_RESOLVED_PROVIDERS = new Set<string>(["imgflip"]);
+
 export interface RemoteKeys {
   /** provider → plaintext key (only providers the user has set) */
   keys: Record<string, string>;
@@ -113,20 +123,26 @@ export function upsertEnvVars(
 }
 
 /**
- * Map remote provider keys to their env-var names. Unknown providers (not in
- * PROVIDER_ENV_MAP) are skipped rather than written under a guessed name.
+ * Map remote provider keys to their env-var names. A provider lands in one of
+ * three buckets: written to `.env` (in PROVIDER_ENV_MAP), `serverResolved`
+ * (intentionally dashboard-only, e.g. imgflip — present + usable but has no
+ * `.env` mapping by design), or `skipped` (genuinely unknown — not written
+ * under a guessed name). Keeping serverResolved separate stops `keys pull` from
+ * flagging an expected provider as a missing-mapping problem (#325).
  */
 export function mapKeysToEnvVars(
   keys: Record<string, string>,
-): { vars: Record<string, string>; skipped: string[] } {
+): { vars: Record<string, string>; serverResolved: string[]; skipped: string[] } {
   const vars: Record<string, string> = {};
+  const serverResolved: string[] = [];
   const skipped: string[] = [];
   for (const [provider, value] of Object.entries(keys)) {
     const envName = PROVIDER_ENV_MAP[provider];
     if (envName) vars[envName] = value;
+    else if (SERVER_RESOLVED_PROVIDERS.has(provider)) serverResolved.push(provider);
     else skipped.push(provider);
   }
-  return { vars, skipped };
+  return { vars, serverResolved, skipped };
 }
 
 function formatEnvValue(value: string): string {

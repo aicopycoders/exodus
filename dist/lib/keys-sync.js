@@ -8,6 +8,7 @@ export const PROVIDER_ENV_MAP = {
     elevenlabs: "ELEVENLABS_API_KEY",
     kie: "KIE_API_KEY",
 };
+export const SERVER_RESOLVED_PROVIDERS = new Set(["imgflip"]);
 export async function fetchRemoteKeys() {
     const res = await apiGetDashboard("/api/settings/keys");
     if (!res.ok) {
@@ -70,15 +71,18 @@ export function upsertEnvVars(filePath, vars) {
 }
 export function mapKeysToEnvVars(keys) {
     const vars = {};
+    const serverResolved = [];
     const skipped = [];
     for (const [provider, value] of Object.entries(keys)) {
         const envName = PROVIDER_ENV_MAP[provider];
         if (envName)
             vars[envName] = value;
+        else if (SERVER_RESOLVED_PROVIDERS.has(provider))
+            serverResolved.push(provider);
         else
             skipped.push(provider);
     }
-    return { vars, skipped };
+    return { vars, serverResolved, skipped };
 }
 function formatEnvValue(value) {
     if (/[\s#'"]/.test(value)) {
