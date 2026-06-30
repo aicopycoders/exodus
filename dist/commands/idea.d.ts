@@ -50,6 +50,7 @@ export type IdeaAction = {
     kind: "error";
     message: string;
 };
+export declare function runsWillPauseAtHooks(stopAtHooks: boolean | undefined, savedPref: "manual" | "auto" | null): boolean;
 export declare function resolveIdeaAction(positionals: string[], flags: Record<string, string | boolean>): IdeaAction;
 export declare function run(flags: Record<string, string | boolean>): Promise<void>;
 export {};

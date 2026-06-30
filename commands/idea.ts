@@ -98,6 +98,31 @@ function resolveStopAtHooks(flags: Record<string, string | boolean>): boolean | 
 }
 
 /**
+ * Will dispatched runs pause at the hook gate? Pure mirror of the server gate
+ * (genesis.startRun): an explicit --stop-at-hooks/--auto-hooks wins; otherwise
+ * the user's saved hook-pref decides (manual → pause). Drives whether the CLI
+ * prints the pause hint — so a bare `idea write` with a saved manual default
+ * still tells the user to review hooks instead of the misleading "fire-and-
+ * forget" line (#322).
+ */
+export function runsWillPauseAtHooks(
+  stopAtHooks: boolean | undefined,
+  savedPref: "manual" | "auto" | null,
+): boolean {
+  if (typeof stopAtHooks === "boolean") return stopAtHooks;
+  return savedPref === "manual";
+}
+
+/** Fetch the user's saved hook-pref; null on error or unset. Only consulted on a
+ *  flagless write, where the server falls back to it. */
+async function fetchSavedHookPref(): Promise<"manual" | "auto" | null> {
+  const res = await apiGet<{ preference?: "manual" | "auto" | null }>(
+    "/api/v2/genesis/hook-pref",
+  );
+  return res.ok ? (res.data.preference ?? null) : null;
+}
+
+/**
  * `idea write`/`idea organic --write` dispatch N runs fire-and-forget, so they
  * can't run the single-run interactive pick loop `exodus genesis` does. When the
  * gate is on (manual), each run pauses at hook selection — point the user at the
@@ -312,7 +337,13 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         }
         if (result.dispatched.length === 0) { console.error("No reel produced a usable idea — nothing written."); process.exit(1); }
         for (const d of result.dispatched) console.log(`  ✓ banked ${d.key} → Genesis run ${d.runId}`);
-        if (action.stopAtHooks === true) printHookPauseHint(result.dispatched);
+        // Mirror the server gate so a bare write with a saved manual default
+        // still surfaces the pause hint (#322).
+        const willPause = runsWillPauseAtHooks(
+          action.stopAtHooks,
+          action.stopAtHooks === undefined ? await fetchSavedHookPref() : null,
+        );
+        if (willPause) printHookPauseHint(result.dispatched);
         console.log("");
         console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
         return;
@@ -408,10 +439,22 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       if (!res.ok) { console.log(formatError(res)); process.exit(1); }
       const dispatched = res.data.dispatched ?? [];
       const skipped = res.data.skipped ?? [];
-      console.log(`Dispatched ${dispatched.length} run(s) — fire-and-forget.`);
+      // Did these runs pause server-side? Mirror the server gate: explicit flag
+      // wins; on a bare write the server falls back to the saved hook-pref, so
+      // consult it here too — otherwise a manual-default user is told "fire-and-
+      // forget" while the runs actually wait for hook selection (#322).
+      const willPause = runsWillPauseAtHooks(
+        action.stopAtHooks,
+        action.stopAtHooks === undefined ? await fetchSavedHookPref() : null,
+      );
+      console.log(
+        willPause
+          ? `Dispatched ${dispatched.length} run(s).`
+          : `Dispatched ${dispatched.length} run(s) — fire-and-forget.`,
+      );
       for (const d of dispatched) console.log(`  ${d.key} → run ${d.runId}`);
       for (const s of skipped) console.log(`  skipped ${s.key}: ${s.reason}`);
-      if (action.stopAtHooks === true) printHookPauseHint(dispatched);
+      if (willPause) printHookPauseHint(dispatched);
       console.log("");
       console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
       return;

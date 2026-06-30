@@ -67,6 +67,15 @@ function resolveStopAtHooks(flags) {
         return false;
     return undefined;
 }
+export function runsWillPauseAtHooks(stopAtHooks, savedPref) {
+    if (typeof stopAtHooks === "boolean")
+        return stopAtHooks;
+    return savedPref === "manual";
+}
+async function fetchSavedHookPref() {
+    const res = await apiGet("/api/v2/genesis/hook-pref");
+    return res.ok ? (res.data.preference ?? null) : null;
+}
 function printHookPauseHint(dispatched) {
     if (dispatched.length === 0)
         return;
@@ -250,7 +259,8 @@ export async function run(flags) {
                 }
                 for (const d of result.dispatched)
                     console.log(`  ✓ banked ${d.key} → Genesis run ${d.runId}`);
-                if (action.stopAtHooks === true)
+                const willPause = runsWillPauseAtHooks(action.stopAtHooks, action.stopAtHooks === undefined ? await fetchSavedHookPref() : null);
+                if (willPause)
                     printHookPauseHint(result.dispatched);
                 console.log("");
                 console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
@@ -335,12 +345,15 @@ export async function run(flags) {
             }
             const dispatched = res.data.dispatched ?? [];
             const skipped = res.data.skipped ?? [];
-            console.log(`Dispatched ${dispatched.length} run(s) — fire-and-forget.`);
+            const willPause = runsWillPauseAtHooks(action.stopAtHooks, action.stopAtHooks === undefined ? await fetchSavedHookPref() : null);
+            console.log(willPause
+                ? `Dispatched ${dispatched.length} run(s).`
+                : `Dispatched ${dispatched.length} run(s) — fire-and-forget.`);
             for (const d of dispatched)
                 console.log(`  ${d.key} → run ${d.runId}`);
             for (const s of skipped)
                 console.log(`  skipped ${s.key}: ${s.reason}`);
-            if (action.stopAtHooks === true)
+            if (willPause)
                 printHookPauseHint(dispatched);
             console.log("");
             console.log("Track them:  exodus idea list   (status flips to 'written' with a doc link)");
