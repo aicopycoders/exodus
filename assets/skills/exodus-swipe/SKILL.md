@@ -46,7 +46,7 @@ Examples of good steering:
 
 **Awareness is your call** — state your read rather than making the user pick: "this reads problem-aware because X — sound right?" Default `problem-aware` when unsure. The primer is awareness-keyed, so pick one level.
 
-Then fire it in the background (capture + a Genesis run is well past the 10-min foreground window):
+Then fire it in the background (capture + a Genesis run exceeds Claude Code's foreground limit):
 
 ```bash
 npx @aicopycoders/exodus genesis --swipe-url "<url>" --steering "<what to model>" --awareness <level> [--passes n]

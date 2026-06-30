@@ -98,7 +98,7 @@ Save to `/tmp/genesis-seeds.txt` (one per line, `#` comments allowed), or pass `
 
 **Awareness is your call** (Principle 2) — state your read, don't make the user pick: "this reads problem-aware because X — sound right?" The primer is awareness-keyed: `--awareness` picks which of the brand's two foundation primers (`primerUnawareProblemAware` cold / `primerSolutionProductAware` warm) the bots receive. Default `problem-aware` when unsure. Pick ONE level; never mix buckets in a run.
 
-**Pass count is the user's knob** — if they didn't specify, surface a quick menu (1 pass / 2 variants recommended · 2 passes / 4 variants · more) rather than assuming. Always `run_in_background: true` — these runs are past the 10-min foreground cap.
+**Pass count is the user's knob** — if they didn't specify, surface a quick menu (1 pass / 2 variants recommended · 2 passes / 4 variants · more) rather than assuming. Always `run_in_background: true` — these runs exceed Claude Code's foreground limit. Never quote the user a finish time; just say it's running and you'll surface the Doc when it lands.
 
 ```bash
 # Resolve hook mode FIRST (see "Hook selection mode" below) — these commands

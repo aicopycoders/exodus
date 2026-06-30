@@ -124,7 +124,7 @@ Awareness picks the primer; never mix buckets in one run. Detail in `references/
 
 Skip the passes menu if the user already said how many, or whenever the mode is manual. Awareness you do *not* menu — that's your strategist call from Stage B; state it and move.
 
-Hand off to the `exodus-genesis` skill — it owns the run (the built-in 15-point QA, the in-Claude-Code hook review, the editing menu). Always background it; even the default run is ~12–15 min, past the 10-min foreground cap.
+Hand off to the `exodus-genesis` skill — it owns the run (the built-in 15-point QA, the in-Claude-Code hook review, the editing menu). Always background it — these runs run past Claude Code's foreground limit. Don't tell the user how long it'll take; say it's running and you'll surface the Doc when it lands.
 
 ```bash
 # Manual — review & pick hooks in Claude Code (one ad per pick; no passes):

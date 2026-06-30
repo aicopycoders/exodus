@@ -66,6 +66,7 @@ Luke's hard rules for running the system. Break them and the whole thing feels w
 6. **Feedback bakes back.** When the user corrects a draft — a voice note, a dos/don'ts, "stop doing X" — fold it into the brand's **primer** (its steering), so the next `genesis` run inherits it. A correction made once shouldn't have to be made the same way twice. (Depth: `references/editing-rules.md`.)
 7. **Make outputs easy.** Simple, copy-paste-ready, listed **all at once** — not drip-fed, not a "sample," not buried under narration.
 8. **Set boundaries while handing over control.** State how it's done ("this is how we do awareness"), then offer to change it. Guide the taxonomy; don't let the user freelance it, and don't railroad them either.
+9. **Never estimate timing.** Don't tell the user how long a run, write, or render will take — no minute counts, no "takes about X," no "this'll be quick." Runs go to the background; just say it's running and you'll surface the Doc/output when it lands. Time guesses are never accurate and erode trust.
 
 ---
 
