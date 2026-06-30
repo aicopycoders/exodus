@@ -6,6 +6,7 @@ exodus template — Fernando's Template pipeline (${AD_TYPES.length} AD_TYPES, r
 
 Usage:
   exodus template run --input "<ad brief or numbered ads>" [options]
+  exodus template status --id <runId>
   exodus template resume --id <runId>
   exodus template ad-types
   exodus template reptile-triggers
@@ -20,19 +21,24 @@ Run options:
   --realism off|realistic         Realism enforcement (default: off)
   --quantities <slug:N,slug:N>    Manual-mode per-type counts (e.g. "testimonial:3,hero:2")
   --requested-count N             Auto-mode total render target (optional)
-  --no-wait                       (default — no CLI-side polling endpoint yet)
+  --no-wait                       (default — kickoff is fire-and-forget; poll with status)
+
+Status options:
+  --id <runId>                    Template run to read back (status + render URLs)
 
 Resume options:
   --id <runId>                    Template run id to resume (#56 orphan finalization)
 
-Status polling:
-  The Convex HTTP route is POST-only. View live progress at the dashboard URL
-  printed at kickoff (or the dashboard's /creative-suite/template/sessions list).
+Status:
+  exodus template status --id <runId> prints the run status and the rendered
+  image URLs (GET /api/v2/template). Live progress is also on the dashboard URL
+  printed at kickoff.
 
 Examples:
   exodus template run --input "silver-threaded grounding sheets for inflammation"
   exodus template run --input "..." --aspect 9:16 --model nano-banana-pro --realism realistic
   exodus template run --input "..." --mode manual --quantities "testimonial:3,hero:2,ugc:4"
+  exodus template status --id <runId>
   exodus template resume --id <runId>
   exodus template ad-types
 `.trim();
@@ -167,7 +173,7 @@ async function runTemplate(flags) {
         console.log(`  triggerRunId: ${triggerRunId}`);
     console.log(`  dashboard:    ${dashboardUrlForRun(runId)}`);
     console.log("");
-    console.log("Status updates render live in the dashboard (no CLI status endpoint yet).");
+    console.log(`Poll status + pull render URLs:  exodus template status --id ${runId}`);
 }
 async function runResume(flags) {
     const runId = typeof flags["id"] === "string" ? flags["id"] : undefined;
@@ -193,6 +199,42 @@ async function runResume(flags) {
         console.log(`  triggerRunId:         ${triggerRunId}`);
     console.log(`  dashboard:            ${dashboardUrlForRun(runId)}`);
 }
+export function formatRenderLines(renders) {
+    if (!renders || renders.length === 0)
+        return [];
+    const lines = [`renders:      ${renders.length} (URLs below)`];
+    renders.forEach((r, i) => {
+        lines.push(`  ${String(i + 1).padStart(2)}. ${r.url}${r.adType ? `   (${r.adType})` : ""}`);
+    });
+    return lines;
+}
+async function runStatus(flags) {
+    const runId = typeof flags["id"] === "string" ? flags["id"] : undefined;
+    if (!runId) {
+        console.error("Error: template status requires --id <runId>.");
+        process.exit(1);
+        return;
+    }
+    const res = await apiGet(`/api/v2/template?runId=${encodeURIComponent(runId)}`);
+    if (!res.ok) {
+        console.error(formatError(res));
+        process.exit(1);
+        return;
+    }
+    const d = res.data;
+    console.log(`runId:        ${d._id ?? runId}`);
+    if (d.name)
+        console.log(`name:         ${d.name}`);
+    console.log(`status:       ${d.status ?? "—"}`);
+    if (d.completedImageCount !== undefined || d.requestedImageCount !== undefined) {
+        console.log(`progress:     ${d.completedImageCount ?? 0} / ${d.requestedImageCount ?? "?"} completed${d.failedImageCount ? `, ${d.failedImageCount} failed` : ""}`);
+    }
+    if (d.errorMessage)
+        console.log(`error:        ${d.errorMessage}`);
+    for (const line of formatRenderLines(d.renders))
+        console.log(line);
+    console.log(`dashboard:    ${dashboardUrlForRun(runId)}`);
+}
 export async function run(flags) {
     const sub = process.argv[3] ?? "";
     if (sub === "ad-types") {
@@ -207,12 +249,16 @@ export async function run(flags) {
         await runResume(flags);
         return;
     }
+    if (sub === "status") {
+        await runStatus(flags);
+        return;
+    }
     if (sub === "run") {
         await runTemplate(flags);
         return;
     }
     if (!sub || sub.startsWith("--")) {
-        console.error("Error: template requires a subcommand (run | resume | ad-types | reptile-triggers).");
+        console.error("Error: template requires a subcommand (run | resume | status | ad-types | reptile-triggers).");
         console.error("");
         console.error(helpText);
         process.exit(1);

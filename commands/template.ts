@@ -11,9 +11,9 @@
 //   exodus template reptile-triggers             Print the reptile triggers
 //
 // Notes:
-// - No CLI-side status polling. The Convex HTTP route is POST-only; status
-//   updates are dashboard-realtime via Convex subscriptions. The CLI returns
-//   the runId and a dashboard URL; --no-wait is implicit.
+// - Kickoff is fire-and-forget (--no-wait is implicit). Poll status + pull the
+//   rendered image URLs with `exodus template status --id <runId>` (GET
+//   /api/v2/template); live progress is also on the dashboard.
 // - --ref-image is NOT supported in V1 because the Convex HTTP kickoff route
 //   doesn't accept referenceImageIds. The dashboard Clerk-proxy route does,
 //   but the CLI auths via Bearer only. Follow-up: add ref-image plumbing
@@ -31,6 +31,7 @@ exodus template — Fernando's Template pipeline (${AD_TYPES.length} AD_TYPES, r
 
 Usage:
   exodus template run --input "<ad brief or numbered ads>" [options]
+  exodus template status --id <runId>
   exodus template resume --id <runId>
   exodus template ad-types
   exodus template reptile-triggers
@@ -45,19 +46,24 @@ Run options:
   --realism off|realistic         Realism enforcement (default: off)
   --quantities <slug:N,slug:N>    Manual-mode per-type counts (e.g. "testimonial:3,hero:2")
   --requested-count N             Auto-mode total render target (optional)
-  --no-wait                       (default — no CLI-side polling endpoint yet)
+  --no-wait                       (default — kickoff is fire-and-forget; poll with status)
+
+Status options:
+  --id <runId>                    Template run to read back (status + render URLs)
 
 Resume options:
   --id <runId>                    Template run id to resume (#56 orphan finalization)
 
-Status polling:
-  The Convex HTTP route is POST-only. View live progress at the dashboard URL
-  printed at kickoff (or the dashboard's /creative-suite/template/sessions list).
+Status:
+  exodus template status --id <runId> prints the run status and the rendered
+  image URLs (GET /api/v2/template). Live progress is also on the dashboard URL
+  printed at kickoff.
 
 Examples:
   exodus template run --input "silver-threaded grounding sheets for inflammation"
   exodus template run --input "..." --aspect 9:16 --model nano-banana-pro --realism realistic
   exodus template run --input "..." --mode manual --quantities "testimonial:3,hero:2,ugc:4"
+  exodus template status --id <runId>
   exodus template resume --id <runId>
   exodus template ad-types
 `.trim();
@@ -244,7 +250,7 @@ async function runTemplate(flags: Record<string, string | boolean>): Promise<voi
   if (triggerRunId) console.log(`  triggerRunId: ${triggerRunId}`);
   console.log(`  dashboard:    ${dashboardUrlForRun(runId)}`);
   console.log("");
-  console.log("Status updates render live in the dashboard (no CLI status endpoint yet).");
+  console.log(`Poll status + pull render URLs:  exodus template status --id ${runId}`);
 }
 
 // ── Subcommand: resume ────────────────────────────────────────────
@@ -278,6 +284,69 @@ async function runResume(flags: Record<string, string | boolean>): Promise<void>
   console.log(`  dashboard:            ${dashboardUrlForRun(runId)}`);
 }
 
+// ── Subcommand: status ────────────────────────────────────────────
+
+interface TemplateRender {
+  url: string;
+  adType?: string;
+  status?: string;
+  model?: string;
+}
+
+interface TemplateStatusResponse {
+  _id?: string;
+  name?: string;
+  status?: string;
+  requestedImageCount?: number;
+  completedImageCount?: number;
+  failedImageCount?: number;
+  renders?: TemplateRender[];
+  errorMessage?: string;
+  [key: string]: unknown;
+}
+
+/** Print the rendered template image URLs (with ad-type) so renders are
+ *  retrievable from the CLI, not just countable (#323). Pure → testable. */
+export function formatRenderLines(renders: TemplateRender[] | undefined): string[] {
+  if (!renders || renders.length === 0) return [];
+  const lines = [`renders:      ${renders.length} (URLs below)`];
+  renders.forEach((r, i) => {
+    lines.push(`  ${String(i + 1).padStart(2)}. ${r.url}${r.adType ? `   (${r.adType})` : ""}`);
+  });
+  return lines;
+}
+
+async function runStatus(flags: Record<string, string | boolean>): Promise<void> {
+  const runId = typeof flags["id"] === "string" ? flags["id"] : undefined;
+  if (!runId) {
+    console.error("Error: template status requires --id <runId>.");
+    process.exit(1);
+    return;
+  }
+  const res = await apiGet<TemplateStatusResponse>(
+    `/api/v2/template?runId=${encodeURIComponent(runId)}`,
+  );
+  if (!res.ok) {
+    console.error(formatError(res));
+    process.exit(1);
+    return;
+  }
+  const d = res.data;
+  console.log(`runId:        ${d._id ?? runId}`);
+  if (d.name) console.log(`name:         ${d.name}`);
+  console.log(`status:       ${d.status ?? "—"}`);
+  if (d.completedImageCount !== undefined || d.requestedImageCount !== undefined) {
+    console.log(
+      `progress:     ${d.completedImageCount ?? 0} / ${d.requestedImageCount ?? "?"} completed${
+        d.failedImageCount ? `, ${d.failedImageCount} failed` : ""
+      }`,
+    );
+  }
+  if (d.errorMessage) console.log(`error:        ${d.errorMessage}`);
+  for (const line of formatRenderLines(d.renders)) console.log(line);
+  console.log(`dashboard:    ${dashboardUrlForRun(runId)}`);
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 export async function run(flags: Record<string, string | boolean>): Promise<void> {
@@ -298,13 +367,17 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     await runResume(flags);
     return;
   }
+  if (sub === "status") {
+    await runStatus(flags);
+    return;
+  }
   if (sub === "run") {
     await runTemplate(flags);
     return;
   }
 
   if (!sub || sub.startsWith("--")) {
-    console.error("Error: template requires a subcommand (run | resume | ad-types | reptile-triggers).");
+    console.error("Error: template requires a subcommand (run | resume | status | ad-types | reptile-triggers).");
     console.error("");
     console.error(helpText);
     process.exit(1);

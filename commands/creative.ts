@@ -62,6 +62,14 @@ interface CreativeRunResponse {
   error?: string;
 }
 
+interface CreativeImage {
+  url: string;
+  source?: string;
+  cNumber?: string;
+  title?: string;
+  model?: string;
+}
+
 interface CreativeStatusResponse {
   _id: string;
   name?: string;
@@ -73,6 +81,7 @@ interface CreativeStatusResponse {
   failedImages?: number;
   isTerminal?: boolean;
   errorMessage?: string;
+  images?: CreativeImage[];
   [key: string]: unknown;
 }
 
@@ -252,11 +261,28 @@ async function runStatus(flags: Record<string, string | boolean>): Promise<void>
     console.log(`progress:     ${d.completedImages ?? 0} / ${d.totalImages ?? "?"} completed${
       d.failedImages ? `, ${d.failedImages} failed` : ""
     }`);
-  } else if (d.imageCount !== undefined) {
+  } else if (d.imageCount !== undefined && (!d.images || d.images.length === 0)) {
     console.log(`images:       ${d.imageCount}`);
   }
   if (d.errorMessage) console.log(`error:        ${d.errorMessage}`);
+  printImageUrls(d.images);
   console.log(`dashboard:    ${getDashboardUrl()}/creative-suite/runs/${runId}`);
+}
+
+/** Print rendered image URLs (with a short label) so the run output is
+ *  retrievable from the CLI, not just countable (#323). */
+export function formatImageLines(images: CreativeImage[] | undefined): string[] {
+  if (!images || images.length === 0) return [];
+  const lines = [`images:       ${images.length} (URLs below)`];
+  images.forEach((im, i) => {
+    const label = [im.cNumber, im.source].filter(Boolean).join(" · ");
+    lines.push(`  ${String(i + 1).padStart(2)}. ${im.url}${label ? `   (${label})` : ""}`);
+  });
+  return lines;
+}
+
+function printImageUrls(images: CreativeImage[] | undefined): void {
+  for (const line of formatImageLines(images)) console.log(line);
 }
 
 // ── Entry point ───────────────────────────────────────────────────

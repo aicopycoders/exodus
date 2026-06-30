@@ -186,12 +186,27 @@ async function runStatus(flags) {
     if (d.completedImages !== undefined || d.totalImages !== undefined) {
         console.log(`progress:     ${d.completedImages ?? 0} / ${d.totalImages ?? "?"} completed${d.failedImages ? `, ${d.failedImages} failed` : ""}`);
     }
-    else if (d.imageCount !== undefined) {
+    else if (d.imageCount !== undefined && (!d.images || d.images.length === 0)) {
         console.log(`images:       ${d.imageCount}`);
     }
     if (d.errorMessage)
         console.log(`error:        ${d.errorMessage}`);
+    printImageUrls(d.images);
     console.log(`dashboard:    ${getDashboardUrl()}/creative-suite/runs/${runId}`);
+}
+export function formatImageLines(images) {
+    if (!images || images.length === 0)
+        return [];
+    const lines = [`images:       ${images.length} (URLs below)`];
+    images.forEach((im, i) => {
+        const label = [im.cNumber, im.source].filter(Boolean).join(" · ");
+        lines.push(`  ${String(i + 1).padStart(2)}. ${im.url}${label ? `   (${label})` : ""}`);
+    });
+    return lines;
+}
+function printImageUrls(images) {
+    for (const line of formatImageLines(images))
+        console.log(line);
 }
 export async function run(flags) {
     const sub = process.argv[3] ?? "";
