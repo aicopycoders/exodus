@@ -17,17 +17,16 @@ const OTHER_COMMANDS = new Set([
     "doctor",
     "init",
     "migrate",
-    "idea",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",
     "template",
+    "idea",
+    "swipe",
 ]);
 const EXAMPLES = [
     'exodus genesis run --brief "joint pain relief in 30 days" --variants 6',
     'exodus genesis run --brief brief.txt --seeds seeds.txt',
-    'exodus genesis --list-swipes',
-    'exodus genesis --swipe <id>',
     'exodus image --ad "grounding sheets reduce inflammation"',
     'exodus image --type template --input "1. first ad ... 2. second ad ..."',
     'exodus image --type ref-match --refs k57abc123,k57def456 --subject "morning routine"',

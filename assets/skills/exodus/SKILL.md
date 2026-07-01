@@ -1,11 +1,11 @@
 ---
 name: exodus
-description: The front door for ALL Exodus requests — the done-for-you ad system (copy pipelines, image engines, idea bank, brand onboarding) driven by the `npx @aicopycoders/exodus` CLI. Invoke whenever the user says "exodus" and hasn't already named a specific exodus-* skill — "exodus, write me some ads", "use exodus to make images", "exodus swipe this ad", "set up my brand in exodus", "what can exodus do", "show me my exodus runs". This skill reads the request and routes it to the right exodus-* skill; it never does the pipeline work itself. Only invoke when the user explicitly says "exodus" (or is clearly continuing an Exodus conversation) — never claim generic copywriting/image/idea requests; in shared folders those may belong to the user's other tools. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — if the user asks for "genesis" alone, they mean their own direct Genesis workflow, so do not route them here.
+description: The front door for ALL Exodus requests — the done-for-you ad system (copy pipelines, image engines, brand onboarding) driven by the `npx @aicopycoders/exodus` CLI. Invoke whenever the user says "exodus" and hasn't already named a specific exodus-* skill — "exodus, write me some ads", "use exodus to make images", "set up my brand in exodus", "what can exodus do", "show me my exodus runs". This skill reads the request and routes it to the right exodus-* skill; it never does the pipeline work itself. Only invoke when the user explicitly says "exodus" (or is clearly continuing an Exodus conversation) — never claim generic copywriting/image/idea requests; in shared folders those may belong to the user's other tools. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — if the user asks for "genesis" alone, they mean their own direct Genesis workflow, so do not route them here.
 ---
 
 # Exodus — the front door
 
-Exodus is the done-for-you ad system: pre-built pipelines that run Luke's full creative process (writing, images, ideas, onboarding) through the `npx @aicopycoders/exodus` CLI against the member's brand workspace. The member's only setup is the `EXODUS_API_KEY` already in this folder's `.env` — Exodus handles its own Genesis access internally; the user never configures a Genesis key for Exodus.
+Exodus is the done-for-you ad system: pre-built pipelines that run Luke's full creative process (writing, images, onboarding) through the `npx @aicopycoders/exodus` CLI against the member's brand workspace. The member's only setup is the `EXODUS_API_KEY` already in this folder's `.env` — Exodus handles its own Genesis access internally; the user never configures a Genesis key for Exodus.
 
 This skill ROUTES. Read what the user wants, name the destination skill, and hand off to it. Don't run pipelines from here.
 
@@ -14,12 +14,10 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | The user wants… | Route to |
 |---|---|
 | Write ad copy, has a brief, "where do I start" | `exodus-write` (the copy front door — it sequences onboarding → writing) |
-| Run the full writing pipeline on a brief / winning ad / pasted reel | `exodus-genesis` |
+| Run the full writing pipeline on a brief | `exodus-genesis` |
 | Static image ads ("make images", "statics", "render this ad") | `exodus-image` (the image front door — it menus engines and confirms before firing) |
 | A specific image engine they already chose | `exodus-creative` (native / copy-derived / ref-match) or `exodus-template` (33 ad-type formats) |
 | Meme ads ("exodus, meme this offer", "make me meme ads") | `exodus-meme` |
-| Capture/curate/write from the Idea Bank | `exodus-idea` |
-| Swipe a Facebook Ad Library ad | `exodus-swipe` |
 | Onboard a new brand / build the primer | `exodus-primer` (with winning ads) or `exodus-foundation` (no ads yet) |
 | List/switch/troubleshoot brands | `exodus-brand` |
 | See past runs / find an output | `exodus-browse` |

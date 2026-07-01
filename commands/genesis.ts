@@ -13,58 +13,26 @@ export const helpText = `
 exodus genesis — write ads with the Genesis writer (Mario + Infeed, 1 pass each by default)
 
 Genesis is the one writing pipeline (Mario + Infeed voices → body copy → QA →
-Google Doc). Every mode below feeds that same writer; they differ only in where
-the inspiration comes from.
+Google Doc). Write from a typed brief.
 
 Usage:
   exodus genesis run --brief <file|"text">   Write from a typed brief
-  exodus genesis --reel "<url>"              Mode 1: transcribe a reel → idea bank → write ads
-  exodus genesis --swipe-url "<url>"         Swipe: scrape a Facebook Ad Library link → idea bank → write ads
-  exodus genesis --from-bank                 Mode 2: list banked reels to write from
-  exodus genesis --from-bank --idea <id>     Mode 2: write from a specific banked reel
-  exodus genesis --list-swipes               Swipe: list saved competitor ads to write from
-  exodus genesis --swipe <id>                Swipe: write from a saved competitor ad (model after it)
-  exodus genesis scrape [--organic]          Mode 3: fill the idea bank for the active brand
-  exodus genesis connect-instagram           Mode 3: connect this brand's Instagram account
-
-Source (choose one):
-  --brief <file|"text">       Typed brief (file path or inline string)
-  --reel "<url>"              Instagram or TikTok reel URL to model
-  --swipe-url "<url>"         Facebook Ad Library link to swipe (scrape → hook → write)
-  --from-bank [--idea <id>]   Idea bank: list with no id, or write from <id>
-  --swipe <id>                Saved swipe (competitor ad): write modeled after <id>
-  --list-swipes               List saved swipes for your tracked competitors
 
 Options:
-  --steering "<text>"         With --swipe-url: what to model from the ad (angle,
-                              tone, structure) — folded into the brief as direction.
-                              With regenerate: re-roll guidance for the hook pool.
-  --seeds <file|"text">       Per-run creative seeds (brief mode). File: one per
-                              line OR a JSON array. Inline: a single seed.
+  --brief <file|"text">       Typed brief (file path or inline string)
+  --seeds <file|"text">       Per-run creative seeds. File: one per line OR a
+                              JSON array. Inline: a single seed.
+  --steering "<text>"         With regenerate: re-roll guidance for the hook pool.
   --awareness <level>         unaware | problem-aware (default) | solution-aware | product-aware
   --passes <n>                Writing passes per bot — Mario + Infeed (1-5, default 1 = 2 variants)
   --variants <n>              Advanced: raw total variant count (1-10); overrides --passes
   --ad-account <id>           Meta ad account ID for the top-ads-biased track
-  --limit <n>                 Rows when listing the bank (default 20)
   --no-wait                   Return immediately with the run ID
   --wait                      Poll until the run completes (default)
 
-Scrape (Mode 3) options:
-  --organic                   Authenticated FYP walk via the connected IG account
-  --term "<search>"           Fresh ScrapeCreators discovery scoped to a term (no IG login needed)
-  --smoke                     With --organic: shorter verification walk
-  --username <handle>         With connect-instagram: the IG handle being connected
-
 Examples:
+  exodus genesis run --brief "joint pain relief in 30 days" --variants 6
   exodus genesis run --brief brief.txt --seeds seeds.txt
-  exodus genesis --reel "https://www.instagram.com/reel/Cabc123/"
-  exodus genesis --swipe-url "https://www.facebook.com/ads/library/?id=2119680725509450"
-  exodus genesis --from-bank
-  exodus genesis --from-bank --idea kn7abc... --awareness solution-aware
-  exodus genesis --list-swipes
-  exodus genesis --swipe kn7abc... --awareness solution-aware
-  exodus genesis connect-instagram --username mybrandhandle
-  exodus genesis scrape --organic
 `.trim();
 
 /** Resolve --brief / --seeds: returns inline value, file contents, or empty. */

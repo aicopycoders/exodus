@@ -1,12 +1,11 @@
 ---
 name: exodus-genesis
-description: Run the standalone Exodus Genesis pipeline — Luke's full writing process. Hooks come from the dedicated new-hook-bot (a single ~10-hook pool); the human hook gate then lets the user review and pick those hooks RIGHT IN CLAUDE CODE (the primary venue; dashboard is ad-hoc) — each pick becomes one ad — or auto-pick and write straight through. Body copy is written across two voices (MarioBot + Infeed VSL) on the brand primer; in auto mode the default is one pass per bot = 2 variants and more passes widen coverage / bring in the Top-Ads-Biased primer (passes don't apply in manual mode). Includes the per-variant editing menu (Natural Language / Shorten / Cut / Simplify / Make Better). `--reel` also writes ads on the spot from a pasted Instagram/TikTok reel — it transcribes the reel into an idea and writes it through this same writer (just another input, nothing custom); to COLLECT reels/ideas into a bank to curate before writing, that's the `exodus-idea` skill. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("run the exodus genesis pipeline", "exodus, run another pass", "exodus, make me ads from this reel"), named this skill or /exodus-genesis, ran an `npx exodus` command, or the `exodus` hub skill routed here. Never claim generic requests ("run the Genesis pipeline", "write ads from this reel") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — never hijack their direct Genesis workflows into this pipeline.
+description: Run the standalone Exodus Genesis pipeline — Luke's full writing process. Hooks come from the dedicated new-hook-bot (a single ~10-hook pool); the human hook gate then lets the user review and pick those hooks RIGHT IN CLAUDE CODE (the primary venue; dashboard is ad-hoc) — each pick becomes one ad — or auto-pick and write straight through. Body copy is written across two voices (MarioBot + Infeed VSL) on the brand primer; in auto mode the default is one pass per bot = 2 variants and more passes widen coverage / bring in the Top-Ads-Biased primer (passes don't apply in manual mode). Includes the per-variant editing menu (Natural Language / Shorten / Cut / Simplify / Make Better). Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("run the exodus genesis pipeline", "exodus, run another pass"), named this skill or /exodus-genesis, ran an `npx exodus` command, or the `exodus` hub skill routed here. Never claim generic requests ("run the Genesis pipeline") — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus — never hijack their direct Genesis workflows into this pipeline.
 ---
 
 ```operator-guide
-Inputs (choose one source):
+Input:
   brief — concept, derived hook, or paste of the source ad   (genesis run --brief)
-  reel  — an Instagram/TikTok reel URL to write ads from      (genesis --reel "<url>")
 Optional:
   seeds — per-run creative angles extracted from the source ad
           (file path with one seed per line, OR an inline string)
@@ -64,22 +63,12 @@ A brief covers: what the ad is about · what happens in it · the emotional core
 
 ```
 BRIEF: "[short evocative title]"
-Hook: "[verbatim hook if from a swipe/organic source, else a hook DIRECTION or leave open]"
+Hook: "[verbatim hook if the user gave one, else a hook DIRECTION or leave open]"
 Source: [where the idea came from]
 [1–2 paragraphs: scenario, emotional core, mechanism bridge, tone, why it works]
 ```
 
 Worked brief examples and the awareness→primer mapping are in `references/awareness-framework.md`. Hook direction and the vicious standard are in `references/hook-quality-checklist.md`.
-
-### 1b. Writing from a reel (`--reel`)
-
-When the user pastes an Instagram/TikTok reel and wants ads from it, you don't shape a brief by hand — the reel *is* the source. Fire it in the background:
-
-```bash
-npx @aicopycoders/exodus genesis --reel "<url>" --awareness <level> [--passes n]
-```
-
-This transcribes the reel into an Idea Bank "organic" idea, then writes that idea through this same Genesis writer (Mario + Infeed) — a reel is just another input to the standard writer. It banks the idea (so there's a reusable record) AND writes in one shot, returning a Genesis run. Capture is async, so it takes a beat longer than a typed brief before writing starts. If the reel is private/region-locked/has no transcript, capture yields nothing — surface that and ask for an alternate. When the user wants to collect several reels to curate *before* writing, route to the `exodus-idea` skill instead.
 
 ### 2. Extract seeds (when there's a source ad)
 

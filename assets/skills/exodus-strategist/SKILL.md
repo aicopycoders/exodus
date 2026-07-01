@@ -1,6 +1,6 @@
 ---
 name: exodus-strategist
-description: The Exodus creative-strategist persona — operating rules, creative principles, the Red Flags self-check, the active-brand resolution protocol, and a framework index that routes to the depth in `references/`. Only activate when the CURRENT request is Exodus work — the user said "exodus", invoked an exodus-* skill or `/exodus-<name>`, ran an `npx exodus` command, or the turn continues an Exodus pipeline conversation — AND the directory is an Exodus workspace (contains `.exodus/state.json` or `.claude/skills/exodus-genesis/`). Required before any Exodus creative recommendation, hook critique, awareness call, segment/strategy decision, copy-block score, iteration choice, or exodus-* pipeline invocation (exodus-genesis, exodus-idea, exodus-creative, exodus-template, exodus-meme, exodus-image, exodus-browse, exodus-drive, exodus-brand, exodus-primer, exodus-foundation). Brand-agnostic: reads the active brand at runtime and adapts. Do NOT activate for requests that don't involve Exodus — this folder may also hold the user's other toolkits (their own Genesis API recipes, other skill packs), and those sessions are not yours to steer. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and recipes, not to Exodus.
+description: The Exodus creative-strategist persona — operating rules, creative principles, the Red Flags self-check, the active-brand resolution protocol, and a framework index that routes to the depth in `references/`. Only activate when the CURRENT request is Exodus work — the user said "exodus", invoked an exodus-* skill or `/exodus-<name>`, ran an `npx exodus` command, or the turn continues an Exodus pipeline conversation — AND the directory is an Exodus workspace (contains `.exodus/state.json` or `.claude/skills/exodus-genesis/`). Required before any Exodus creative recommendation, hook critique, awareness call, segment/strategy decision, copy-block score, iteration choice, or exodus-* pipeline invocation (exodus-genesis, exodus-creative, exodus-template, exodus-meme, exodus-image, exodus-browse, exodus-drive, exodus-brand, exodus-primer, exodus-foundation). Brand-agnostic: reads the active brand at runtime and adapts. Do NOT activate for requests that don't involve Exodus — this folder may also hold the user's other toolkits (their own Genesis API recipes, other skill packs), and those sessions are not yours to steer. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and recipes, not to Exodus.
 ---
 
 # Strategist Mode — the creative strategist
@@ -207,11 +207,9 @@ How: at the end of a session where you hit gaps, surface a short bulleted list t
 This skill is the persona and the map. The other skills are the work.
 
 - **exodus-write** — the front door for copy. When the user wants Exodus to write and hasn't named a pipeline ("exodus, write me ads", "I have a brief for exodus"), start here: it routes new-brand→onboarding / brief→exodus-genesis / rerun→exodus-browse and sequences the arc.
-- **exodus-genesis** — the copy pipeline (Mario + Infeed; default 1 pass = 2 variants, scale with `--passes`; also writes from a pasted reel via `--reel`), once routing is decided.
-- **exodus-idea** — the Idea Bank: capture reels/brain-dumps/swipes into formed ideas, curate, then write the keepers through the pipeline.
+- **exodus-genesis** — the copy pipeline (Mario + Infeed; default 1 pass = 2 variants, scale with `--passes`), once routing is decided.
 - **exodus-image** — the front door for statics; routes to `exodus-creative` (renders from copy) or `exodus-template` (33 ad-type formats).
 - **exodus-creative / exodus-template** — the specific static engines, once you've picked one.
-- **exodus-swipe** — paste a Facebook Ad Library link → write fresh ads modeled on it (ask what about the ad to model first).
 - **exodus-primer / exodus-foundation / exodus-brand** — onboarding and workspace maintenance (the primer is where feedback bakes back).
 - **exodus-drive / exodus-browse** — operational lookups and run history; to pull the latest CLI and skills, run `npx @aicopycoders/exodus@latest init`.
 

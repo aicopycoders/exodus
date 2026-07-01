@@ -27,25 +27,28 @@ const OTHER_COMMANDS = new Set([
   "doctor",
   "init",
   "migrate",
-  "idea",
 ]);
 
 // Commands kept runnable (back-compat / power users) but hidden from the
-// top-level --help Pipeline list because a single front door now fronts them.
+// top-level --help Pipeline list.
 // `image` is the front door for static-image creation; `creative` and
 // `template` are its engines — drive them via `exodus image` or call them
 // directly with `exodus creative …` / `exodus template …`.
+// `idea` (Idea Bank) and `swipe` (competitor watchlist) front the deferred
+// "write from a source other than a brief" surface — only brief-mode writing
+// ships today, so they stay runnable for power users but are unadvertised
+// until that layer is production-ready.
 const HIDDEN_COMMANDS = new Set([
   "creative",
   "template",
+  "idea",
+  "swipe",
 ]);
 
 // Curated examples; each is shown only if its leading command is installed.
 const EXAMPLES = [
   'exodus genesis run --brief "joint pain relief in 30 days" --variants 6',
   'exodus genesis run --brief brief.txt --seeds seeds.txt',
-  'exodus genesis --list-swipes',
-  'exodus genesis --swipe <id>',
   'exodus image --ad "grounding sheets reduce inflammation"',
   'exodus image --type template --input "1. first ad ... 2. second ad ..."',
   'exodus image --type ref-match --refs k57abc123,k57def456 --subject "morning routine"',
