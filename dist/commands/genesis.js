@@ -239,6 +239,8 @@ export async function run(flags) {
         return runContinue(flags, cc);
     if (sub === "regenerate")
         return runRegenerate(flags, cc);
+    if (sub === "reject")
+        return runReject(flags, cc);
     if (sub === "hooks")
         return runHooks(flags);
     const action = resolveGenesisAction(flags);
@@ -574,6 +576,22 @@ async function runRegenerate(flags, cc) {
         ? `Regenerating hooks for run ${runId} with steering…`
         : `Regenerating hooks for run ${runId}…`);
     await waitForGenesisRun(runId);
+}
+async function runReject(flags, cc) {
+    const runId = typeof flags["id"] === "string" ? flags["id"].trim() : "";
+    if (!runId) {
+        console.error("Usage: exodus genesis reject --id <runId> [--superseded-by <newRunId>]");
+        process.exit(1);
+    }
+    const supersededBy = typeof flags["superseded-by"] === "string" ? flags["superseded-by"].trim() : "";
+    const res = await apiPost("/api/v2/genesis/reject", supersededBy ? { runId, supersededByRunId: supersededBy } : { runId }, { ccCommand: cc });
+    if (!res.ok) {
+        console.log(formatError(res));
+        process.exit(1);
+    }
+    console.log(`Run ${runId} rejected — marked superseded. Nothing further will run.`);
+    if (supersededBy)
+        console.log(`Linked replacement run: ${supersededBy}`);
 }
 function requireActiveBrand() {
     const slug = resolveActiveBrand().slug;

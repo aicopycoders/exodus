@@ -23,6 +23,7 @@ Hook gate (manual mode — review hooks in Claude Code):
   on pause the run prints a numbered hook pool, then:
   genesis continue   --id <runId> --hooks 1,3,5       write the picked hooks (one ad each)
   genesis regenerate --id <runId> [--steering "…"]    re-roll the pool (reject + steer)
+  genesis reject     --id <runId>                      abandon the run (terminal "superseded")
   genesis hooks      --id <runId>                      re-print the pool (fresh-session resume)
 ```
 
@@ -156,6 +157,14 @@ npx @aicopycoders/exodus genesis regenerate --id <runId> --steering "lead with t
 - The whole pool is **replaced** with a fresh set, the run re-pauses, and the new numbered list prints. Surface it the same way (verbatim, hook text only) and loop back to A or B. **Unlimited rounds** — keep re-rolling until the user picks or walks away.
 - Steering is **additive across rounds**: round 2's "punchier" stacks on round 1's "lead with the cost" — pass only the *new* direction each time; the backend accumulates.
 - If the user references a specific hook ("**7** is the closest but too aggressive"), **resolve that number to the real hook text yourself** and fold it into the steering you pass — e.g. `--steering "build on 'Your cortisol is wrecking your sleep' but soften the aggression"`. The CLI sends steering as plain text; the bot never sees your numbering.
+
+**C. Abandon the run (reject):** when the user is done with this run entirely — "kill it", "forget this one", or they're starting over with a different brief:
+```bash
+npx @aicopycoders/exodus genesis reject --id <runId>
+```
+- The run lands in the terminal **superseded** state — not failed, not awaiting anything — instead of sitting at the hook gate forever.
+- If they replaced it with a new run, link the two: `--superseded-by <newRunId>`.
+- Terminal: a rejected run cannot be continued or re-rolled afterward.
 
 **Fresh session / lost the list?** Re-fetch and reprint the pool any time with:
 ```bash
