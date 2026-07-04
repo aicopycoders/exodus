@@ -16,7 +16,12 @@
 //   ref-match. If variance becomes a real engine, add a subcommand here.
 // - Reference image ids must already exist in creativeSuiteImages (upload
 //   via the dashboard library for now; no Bearer-capable upload route).
-import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
+import {
+  apiGet,
+  apiGetDashboard,
+  apiPost,
+  getDashboardUrl,
+} from "../lib/client.js";
 import { formatError } from "../lib/format.js";
 
 export const helpText = `
@@ -227,32 +232,19 @@ async function runStatus(flags: Record<string, string | boolean>): Promise<void>
     return;
   }
   // Status route lives on the Next.js dashboard, not Convex HTTP. Bearer-auth
-  // landed via Max QA #34. We use a dashboard fetch because the route is at
-  // /api/creative-suite/runs/[id] under the Next app, not under Convex.
-  const dashUrl = `${getDashboardUrl()}/api/creative-suite/runs/${encodeURIComponent(runId)}`;
-  const apiKey =
-    process.env["EXODUS_API_KEY"] ??
-    process.env["VAD_API_KEY"] ??
-    "";
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  const fetchRes = await fetch(dashUrl, { method: "GET", headers });
-  const text = await fetchRes.text();
-  let data: CreativeStatusResponse | { error?: string };
-  try {
-    data = JSON.parse(text) as CreativeStatusResponse;
-  } catch {
-    console.error(`Non-JSON ${fetchRes.status} from /api/creative-suite/runs/${runId}: ${text.slice(0, 300)}`);
-    process.exit(1);
-    return;
-  }
-  if (!fetchRes.ok) {
-    const errMsg = (data as { error?: string }).error ?? `HTTP ${fetchRes.status}`;
+  // landed via Max QA #34. apiGetDashboard sends X-Active-Brand alongside the
+  // Bearer key (DEV-1): without it the server can't resolve the run's brand
+  // and brand-scoped reads come back 403.
+  const res = await apiGetDashboard<CreativeStatusResponse & { error?: string }>(
+    `/api/creative-suite/runs/${encodeURIComponent(runId)}`,
+  );
+  if (!res.ok) {
+    const errMsg = res.data.error ?? `HTTP ${res.status}`;
     console.error(`Error: ${errMsg}`);
     process.exit(1);
     return;
   }
-  const d = data as CreativeStatusResponse;
+  const d = res.data;
   console.log(`runId:        ${d._id}`);
   if (d.name) console.log(`name:         ${d.name}`);
   if (d.engine) console.log(`engine:       ${d.engine}`);

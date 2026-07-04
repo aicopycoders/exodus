@@ -1,4 +1,4 @@
-import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
+import { apiGet, apiGetDashboard, apiPost, getDashboardUrl, } from "../lib/client.js";
 import { formatError } from "../lib/format.js";
 export const helpText = `
 exodus creative — Creative-suite engines (native, copy-derived, ref-match)
@@ -152,31 +152,14 @@ async function runStatus(flags) {
         process.exit(1);
         return;
     }
-    const dashUrl = `${getDashboardUrl()}/api/creative-suite/runs/${encodeURIComponent(runId)}`;
-    const apiKey = process.env["EXODUS_API_KEY"] ??
-        process.env["VAD_API_KEY"] ??
-        "";
-    const headers = { "Content-Type": "application/json" };
-    if (apiKey)
-        headers["Authorization"] = `Bearer ${apiKey}`;
-    const fetchRes = await fetch(dashUrl, { method: "GET", headers });
-    const text = await fetchRes.text();
-    let data;
-    try {
-        data = JSON.parse(text);
-    }
-    catch {
-        console.error(`Non-JSON ${fetchRes.status} from /api/creative-suite/runs/${runId}: ${text.slice(0, 300)}`);
-        process.exit(1);
-        return;
-    }
-    if (!fetchRes.ok) {
-        const errMsg = data.error ?? `HTTP ${fetchRes.status}`;
+    const res = await apiGetDashboard(`/api/creative-suite/runs/${encodeURIComponent(runId)}`);
+    if (!res.ok) {
+        const errMsg = res.data.error ?? `HTTP ${res.status}`;
         console.error(`Error: ${errMsg}`);
         process.exit(1);
         return;
     }
-    const d = data;
+    const d = res.data;
     console.log(`runId:        ${d._id}`);
     if (d.name)
         console.log(`name:         ${d.name}`);
