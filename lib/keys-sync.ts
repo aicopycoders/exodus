@@ -32,7 +32,13 @@ export const PROVIDER_ENV_MAP: Record<string, string> = {
 // (see src/lib/meme/imgflip.ts). So `keys pull` must NOT write it to `.env` and
 // must NOT report it as an unknown-mapping skip — it's expected + already usable
 // from the dashboard. (#325)
-export const SERVER_RESOLVED_PROVIDERS = new Set<string>(["imgflip"]);
+// `scrapecreators` follows the same pattern: the Wild Source scraper key is
+// snapshotted onto the scraper run row server-side and decrypted in the
+// Trigger worker — the local host never reads it from .env.
+export const SERVER_RESOLVED_PROVIDERS = new Set<string>([
+  "imgflip",
+  "scrapecreators",
+]);
 
 export interface RemoteKeys {
   /** provider → plaintext key (only providers the user has set) */

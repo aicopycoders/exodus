@@ -25,6 +25,7 @@ const PROVIDER_LABEL = {
     elevenlabs: "ElevenLabs",
     kie: "Kie.ai",
     imgflip: "Imgflip",
+    scrapecreators: "ScrapeCreators",
 };
 async function status() {
     let remote;
