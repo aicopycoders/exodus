@@ -27,6 +27,7 @@ const OTHER_COMMANDS = new Set([
   "doctor",
   "init",
   "migrate",
+  "segment",
 ]);
 
 // Commands kept runnable (back-compat / power users) but hidden from the
@@ -105,7 +106,7 @@ async function buildHelp(): Promise<string> {
 
   const commonOptions = [
     "Common Options:",
-    "  --awareness <level>    Awareness level: unaware, problem-aware, solution-aware, product-aware",
+    "  --awareness <level>    Awareness level: unaware, problem-aware, solution-aware, product-aware, most-aware",
     "  --wait                 Wait for completion (default)",
     "  --no-wait              Return immediately after starting",
     "  --help, -h             Show help (top-level or per-subcommand)",

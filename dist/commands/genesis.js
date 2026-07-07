@@ -22,7 +22,7 @@ Options:
   --seeds <file|"text">       Per-run creative seeds. File: one per line OR a
                               JSON array. Inline: a single seed.
   --steering "<text>"         With regenerate: re-roll guidance for the hook pool.
-  --awareness <level>         unaware | problem-aware (default) | solution-aware | product-aware
+  --awareness <level>         unaware | problem-aware (default) | solution-aware | product-aware | most-aware
   --passes <n>                Writing passes per bot — Mario + Infeed (1-5, default 1 = 2 variants)
   --variants <n>              Advanced: raw total variant count (1-10); overrides --passes
   --ad-account <id>           Meta ad account ID for the top-ads-biased track

@@ -36,8 +36,8 @@ Genesis writer for that primer honors it on every run.
 
   <lane> is one of: bodyUnaware | bodyAware | hooks | headlines
   (aliases: body-unaware/unaware/problem-aware, body-aware/solution-aware/
-   product-aware, hook, headline). Setting just one of --always / --never
-   leaves the other field as-is.
+   product-aware/most-aware, hook, headline). Setting just one of --always /
+   --never leaves the other field as-is.
 
 Interactive build flags:
   --file <path>   Read the submission (winning ads + product info) from a file
@@ -397,6 +397,8 @@ const LANE_ALIASES = {
     solutionaware: "bodyAware",
     "product-aware": "bodyAware",
     productaware: "bodyAware",
+    "most-aware": "bodyAware",
+    mostaware: "bodyAware",
     hooks: "hooks",
     hook: "hooks",
     headlines: "headlines",

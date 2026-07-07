@@ -17,6 +17,7 @@ const OTHER_COMMANDS = new Set([
     "doctor",
     "init",
     "migrate",
+    "segment",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",
@@ -76,7 +77,7 @@ async function buildHelp() {
     const fmt = (rows) => rows.map(([n, s]) => `  ${n.padEnd(18)} ${s}`.trimEnd()).join("\n");
     const commonOptions = [
         "Common Options:",
-        "  --awareness <level>    Awareness level: unaware, problem-aware, solution-aware, product-aware",
+        "  --awareness <level>    Awareness level: unaware, problem-aware, solution-aware, product-aware, most-aware",
         "  --wait                 Wait for completion (default)",
         "  --no-wait              Return immediately after starting",
         "  --help, -h             Show help (top-level or per-subcommand)",

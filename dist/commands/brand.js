@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { apiGetDashboard, apiPostDashboard } from "../lib/client.js";
+import { sniffImageType, BRAND_IMAGE_MAX_BYTES } from "../lib/image-sniff.js";
 import { getActiveBrand, setActiveBrand, clearActiveBrand, findWorkspaceRoot, } from "../lib/state.js";
 import { detectLayout, ensureBrandDir, resolveActiveBrand, brandStateDir, brandDirFor, } from "../lib/layout.js";
 import { promptYesNo } from "../lib/prompts.js";
@@ -15,6 +16,9 @@ Subcommands:
   exodus brand current          Print the active brand
   exodus brand clear            Stop overriding the brand (use the key's default)
   exodus brand delete <slug>    Delete a brand you own (asks before removing the local folder)
+  exodus brand images add <files...> --kind founder|product|reference
+                                Upload brand-identity images (png/jpg/webp, max 15MB each)
+  exodus brand images list      Show the active brand's uploaded identity images
 
 Any user can create and own unlimited brands (\`brand create\`) — you do NOT
 need to be an admin, and brands are scoped to you (two users can have the
@@ -260,11 +264,166 @@ function runClear() {
         console.log("from here still target it (the folder wins over the pointer).");
     }
 }
+const BRAND_IMAGE_KINDS = ["founder", "product", "reference"];
+async function runImagesAdd(files, flags) {
+    const kind = typeof flags["kind"] === "string" ? flags["kind"] : "";
+    if (!BRAND_IMAGE_KINDS.includes(kind)) {
+        console.error(`Error: brand images add requires --kind ${BRAND_IMAGE_KINDS.join("|")}. ` +
+            `(Logo stays a dashboard upload — it replaces rather than appends.)`);
+        process.exit(1);
+        return;
+    }
+    if (files.length === 0) {
+        console.error("Error: brand images add requires at least one file.");
+        process.exit(1);
+        return;
+    }
+    const valid = [];
+    const skipped = [];
+    for (const file of files) {
+        let buf;
+        try {
+            buf = fs.readFileSync(file);
+        }
+        catch {
+            skipped.push({ file, reason: "unreadable (does the path exist?)" });
+            continue;
+        }
+        if (buf.length > BRAND_IMAGE_MAX_BYTES) {
+            skipped.push({
+                file,
+                reason: `too large (${(buf.length / 1024 / 1024).toFixed(1)}MB > 15MB)`,
+            });
+            continue;
+        }
+        const sniffed = sniffImageType(buf);
+        if (!sniffed) {
+            skipped.push({ file, reason: "not a png/jpg/webp (content check failed)" });
+            continue;
+        }
+        valid.push({ file, buf, mime: sniffed.mime });
+    }
+    for (const s of skipped) {
+        console.error(`  skipped ${path.basename(s.file)}: ${s.reason}`);
+    }
+    if (valid.length === 0) {
+        console.error("Error: no valid image files to upload.");
+        process.exit(1);
+        return;
+    }
+    const mint = await apiPostDashboard("/api/brands/images/upload-url", { count: valid.length });
+    if (!mint.ok || !Array.isArray(mint.data.urls)) {
+        console.error(`Error: ${mint.data.error ?? `HTTP ${mint.status} minting upload URLs`}`);
+        process.exit(1);
+        return;
+    }
+    const storageIds = [];
+    const uploadedFiles = [];
+    for (let i = 0; i < valid.length; i++) {
+        const { file, buf, mime } = valid[i];
+        try {
+            const res = await fetch(mint.data.urls[i], {
+                method: "POST",
+                headers: { "Content-Type": mime },
+                body: new Uint8Array(buf),
+            });
+            const body = JSON.parse(await res.text());
+            if (!res.ok || !body.storageId)
+                throw new Error(`HTTP ${res.status}`);
+            storageIds.push(body.storageId);
+            uploadedFiles.push(file);
+        }
+        catch (err) {
+            console.error(`  skipped ${path.basename(file)}: storage upload failed (${err instanceof Error ? err.message : String(err)})`);
+        }
+    }
+    if (storageIds.length === 0) {
+        console.error("Error: every storage upload failed.");
+        process.exit(1);
+        return;
+    }
+    const attach = await apiPostDashboard("/api/brands/images", {
+        kind,
+        storageIds,
+    });
+    if (!attach.ok) {
+        console.error(`Error: ${attach.data.error ?? `HTTP ${attach.status} attaching images`}`);
+        process.exit(1);
+        return;
+    }
+    for (const s of attach.data.skipped ?? []) {
+        console.error(`  server skipped ${s.storageId}: ${s.reason}`);
+    }
+    for (const f of uploadedFiles)
+        console.log(`  uploaded ${path.basename(f)}`);
+    console.log(`✓ ${kind}: ${attach.data.added} added (brand now has ${attach.data.total} ${kind} image${attach.data.total === 1 ? "" : "s"})`);
+}
+async function runImagesList() {
+    const res = await apiGetDashboard("/api/brands/images");
+    if (!res.ok) {
+        console.error(`Error: ${res.data.error ?? `HTTP ${res.status}`}`);
+        process.exit(1);
+        return;
+    }
+    console.log(`brand: ${res.data.brand}`);
+    for (const kind of BRAND_IMAGE_KINDS) {
+        const entries = res.data[kind] ?? [];
+        console.log(`${kind}: ${entries.length}`);
+        for (const e of entries) {
+            console.log(`  ${e.url ?? e.storageId}`);
+        }
+    }
+}
+function imagesPositionals() {
+    const rest = process.argv.slice(3);
+    const out = [];
+    let i = 0;
+    while (i < rest.length) {
+        const arg = rest[i];
+        if (arg === "--help" || arg === "-h") {
+            i++;
+            continue;
+        }
+        if (arg.startsWith("--")) {
+            const key = arg.slice(2);
+            const next = rest[i + 1];
+            if (key.startsWith("no-")) {
+                i++;
+            }
+            else if (next !== undefined && !next.startsWith("--")) {
+                i += 2;
+            }
+            else {
+                i++;
+            }
+            continue;
+        }
+        out.push(arg);
+        i++;
+    }
+    return out;
+}
+async function runImages(args, flags) {
+    const sub = args[0];
+    if (sub === "add") {
+        await runImagesAdd(args.slice(1), flags);
+        return;
+    }
+    if (sub === "list" || sub === undefined) {
+        await runImagesList();
+        return;
+    }
+    console.error(`exodus brand images: unknown subcommand "${sub}" (use add | list)`);
+    process.exit(1);
+}
 export async function run(flags) {
     const positionals = process.argv.slice(3).filter((a) => !a.startsWith("--"));
     const sub = positionals[0];
     const arg = positionals[1];
     switch (sub) {
+        case "images":
+            await runImages(imagesPositionals().slice(1), flags);
+            return;
         case "list":
         case undefined:
             await runList();

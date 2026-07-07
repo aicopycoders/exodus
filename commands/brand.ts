@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { apiGetDashboard, apiPostDashboard } from "../lib/client.js";
+import { sniffImageType, BRAND_IMAGE_MAX_BYTES } from "../lib/image-sniff.js";
 import {
   getActiveBrand,
   setActiveBrand,
@@ -29,6 +30,9 @@ Subcommands:
   exodus brand current          Print the active brand
   exodus brand clear            Stop overriding the brand (use the key's default)
   exodus brand delete <slug>    Delete a brand you own (asks before removing the local folder)
+  exodus brand images add <files...> --kind founder|product|reference
+                                Upload brand-identity images (png/jpg/webp, max 15MB each)
+  exodus brand images list      Show the active brand's uploaded identity images
 
 Any user can create and own unlimited brands (\`brand create\`) — you do NOT
 need to be an admin, and brands are scoped to you (two users can have the
@@ -395,6 +399,214 @@ function runClear(): void {
   }
 }
 
+// ── Subcommand: images (DEV-2) ────────────────────────────────────
+// Bearer-authed brand-identity uploads so onboarding agents never need the
+// dashboard UI. Validation is content-based (magic bytes) and per-file: one
+// bad file is skipped with a reason, the rest go through. Bytes go straight
+// to Convex storage via minted upload URLs — they never proxy through Vercel.
+
+const BRAND_IMAGE_KINDS = ["founder", "product", "reference"] as const;
+type BrandImageKind = (typeof BRAND_IMAGE_KINDS)[number];
+
+interface BrandImageEntry {
+  storageId: string;
+  url: string | null;
+  size?: number;
+  contentType?: string;
+}
+
+interface BrandImagesListResponse {
+  brand: string;
+  founder: BrandImageEntry[];
+  product: BrandImageEntry[];
+  reference: BrandImageEntry[];
+  error?: string;
+}
+
+interface AttachResponse {
+  added: number;
+  skipped: { storageId: string; reason: string }[];
+  total: number;
+  error?: string;
+}
+
+async function runImagesAdd(
+  files: string[],
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const kind = typeof flags["kind"] === "string" ? (flags["kind"] as string) : "";
+  if (!BRAND_IMAGE_KINDS.includes(kind as BrandImageKind)) {
+    console.error(
+      `Error: brand images add requires --kind ${BRAND_IMAGE_KINDS.join("|")}. ` +
+        `(Logo stays a dashboard upload — it replaces rather than appends.)`,
+    );
+    process.exit(1);
+    return;
+  }
+  if (files.length === 0) {
+    console.error("Error: brand images add requires at least one file.");
+    process.exit(1);
+    return;
+  }
+
+  // Client-side validation first: content sniff + size cap, per file.
+  const valid: { file: string; buf: Buffer; mime: string }[] = [];
+  const skipped: { file: string; reason: string }[] = [];
+  for (const file of files) {
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(file);
+    } catch {
+      skipped.push({ file, reason: "unreadable (does the path exist?)" });
+      continue;
+    }
+    if (buf.length > BRAND_IMAGE_MAX_BYTES) {
+      skipped.push({
+        file,
+        reason: `too large (${(buf.length / 1024 / 1024).toFixed(1)}MB > 15MB)`,
+      });
+      continue;
+    }
+    const sniffed = sniffImageType(buf);
+    if (!sniffed) {
+      skipped.push({ file, reason: "not a png/jpg/webp (content check failed)" });
+      continue;
+    }
+    valid.push({ file, buf, mime: sniffed.mime });
+  }
+  for (const s of skipped) {
+    console.error(`  skipped ${path.basename(s.file)}: ${s.reason}`);
+  }
+  if (valid.length === 0) {
+    console.error("Error: no valid image files to upload.");
+    process.exit(1);
+    return;
+  }
+
+  // Mint one upload URL per valid file, then POST bytes straight to storage.
+  const mint = await apiPostDashboard<{ urls: string[]; error?: string }>(
+    "/api/brands/images/upload-url",
+    { count: valid.length },
+  );
+  if (!mint.ok || !Array.isArray(mint.data.urls)) {
+    console.error(`Error: ${mint.data.error ?? `HTTP ${mint.status} minting upload URLs`}`);
+    process.exit(1);
+    return;
+  }
+  const storageIds: string[] = [];
+  const uploadedFiles: string[] = [];
+  for (let i = 0; i < valid.length; i++) {
+    const { file, buf, mime } = valid[i];
+    try {
+      const res = await fetch(mint.data.urls[i], {
+        method: "POST",
+        headers: { "Content-Type": mime },
+        body: new Uint8Array(buf),
+      });
+      const body = JSON.parse(await res.text()) as { storageId?: string };
+      if (!res.ok || !body.storageId) throw new Error(`HTTP ${res.status}`);
+      storageIds.push(body.storageId);
+      uploadedFiles.push(file);
+    } catch (err) {
+      console.error(
+        `  skipped ${path.basename(file)}: storage upload failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+  }
+  if (storageIds.length === 0) {
+    console.error("Error: every storage upload failed.");
+    process.exit(1);
+    return;
+  }
+
+  const attach = await apiPostDashboard<AttachResponse>("/api/brands/images", {
+    kind,
+    storageIds,
+  });
+  if (!attach.ok) {
+    console.error(`Error: ${attach.data.error ?? `HTTP ${attach.status} attaching images`}`);
+    process.exit(1);
+    return;
+  }
+  for (const s of attach.data.skipped ?? []) {
+    console.error(`  server skipped ${s.storageId}: ${s.reason}`);
+  }
+  for (const f of uploadedFiles) console.log(`  uploaded ${path.basename(f)}`);
+  console.log(
+    `✓ ${kind}: ${attach.data.added} added (brand now has ${attach.data.total} ${kind} image${attach.data.total === 1 ? "" : "s"})`,
+  );
+}
+
+async function runImagesList(): Promise<void> {
+  const res = await apiGetDashboard<BrandImagesListResponse>("/api/brands/images");
+  if (!res.ok) {
+    console.error(`Error: ${res.data.error ?? `HTTP ${res.status}`}`);
+    process.exit(1);
+    return;
+  }
+  console.log(`brand: ${res.data.brand}`);
+  for (const kind of BRAND_IMAGE_KINDS) {
+    const entries = res.data[kind] ?? [];
+    console.log(`${kind}: ${entries.length}`);
+    for (const e of entries) {
+      console.log(`  ${e.url ?? e.storageId}`);
+    }
+  }
+}
+
+/**
+ * True positionals after `exodus brand` — walks argv with the SAME pairing
+ * rules as bin/exodus.ts parseArgs, so a value-taking flag's value (`--kind
+ * founder`) is skipped along with its flag. The legacy `startsWith("--")`
+ * filter in run() keeps flag VALUES, which is harmless for the older
+ * subcommands (their positionals precede any flags) but would turn `--kind
+ * founder` into a phantom file path here.
+ */
+function imagesPositionals(): string[] {
+  const rest = process.argv.slice(3);
+  const out: string[] = [];
+  let i = 0;
+  while (i < rest.length) {
+    const arg = rest[i];
+    if (arg === "--help" || arg === "-h") {
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      const next = rest[i + 1];
+      if (key.startsWith("no-")) {
+        i++;
+      } else if (next !== undefined && !next.startsWith("--")) {
+        i += 2; // value-taking flag: skip the value too
+      } else {
+        i++;
+      }
+      continue;
+    }
+    out.push(arg);
+    i++;
+  }
+  return out;
+}
+
+async function runImages(
+  args: string[],
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const sub = args[0];
+  if (sub === "add") {
+    await runImagesAdd(args.slice(1), flags);
+    return;
+  }
+  if (sub === "list" || sub === undefined) {
+    await runImagesList();
+    return;
+  }
+  console.error(`exodus brand images: unknown subcommand "${sub}" (use add | list)`);
+  process.exit(1);
+}
+
 export async function run(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -403,6 +615,9 @@ export async function run(
   const arg = positionals[1];
 
   switch (sub) {
+    case "images":
+      await runImages(imagesPositionals().slice(1), flags);
+      return;
     case "list":
     case undefined:
       await runList();
