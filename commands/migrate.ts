@@ -9,6 +9,7 @@ import {
   ensureBrandDir,
   BRAND_MARKER_FILE,
 } from "../lib/layout.js";
+import { pkgRef } from "../lib/channel.js";
 
 export const helpText = `
 exodus migrate — convert a single-brand install to the multi-brand layout
@@ -21,7 +22,7 @@ What it does (one-time, opt-in — updates never force this):
      falling back to the key's bound brand).
   2. Creates a subfolder for it and MOVES your brand-specific files in:
      state/  and  output/  →  <brand>/state/  and  <brand>/output/
-  3. Marks the install as multi-brand. From then on, \`npx @aicopycoders/exodus@latest init\`
+  3. Marks the install as multi-brand. From then on, \`npx ${pkgRef()} init\`
      creates a subfolder for every brand you own, and running a command
      from inside a brand's folder targets that brand automatically.
 
@@ -118,7 +119,7 @@ async function resolveBrand(): Promise<{ slug: string; name: string }> {
   if (!slug) {
     fail(
       "could not determine which brand this install belongs to.\n" +
-        "  Run `npx @aicopycoders/exodus brand use <slug>` first (or check your network/.env), then re-run `npx @aicopycoders/exodus migrate`.",
+        `  Run \`npx ${pkgRef()} brand use <slug>\` first (or check your network/.env), then re-run \`npx ${pkgRef()} migrate\`.`,
     );
   }
 
@@ -145,7 +146,7 @@ export async function run(
 
   if (detectLayout(root) === "v2") {
     console.log("✓ Already on the multi-brand layout — nothing to migrate.");
-    console.log("  Run `npx @aicopycoders/exodus@latest init` to sync brand folders.");
+    console.log(`  Run \`npx ${pkgRef()} init\` to sync brand folders.`);
     return;
   }
 
@@ -167,7 +168,7 @@ export async function run(
     fail(
       `"${brandDirRel}/" already contains different versions of:\n` +
         conflicts.map((f) => `    ${f}`).join("\n") +
-        "\n  Reconcile or remove them, then re-run `npx @aicopycoders/exodus migrate`. Nothing was changed.",
+        `\n  Reconcile or remove them, then re-run \`npx ${pkgRef()} migrate\`. Nothing was changed.`,
     );
   }
 
@@ -199,8 +200,8 @@ export async function run(
   Shared files (.env, exodus/, .claude/skills/, references/) did not move.
 
 Next steps:
-  • Run \`npx @aicopycoders/exodus@latest init\` to pull folders for your other brands.
+  • Run \`npx ${pkgRef()} init\` to pull folders for your other brands.
   • Run commands from inside ${brandDirRel}/ to target it automatically,
-    or keep using \`npx @aicopycoders/exodus brand use <slug>\` from anywhere.
+    or keep using \`npx ${pkgRef()} brand use <slug>\` from anywhere.
 `.trimEnd());
 }

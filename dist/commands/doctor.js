@@ -7,6 +7,7 @@ import { findWorkspaceRoot } from "../lib/state.js";
 import { detectLayout, listBrandDirs, resolveActiveBrand, brandStateDir, } from "../lib/layout.js";
 import { auth401Hint, isPlaceholderApiUrl } from "../lib/backend-hint.js";
 import { compareVersions, readPackageVersion, } from "../lib/release.js";
+import { channelOf, pkgRef, stampChannel } from "../lib/channel.js";
 export const helpText = `
 exodus doctor — Preflight checks for your local Claude Code setup
 
@@ -58,7 +59,7 @@ export function checkEnvFile() {
         return {
             ok: false,
             label: ".env",
-            fix: "run `npx @aicopycoders/exodus init`, then paste your dashboard .env block (Settings → Claude Code → Copy .env block)",
+            fix: `run \`npx ${pkgRef()} init\`, then paste your dashboard .env block (Settings → Claude Code → Copy .env block)`,
         };
     }
     const content = fs.readFileSync(envPath, "utf8");
@@ -80,7 +81,7 @@ export function checkEnvFile() {
         ok: false,
         label: ".env",
         detail: "missing EXODUS_API_URL or EXODUS_API_KEY",
-        fix: "run `npx @aicopycoders/exodus init`, then paste your dashboard .env block (Settings → Claude Code → Copy .env block)",
+        fix: `run \`npx ${pkgRef()} init\`, then paste your dashboard .env block (Settings → Claude Code → Copy .env block)`,
     };
 }
 export async function checkWhoami() {
@@ -124,7 +125,7 @@ export async function checkWhoami() {
                 todo: true,
                 label: "Brand primer",
                 detail: `${d.workspaceSlug} has no primer yet — set one up to unlock the pipelines`,
-                fix: `say "exodus, set up my brand primer" (or run \`npx @aicopycoders/exodus foundation\` from a source doc, or paste it at /settings?tab=brands&brand=${d.workspaceSlug})`,
+                fix: `say "exodus, set up my brand primer" (or run \`npx ${pkgRef()} foundation\` from a source doc, or paste it at /settings?tab=brands&brand=${d.workspaceSlug})`,
             };
         }
         return {
@@ -182,7 +183,7 @@ export async function checkActiveBrandMatch() {
         ok: false,
         label: "Active brand",
         detail: `local active brand "${resolved.slug}" (${source}) is NOT in your accessible list — the server ignores it and every command silently targets the key's default brand. available: ${available}`,
-        fix: `run \`npx @aicopycoders/exodus brand use <slug>\` with one of your brands, or \`npx @aicopycoders/exodus brand clear\` to fall back to the key default`,
+        fix: `run \`npx ${pkgRef()} brand use <slug>\` with one of your brands, or \`npx ${pkgRef()} brand clear\` to fall back to the key default`,
     };
 }
 const FRESHNESS_SUBTREES = ["commands", "lib", "bin"];
@@ -251,7 +252,9 @@ export function checkExodusDistFreshness(pkgRootOverride) {
     }
     return { ok: true, label: "Exodus CLI build", detail: "dist up-to-date" };
 }
-const NPM_REGISTRY = "https://registry.npmjs.org/@aicopycoders/exodus/latest";
+function npmRegistryUrl(channel) {
+    return `https://registry.npmjs.org/@aicopycoders/exodus/${channel}`;
+}
 export async function checkVersionCurrency(pkgRootOverride, fetchImpl = fetch) {
     let pkgRoot;
     if (pkgRootOverride) {
@@ -265,28 +268,29 @@ export async function checkVersionCurrency(pkgRootOverride, fetchImpl = fetch) {
         }
     }
     const local = readPackageVersion(pkgRoot);
+    const channel = channelOf(local);
     try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 8_000);
         let res;
         try {
-            res = await fetchImpl(NPM_REGISTRY, { signal: ctrl.signal });
+            res = await fetchImpl(npmRegistryUrl(channel), { signal: ctrl.signal });
         }
         finally {
             clearTimeout(t);
         }
         if (!res.ok)
             throw new Error(`HTTP ${res.status}`);
-        const latest = (await res.json()).version;
-        if (compareVersions(local, latest) >= 0) {
+        const published = (await res.json()).version;
+        if (compareVersions(local, published) >= 0) {
             return { ok: true, label: "Exodus version", detail: `${local} — up to date` };
         }
         return {
             ok: true,
             warn: true,
             label: "Exodus version",
-            detail: `${local} installed, ${latest} available`,
-            fix: "run `npx @aicopycoders/exodus@latest init` to update (or `npm update -g @aicopycoders/exodus`)",
+            detail: `${local} installed, ${published} available`,
+            fix: `run \`npx ${pkgRef(channel)} init\` to update (or \`npm install -g ${pkgRef(channel)}\`)`,
         };
     }
     catch (err) {
@@ -326,7 +330,7 @@ export async function checkApiAndDrive() {
                 ok: false,
                 label: "Dashboard API key",
                 detail: `HTTP ${res.status}`,
-                fix: "regenerate at Settings → API Keys, then paste the new .env block (or re-run `npx @aicopycoders/exodus init`)",
+                fix: `regenerate at Settings → API Keys, then paste the new .env block (or re-run \`npx ${pkgRef()} init\`)`,
             },
             {
                 ok: false,
@@ -445,7 +449,9 @@ export async function checkDashboardAuth() {
             ok: false,
             label: "Dashboard auth (dashboard-routed pipelines)",
             detail: res.data?.error ?? "401 from /api/doctor/dashboard-ping",
-            fix: hint ?? "run `npx @aicopycoders/exodus@latest init` to update the CLI — older releases skipped the Bearer header on dashboard routes",
+            fix: hint
+                ? stampChannel(hint)
+                : `run \`npx ${pkgRef()} init\` to update the CLI — older releases skipped the Bearer header on dashboard routes`,
         };
     }
     return {
@@ -476,7 +482,7 @@ export function checkLayout() {
         return {
             ok: true,
             label: "Layout",
-            detail: "single-brand (legacy) — run `npx @aicopycoders/exodus migrate` to switch to the multi-brand layout",
+            detail: `single-brand (legacy) — run \`npx ${pkgRef()} migrate\` to switch to the multi-brand layout`,
         };
     }
     const brands = listBrandDirs(root);
@@ -490,7 +496,7 @@ export function checkLayout() {
             warn: true,
             label: "Layout",
             detail: `multi-brand — no brand folders yet; ${active}`,
-            fix: "run `npx @aicopycoders/exodus@latest init` (or `npx @aicopycoders/exodus brand use <slug>`) to create your brand folders",
+            fix: `run \`npx ${pkgRef()} init\` (or \`npx ${pkgRef()} brand use <slug>\`) to create your brand folders`,
         };
     }
     const missingProfiles = brands.filter((b) => !fs.existsSync(path.join(b.dir, "state", "brand-profile.md")));
@@ -500,7 +506,7 @@ export function checkLayout() {
             warn: true,
             label: "Layout",
             detail: `multi-brand, ${brands.length} brand folder(s); ${active}; missing brand profile in: ${missingProfiles.map((b) => b.slug).join(", ")}`,
-            fix: "run `npx @aicopycoders/exodus@latest init` to refresh every brand folder's profile",
+            fix: `run \`npx ${pkgRef()} init\` to refresh every brand folder's profile`,
         };
     }
     return {
@@ -518,7 +524,7 @@ export function checkBrandProfileGenesisDepth() {
             ok: false,
             label: "brand-profile",
             detail: `${rel} is missing`,
-            fix: "run `npx @aicopycoders/exodus brand use <slug>` to generate it",
+            fix: `run \`npx ${pkgRef()} brand use <slug>\` to generate it`,
         };
     }
     const contents = fs.readFileSync(filePath, "utf-8");

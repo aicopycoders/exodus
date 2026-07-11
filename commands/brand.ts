@@ -16,6 +16,7 @@ import {
   brandDirFor,
 } from "../lib/layout.js";
 import { promptYesNo } from "../lib/prompts.js";
+import { pkgRef } from "../lib/channel.js";
 
 const AUTO_END_MARKER =
   "<!-- exodus:auto-section-end — manual brand notes below survive `brand use` refreshes -->";
@@ -292,7 +293,7 @@ async function runCreate(name: string): Promise<void> {
 
   console.log(
     `\nNext: set up the brand's primer to unlock the pipelines —\n` +
-      `  say "exodus, set up my brand primer" (or run \`npx @aicopycoders/exodus primer\`).`,
+      `  say "exodus, set up my brand primer" (or run \`npx ${pkgRef()} primer\`).`,
   );
 }
 

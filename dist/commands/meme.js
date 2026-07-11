@@ -1,5 +1,6 @@
 import { apiPostDashboard, getDashboardUrl } from "../lib/client.js";
 import { formatError } from "../lib/format.js";
+import { pkgRef } from "../lib/channel.js";
 import { readFileSync } from "node:fs";
 export const helpText = `
 exodus meme — Meme generator: brief → recommended formats → one batched run
@@ -26,7 +27,7 @@ Flow:
 
 Keys (strict BYOK — checked server-side before anything starts):
   classic (layer 1) memes need your Imgflip login; AI (layer 2/3) memes need
-  your Kie.ai key; captions always need your LLM key. Run \`npx @aicopycoders/exodus doctor\`.
+  your Kie.ai key; captions always need your LLM key. Run \`npx ${pkgRef()} doctor\`.
 
 Examples:
   exodus meme recommend --brief "grounding sheets reduce inflammation"
@@ -114,7 +115,7 @@ async function runRecommend(flags) {
     if (!res.ok) {
         console.error(formatError(res));
         if (res.status === 400) {
-            console.error("Hint: run `npx @aicopycoders/exodus doctor` to check your keys.");
+            console.error(`Hint: run \`npx ${pkgRef()} doctor\` to check your keys.`);
         }
         process.exit(1);
         return;
@@ -171,7 +172,7 @@ async function runRun(flags) {
     if (!res.ok) {
         console.error(formatError(res));
         if (res.status === 400) {
-            console.error("Hint: run `npx @aicopycoders/exodus doctor` to check your keys.");
+            console.error(`Hint: run \`npx ${pkgRef()} doctor\` to check your keys.`);
         }
         process.exit(1);
         return;
@@ -233,7 +234,7 @@ async function runRegenerate(flags) {
     if (!res.ok) {
         console.error(formatError(res));
         if (res.status === 400) {
-            console.error("Hint: run `npx @aicopycoders/exodus doctor` to check your keys.");
+            console.error(`Hint: run \`npx ${pkgRef()} doctor\` to check your keys.`);
         }
         process.exit(1);
         return;

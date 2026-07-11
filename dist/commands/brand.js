@@ -5,6 +5,7 @@ import { sniffImageType, BRAND_IMAGE_MAX_BYTES } from "../lib/image-sniff.js";
 import { getActiveBrand, setActiveBrand, clearActiveBrand, findWorkspaceRoot, } from "../lib/state.js";
 import { detectLayout, ensureBrandDir, resolveActiveBrand, brandStateDir, brandDirFor, } from "../lib/layout.js";
 import { promptYesNo } from "../lib/prompts.js";
+import { pkgRef } from "../lib/channel.js";
 const AUTO_END_MARKER = "<!-- exodus:auto-section-end — manual brand notes below survive `brand use` refreshes -->";
 export const helpText = `
 exodus brand — list, switch, and inspect brands available to your CLI
@@ -180,7 +181,7 @@ async function runCreate(name) {
         console.log(`✓ Wrote ${refresh.pathRel}.`);
     }
     console.log(`\nNext: set up the brand's primer to unlock the pipelines —\n` +
-        `  say "exodus, set up my brand primer" (or run \`npx @aicopycoders/exodus primer\`).`);
+        `  say "exodus, set up my brand primer" (or run \`npx ${pkgRef()} primer\`).`);
 }
 async function runDelete(slug, flags) {
     if (!slug)

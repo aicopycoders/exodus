@@ -10,13 +10,14 @@ import {
 } from "../lib/scaffold.js";
 import { loadWorkspaceEnv } from "../lib/load-env.js";
 import { ensureBrandDir } from "../lib/layout.js";
+import { pkgRef } from "../lib/channel.js";
 
 export const helpText = `
 exodus init — Set up (or refresh) an Exodus workspace in the current folder
 
 Usage:
-  npx @aicopycoders/exodus init        Scaffold the workspace + install skills
-  npx @aicopycoders/exodus init --root <dir>   Target a specific folder
+  npx ${pkgRef()} init        Scaffold the workspace + install skills
+  npx ${pkgRef()} init --root <dir>   Target a specific folder
 
 Run this in a fresh, empty folder. It creates the workspace layout, writes the
 Exodus + Genesis skills into .claude/skills/, scaffolds a comment-only .env, and
