@@ -18,6 +18,7 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Static image ads ("make images", "statics", "render this ad") | `exodus-image` (the image front door — it menus engines and confirms before firing) |
 | A specific image engine they already chose | `exodus-creative` (native / copy-derived / ref-match) or `exodus-template` (33 ad-type formats) |
 | Meme ads ("exodus, meme this offer", "make me meme ads") | `exodus-meme` |
+| Run / chain / build / edit a saved workflow ("run my workflow", "what does this workflow need", "build a workflow that…", "list my workflows") | `exodus-workflow` |
 | Onboard a new brand / build the primer | `exodus-primer` (with winning ads) or `exodus-foundation` (no ads yet) |
 | List/switch/troubleshoot brands | `exodus-brand` |
 | See past runs / find an output | `exodus-browse` |

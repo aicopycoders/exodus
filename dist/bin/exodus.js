@@ -18,6 +18,7 @@ const OTHER_COMMANDS = new Set([
     "init",
     "migrate",
     "segment",
+    "workflow",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",
