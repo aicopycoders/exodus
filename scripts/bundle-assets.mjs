@@ -27,7 +27,25 @@ const refsDest = join(assetsDir, "references");
 const docsDest = join(assetsDir, "docs");
 
 // ── Forbidden patterns (client-name leak-check) ───────────────────────────
-const FORBIDDEN = [/grounding co\b/i, /grounding company/i];
+const FORBIDDEN = [/grounding co\b/i, /grounding company/i, /matt beard/i];
+
+// ── Member-facing references allowlist ────────────────────────────────────
+// workspace/references/ doubles as a drop zone for internal research notes
+// (wayfinder probes, vendor comparisons) that must never ship to members.
+// Only the framework docs the workspace CLAUDE.md points members at are
+// bundled; everything else is skipped by default (2026.7.200-beta.7 shipped
+// five internal docs, one with client data, because this copied the whole dir).
+const MEMBER_REFERENCES = new Set([
+  "awareness-framework.md",
+  "cast-video.md",
+  "copy-blocks.md",
+  "creative-strategy.md",
+  "editing-rules.md",
+  "hook-quality-checklist.md",
+  "iterations.md",
+  "scrawls.md",
+  "segments.md",
+]);
 
 /** Recursively yield all file paths under dir. */
 function* walk(dir) {
@@ -60,7 +78,22 @@ if (!existsSync(skillsSrc)) {
   mkdirSync(assetsDir, { recursive: true });
 
   cpSync(skillsSrc, skillsDest, { recursive: true });
-  if (existsSync(refsSrc)) cpSync(refsSrc, refsDest, { recursive: true });
+  if (existsSync(refsSrc)) {
+    mkdirSync(refsDest, { recursive: true });
+    const skipped = [];
+    for (const entry of readdirSync(refsSrc, { withFileTypes: true })) {
+      if (entry.isFile() && MEMBER_REFERENCES.has(entry.name)) {
+        cpSync(join(refsSrc, entry.name), join(refsDest, entry.name));
+      } else {
+        skipped.push(entry.name);
+      }
+    }
+    if (skipped.length > 0) {
+      console.log(
+        `bundle-assets: skipped non-member references: ${skipped.join(", ")}`
+      );
+    }
+  }
 
   mkdirSync(docsDest, { recursive: true });
   for (const docSrc of docSrcs) {

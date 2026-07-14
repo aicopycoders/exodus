@@ -18,7 +18,7 @@ Returns:
 
 ## Strategic Context
 
-One API key, many brands. **Any user can create and own unlimited brands** — via `npx @aicopycoders/exodus brand create "<name>"` or the dashboard. This is NOT admin-only, and brand names are scoped per user (two different users can each have a "Matt Beard"). The key works for every brand the user OWNS (admin keys see everything); the CLI attaches `X-Active-Brand: <slug>` on every request. The ONLY "pinned to one brand" case is a brand someone ELSE invited the user into: they don't own it, so the header is ignored for it and it's the single brand their key sees. Never tell a user they can't create brands or are "locked to one brand" because their key shows `role: member` — a member who owns brands sees and creates as many as they want.
+One API key, many brands. **Any user can create and own unlimited brands** — via `npx @aicopycoders/exodus brand create "<name>"` or the dashboard. This is NOT admin-only, and brand names are scoped per user (two different users can each have an "Evergreen Fitness"). The key works for every brand the user OWNS (admin keys see everything); the CLI attaches `X-Active-Brand: <slug>` on every request. The ONLY "pinned to one brand" case is a brand someone ELSE invited the user into: they don't own it, so the header is ignored for it and it's the single brand their key sees. Never tell a user they can't create brands or are "locked to one brand" because their key shows `role: member` — a member who owns brands sees and creates as many as they want.
 
 The active brand resolves **folder > pointer > key default**: on a multi-brand install each brand has a subfolder (marked by `.exodus-brand.json`), and running from inside one targets that brand automatically — it wins over the `{ activeBrand: "<slug>" }` pointer in `.exodus/state.json` that `brand use` writes. `brand current` tells you which one applied.
 
@@ -50,7 +50,7 @@ Shows role, the active brand (marked `★`), and the full accessible list. Flags
 ### Create a new brand
 
 ```bash
-npx @aicopycoders/exodus brand create "Matt Beard"
+npx @aicopycoders/exodus brand create "Evergreen Fitness"
 ```
 
 Creates a brand the user owns (any user can — no admin role required), then switches the CLI into it and, on multi-brand installs, sets up its subfolder. Brand names are scoped per user, so this succeeds even if another account already has a brand by that name (the slug is auto-disambiguated under the hood). Tell the user the next step is the primer (`exodus, set up my brand primer`). If the dashboard ever reports a name conflict for a brand the user is *sure* they've never made, that's a separate bug — not a sign the name is taken for them.

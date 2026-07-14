@@ -31,7 +31,7 @@ This folder usually holds **two related products that share the same Genesis eng
 
 ## Multi-Brand Operating Notes
 
-Any user can create and own unlimited brands — `npx @aicopycoders/exodus brand create "<name>"` (or the dashboard); it is NOT admin-only, and brand names are scoped per user (two users can each have a "Matt Beard"). One account key then switches across every brand the user owns (admins: every brand). The only exception is a brand someone ELSE invited the user into — they don't own it, so their key stays pinned to just that one. Never tell a user they can't make brands or are "locked to one brand" just because their key shows `role: member`. The active brand resolves **folder > pointer > key default**: being inside a brand's subfolder wins, then the `brand use` pointer, then the key's default brand.
+Any user can create and own unlimited brands — `npx @aicopycoders/exodus brand create "<name>"` (or the dashboard); it is NOT admin-only, and brand names are scoped per user (two users can each have an "Evergreen Fitness"). One account key then switches across every brand the user owns (admins: every brand). The only exception is a brand someone ELSE invited the user into — they don't own it, so their key stays pinned to just that one. Never tell a user they can't make brands or are "locked to one brand" just because their key shows `role: member`. The active brand resolves **folder > pointer > key default**: being inside a brand's subfolder wins, then the `brand use` pointer, then the key's default brand.
 
 - **Identify the active brand:** `npx @aicopycoders/exodus brand current` (also says whether it came from the folder or the pointer)
 - **List accessible brands:** `npx @aicopycoders/exodus brand list`
