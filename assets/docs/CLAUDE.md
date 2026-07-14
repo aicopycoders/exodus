@@ -38,6 +38,7 @@ Any user can create and own unlimited brands — `npx @aicopycoders/exodus brand
 - **Create a new brand:** `npx @aicopycoders/exodus brand create "<name>"` — creates it server-side, switches you in, and sets up its local subfolder
 - **Switch brand:** `npx @aicopycoders/exodus brand use <slug>` — or just work from inside that brand's subfolder
 - **New brand created on the dashboard?** `npx @aicopycoders/exodus@latest init` creates its subfolder and pulls its profile
+- **Update the CLI + skills:** `npx @aicopycoders/exodus@latest update` — the only command that refreshes `.claude/skills/` and the workspace docs (`doctor` reports health but never rewrites them)
 - **Brand voice / ICP / offer:** the active brand's `state/brand-profile.md` (inside its subfolder; at this root on older single-brand installs) — read this at session start and after any switch. If it doesn't match the active brand, the exodus-strategist skill will prompt to refresh.
 
 Don't carry voice or proven angles across brands — each brand is its own creative universe.

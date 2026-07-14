@@ -16,6 +16,7 @@ const OTHER_COMMANDS = new Set([
     "drive",
     "doctor",
     "init",
+    "update",
     "migrate",
     "segment",
     "workflow",
