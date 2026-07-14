@@ -171,7 +171,7 @@ export function formatWorkflowList(workflows) {
     if (workflows.length === 0)
         return "No workflows found for the active brand.";
     return table(["name", "nodes", "edges", "updated", "id"], workflows.map((w) => [
-        w.name,
+        w.isCrossBrand && w.homeBrandName ? `${w.name} · from ${w.homeBrandName}` : w.name,
         String(w.nodeCount),
         String(w.edgeCount),
         dateOnly(w.updatedAt),
@@ -251,6 +251,20 @@ function runOutputLines(output) {
     const slug = output.botSlug ? ` (${output.botSlug})` : "";
     if (output.type === "image") {
         return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}`];
+    }
+    if (output.type === "video") {
+        const tag = output.final === true ? "final video" : "video";
+        return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}`];
+    }
+    if (output.type === "audio") {
+        return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}`];
+    }
+    if (output.type === "frames") {
+        const n = output.frames?.length ?? 0;
+        return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}`];
+    }
+    if (output.type === "storyboard") {
+        return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan`];
     }
     const raw = output.text ?? "";
     const normalized = raw.replace(/\s+/g, " ").trim();
@@ -523,14 +537,19 @@ export async function runFlow(workflowRef, opts, deps) {
         lines.length = 0;
     }
     const seen = new Map();
+    let pausedNotified = false;
     const pollResult = await deps.poll({
         path: `${STATUS_PATH}?runId=${encodeURIComponent(data.runId)}`,
         intervalMs: 3_000,
         timeoutMs: 60 * 60 * 1000,
-        terminalStatuses: ["completed", "partial", "failed"],
+        terminalStatuses: ["completed", "partial", "failed", "canceled"],
         onProgress: (raw) => {
             if (opts.json || !opts.onProgressLine)
                 return;
+            if (raw["status"] === "awaiting-review" && !pausedNotified) {
+                pausedNotified = true;
+                opts.onProgressLine("  ⏸ paused at the cost gate — approve or edit the storyboard in the web app to continue.");
+            }
             const nodes = Array.isArray(raw["nodes"]) ? raw["nodes"] : [];
             for (const node of nodes) {
                 if (seen.get(node.nodeId) === node.status)

@@ -1,7 +1,7 @@
 import { type ApiResponse } from "../lib/client.js";
 import { type PollOptions, type PollResult } from "../lib/poll.js";
 export declare const helpText: string;
-export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "output";
+export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output";
 export interface WorkflowNode {
     id: string;
     kind: WorkflowNodeKind;
@@ -59,8 +59,22 @@ export interface WorkflowImportError {
     issues?: GraphIssue[];
     currentUpdatedAt?: string;
 }
-export type WorkflowPortType = "text" | "primer" | "image";
+export type WorkflowPortType = "text" | "primer" | "image" | "rig" | "storyboard" | "frames" | "video" | "audio";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
+export type WorkflowDurationSpec = {
+    kind: "fixed";
+    values: number[];
+} | {
+    kind: "range";
+    min: number;
+    max: number;
+};
+export interface CatalogVideoModel {
+    id: string;
+    label: string;
+    durations: WorkflowDurationSpec;
+    audioTogglable: boolean;
+}
 export type WorkflowParamKind = "select" | "text" | "textarea" | "toggle" | "number" | "multiselect";
 export interface CatalogInput {
     id: string;
@@ -103,6 +117,7 @@ export interface WorkflowCatalog {
         imageModels: string[];
         aspectRatios: string[];
         imageQuantityModes: string[];
+        videoModels: CatalogVideoModel[];
         categories: Array<{
             id: string;
             label: string;
@@ -130,7 +145,7 @@ export interface WorkflowPrerequisiteDescriptor {
     nodeIds: string[];
 }
 export interface WorkflowOutputDescriptor {
-    type: "text" | "image";
+    type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
     label: string;
     nodeId: string;
     botSlug?: string;
@@ -154,11 +169,13 @@ export interface WorkflowListItem {
     edgeCount: number;
     createdAt: string;
     updatedAt: string;
+    isCrossBrand?: boolean;
+    homeBrandName?: string | null;
 }
 export interface WorkflowListResponse {
     workflows: WorkflowListItem[];
 }
-export type WorkflowRunStatus = "queued" | "running" | "completed" | "partial" | "failed";
+export type WorkflowRunStatus = "queued" | "running" | "awaiting-review" | "completed" | "partial" | "failed" | "canceled";
 export type WorkflowNodeRunStatus = "idle" | "running" | "done" | "failed" | "skipped";
 export type WorkflowArtifact = {
     type: "text";
@@ -176,11 +193,21 @@ export type WorkflowArtifact = {
 export interface WorkflowRunOutput {
     nodeId: string;
     botSlug?: string;
-    type: "text" | "image";
+    type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
     label: string;
     text?: string;
     imageUrl?: string;
     imageId?: string;
+    videoUrl?: string;
+    audioUrl?: string;
+    durationSec?: number;
+    sceneIndex?: number;
+    final?: boolean;
+    frames?: Array<{
+        sceneIndex: number;
+        imageUrl?: string;
+    }>;
+    storyboardJson?: string;
 }
 export interface WorkflowRunNode {
     nodeId: string;

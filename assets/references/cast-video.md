@@ -1,5 +1,14 @@
 # CAST — a generative grammar for video ad formats
 
+> **SUPERSEDED (2026-07, map #528):** the 4-axis CAST grammar below is superseded by the
+> 5-knob **CASTS** system — **Conceit · Actor · Style · Terrain · Setup** — whose canonical
+> terms live in the repo-root **`CONTEXT.md`** glossary. CASTS adds the **Setup** knob (frame
+> arrangement / opening / pacing / overlays) and restructures **Actor** as Role × Look; the
+> product's shelf registry and Rig entity (#538) are built on those terms. This file's
+> thinking still carries forward — conceit = the engine room, novelty vs diversity knobs,
+> and the conceit-primer idea (now the registry's per-value `promptGuidance`) — but for
+> terminology and knob shapes, defer to `CONTEXT.md`.
+
 > Part of the creative-strategy framework set; compact index lives in `exodus-strategist`.
 > A faceted system for **decoding any video ad** into its parts and **generating infinite new
 > ones** — while staying human-readable. This is a *thinking* framework: the base Exodus CLI

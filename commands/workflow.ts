@@ -54,7 +54,22 @@ Notes:
 // exodus builds standalone, so these cannot import convex/lib at runtime.
 // __tests__/workflow.test.ts pins them with mutual assignment checks.
 
-export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "output";
+// Mirrors convex NODE_KINDS — #538 adds the Rig node and #539 adds the
+// storyboard→media video kinds. Kept in lockstep so the mutual-assignment pins
+// in __tests__/workflow.test.ts stay type-compatible with the widened convex
+// contract.
+export type WorkflowNodeKind =
+  | "brief"
+  | "bot"
+  | "primer"
+  | "image"
+  | "rig"
+  | "storyboard"
+  | "reference"
+  | "scene-frames"
+  | "video"
+  | "voiceover"
+  | "output";
 
 export interface WorkflowNode {
   id: string;
@@ -143,8 +158,31 @@ export interface WorkflowImportError {
 
 // ── Bot catalog mirrors (convex/lib/workflow/catalog.ts) ──────────────────────
 
-export type WorkflowPortType = "text" | "primer" | "image";
+// Mirrors convex PortType — #538 adds the Rig node's "rig" output and #539 adds
+// the storyboard/frames/video/audio video wire types.
+export type WorkflowPortType =
+  | "text"
+  | "primer"
+  | "image"
+  | "rig"
+  | "storyboard"
+  | "frames"
+  | "video"
+  | "audio";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
+
+/** Mirror of convex videoModels.ts DurationSpec (catalog videoModels axis, #539). */
+export type WorkflowDurationSpec =
+  | { kind: "fixed"; values: number[] }
+  | { kind: "range"; min: number; max: number };
+
+/** Mirror of convex catalog.ts CatalogVideoModel (#539). */
+export interface CatalogVideoModel {
+  id: string;
+  label: string;
+  durations: WorkflowDurationSpec;
+  audioTogglable: boolean;
+}
 export type WorkflowParamKind =
   | "select"
   | "text"
@@ -197,6 +235,7 @@ export interface WorkflowCatalog {
     imageModels: string[];
     aspectRatios: string[];
     imageQuantityModes: string[];
+    videoModels: CatalogVideoModel[];
     categories: Array<{ id: string; label: string }>;
   };
   customBot: {
@@ -232,7 +271,11 @@ export interface WorkflowPrerequisiteDescriptor {
 }
 
 export interface WorkflowOutputDescriptor {
-  type: "text" | "image";
+  // #539: the Output collector accepts every deliverable type the pipeline can
+  // produce (a `rig` output is plumbing and never collected). Mirror of
+  // convex/lib/workflow/describe.ts WorkflowOutputDescriptor (pinned by
+  // exodus/commands/__tests__/workflow.test.ts).
+  type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
   label: string;
   nodeId: string;
   botSlug?: string;
@@ -259,13 +302,28 @@ export interface WorkflowListItem {
   edgeCount: number;
   createdAt: string;
   updatedAt: string;
+  // Cross-brand share (#523): set on a workflow surfaced at a NON-home brand —
+  // a live reference the owner enabled here from another brand. Older backends
+  // omit these fields, so both stay optional.
+  isCrossBrand?: boolean;
+  homeBrandName?: string | null;
 }
 
 export interface WorkflowListResponse {
   workflows: WorkflowListItem[];
 }
 
-export type WorkflowRunStatus = "queued" | "running" | "completed" | "partial" | "failed";
+// #539 video pipeline adds two run states: "awaiting-review" (paused at the
+// storyboard cost gate, waiting on a web approve/cancel — NONterminal) and
+// "canceled" (an operator canceled a paused run — terminal).
+export type WorkflowRunStatus =
+  | "queued"
+  | "running"
+  | "awaiting-review"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "canceled";
 export type WorkflowNodeRunStatus = "idle" | "running" | "done" | "failed" | "skipped";
 
 export type WorkflowArtifact =
@@ -281,11 +339,22 @@ export type WorkflowArtifact =
 export interface WorkflowRunOutput {
   nodeId: string;
   botSlug?: string;
-  type: "text" | "image";
+  type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
   label: string;
   text?: string;
   imageUrl?: string;
   imageId?: string;
+  // #539 video pipeline deliverables — kept in lockstep with the canonical
+  // convex/workflows.ts WorkflowRunOutputEntry (see the assignability guards in
+  // exodus/commands/__tests__/workflow.test.ts).
+  videoUrl?: string;
+  audioUrl?: string;
+  durationSec?: number;
+  sceneIndex?: number;
+  // True on the stitched final ad video (#550) — distinguishes it from clips.
+  final?: boolean;
+  frames?: Array<{ sceneIndex: number; imageUrl?: string }>;
+  storyboardJson?: string;
 }
 
 export interface WorkflowRunNode {
@@ -495,7 +564,8 @@ export function formatWorkflowList(workflows: WorkflowListItem[]): string {
   return table(
     ["name", "nodes", "edges", "updated", "id"],
     workflows.map((w) => [
-      w.name,
+      // Badge a cross-brand row so it's clear it lives in another brand (#523).
+      w.isCrossBrand && w.homeBrandName ? `${w.name} · from ${w.homeBrandName}` : w.name,
       String(w.nodeCount),
       String(w.edgeCount),
       dateOnly(w.updatedAt),
@@ -585,6 +655,21 @@ function runOutputLines(output: WorkflowRunOutput): string[] {
   const slug = output.botSlug ? ` (${output.botSlug})` : "";
   if (output.type === "image") {
     return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}`];
+  }
+  // #539 media deliverables — one line each; the JSON output carries full detail.
+  if (output.type === "video") {
+    const tag = output.final === true ? "final video" : "video";
+    return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}`];
+  }
+  if (output.type === "audio") {
+    return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}`];
+  }
+  if (output.type === "frames") {
+    const n = output.frames?.length ?? 0;
+    return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}`];
+  }
+  if (output.type === "storyboard") {
+    return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan`];
   }
   const raw = output.text ?? "";
   const normalized = raw.replace(/\s+/g, " ").trim();
@@ -893,13 +978,24 @@ export async function runFlow(
   }
 
   const seen = new Map<string, WorkflowNodeRunStatus>();
+  let pausedNotified = false;
   const pollResult = await deps.poll({
     path: `${STATUS_PATH}?runId=${encodeURIComponent(data.runId)}`,
     intervalMs: 3_000,
     timeoutMs: 60 * 60 * 1000,
-    terminalStatuses: ["completed", "partial", "failed"],
+    // "canceled" is terminal (#539) so a web-canceled run stops the wait instead
+    // of polling to timeout. "awaiting-review" stays NONterminal — the run
+    // resumes after a web approval — but we surface it once (below) so the
+    // operator knows to go approve the cost gate.
+    terminalStatuses: ["completed", "partial", "failed", "canceled"],
     onProgress: (raw) => {
       if (opts.json || !opts.onProgressLine) return;
+      if (raw["status"] === "awaiting-review" && !pausedNotified) {
+        pausedNotified = true;
+        opts.onProgressLine(
+          "  ⏸ paused at the cost gate — approve or edit the storyboard in the web app to continue.",
+        );
+      }
       const nodes = Array.isArray(raw["nodes"]) ? (raw["nodes"] as WorkflowRunNode[]) : [];
       for (const node of nodes) {
         if (seen.get(node.nodeId) === node.status) continue;
