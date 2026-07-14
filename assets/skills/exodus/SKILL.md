@@ -23,6 +23,7 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | List/switch/troubleshoot brands | `exodus-brand` |
 | See past runs / find an output | `exodus-browse` |
 | Open or create Google Docs/Sheets | `exodus-drive` |
+| Import their OWN winning ads from their Meta ad account ("import my winners", "mine my ad account for winners", "exodus winners") | `exodus-winners` |
 | Update the CLI + skills | run `npx @aicopycoders/exodus@latest init` |
 
 If a custom pipeline skill is installed in this folder (any additional `exodus-*` directory under `.claude/skills/`), it routes the same way — match the user's words to that skill's description.

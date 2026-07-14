@@ -60,6 +60,7 @@ These are the **Exodus** pipelines — the automatic system that drives the Gene
 | **Meme** | `exodus-meme` | Meme ads — recommends formats for a brief, then one batched run renders AI-image and classic Imgflip-template memes server-side. |
 | **Browse** | `exodus-browse` | View history and retrieve past outputs |
 | **Drive** | `exodus-drive` | Read/write Google Docs, Sheets, and Drive files via `npx @aicopycoders/exodus drive` (uses the dashboard's Google OAuth — no local CLI) |
+| **Winners** | `exodus-winners` | Mine your own Meta ad account for winning ads (via the Meta Ads MCP) and import them into Exodus as generative fuel — interview, visual confirmation, `npx @aicopycoders/exodus winners import` |
 
 For the operator-facing quick reference on how to invoke these in Claude Code, see `PIPELINES.md` in the workspace root.
 

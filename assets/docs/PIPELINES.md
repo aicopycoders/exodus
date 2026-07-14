@@ -16,6 +16,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
+| exodus-winners | Mine your own Meta ad account for winners (needs the Meta Ads MCP) and import them into Exodus |
 
 ---
 
@@ -199,4 +200,27 @@ Subcommands (use the one that matches intent):
 For pipeline-run docs, use:
   npx @aicopycoders/exodus read-doc <runId> — walks every tab, renders to markdown
 Returns: structured JSON forwarded from Google's APIs (or markdown for read-doc)
+```
+
+---
+
+## exodus-winners
+
+**What it does:** Mines your own Meta ad account for winning ads and imports them into Exodus as generative fuel. Your agent session needs the official Meta Ads MCP connected (`https://mcp.facebook.com/ads` — OAuth with your own Facebook login); the skill interviews you (no numeric questions), finds the ads carrying ~80% of your lifetime results, confirms each pick visually, then pushes a winner package through the CLI. Imported winners surface in generation selection with their verdict.
+
+```operator-guide
+Subcommands:
+  exodus winners import <file.json | ->   Push a winner package (- reads stdin)
+  exodus winners status <importId>        Re-poll an import later
+  exodus winners list                     Winners Exodus already holds
+
+Import flags:
+  --dry-run    Would-create vs would-update per winner; zero writes
+  --no-wait    Return the importId immediately instead of polling
+  --json       Machine-readable output
+
+Requires: Meta Ads MCP in the session (mining) + your Scrape Creators key in
+Settings → Keys (the own-page match scrape bills your account).
+Say things like: "exodus, import my winning ads" · "exodus, mine my ad
+account for winners" · "exodus, which winners does Exodus already hold?"
 ```
