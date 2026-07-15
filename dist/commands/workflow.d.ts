@@ -1,7 +1,7 @@
 import { type ApiResponse } from "../lib/client.js";
 import { type PollOptions, type PollResult } from "../lib/poll.js";
 export declare const helpText: string;
-export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output";
+export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "show-set" | "show-cast" | "show-voices" | "product-truth";
 export interface WorkflowNode {
     id: string;
     kind: WorkflowNodeKind;
@@ -59,7 +59,7 @@ export interface WorkflowImportError {
     issues?: GraphIssue[];
     currentUpdatedAt?: string;
 }
-export type WorkflowPortType = "text" | "primer" | "image" | "rig" | "storyboard" | "frames" | "video" | "audio";
+export type WorkflowPortType = "text" | "primer" | "image" | "rig" | "storyboard" | "frames" | "video" | "audio" | "show";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
 export type WorkflowDurationSpec = {
     kind: "fixed";

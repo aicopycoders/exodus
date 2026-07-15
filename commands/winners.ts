@@ -95,6 +95,17 @@ export function validatePackageLocally(pkg: unknown): LocalValidation {
       (typeof w.headline !== "string" || !w.headline.trim())
     )
       warnings.push(`${label}${id ? ` (${id})` : ""}: needs bodyText or headline`);
+    // Advisory, not a rejection: a video winner without a poster renders as a
+    // blank placeholder in the Own Brand gallery until gap-filled (#598) —
+    // Meta has no video download, but ads_get_ad_videos always has a poster.
+    const assets = (w.assets ?? {}) as Record<string, unknown>;
+    const hasPoster =
+      (typeof assets.posterPath === "string" && assets.posterPath.trim()) ||
+      (typeof assets.posterStorageId === "string" && assets.posterStorageId.trim());
+    if (w.format === "video" && !hasPoster)
+      warnings.push(
+        `${label}${id ? ` (${id})` : ""}: video winner has no posterPath — it will show a blank placeholder in the gallery (grab the poster image via ads_get_ad_videos and attach it)`,
+      );
   });
 
   return { ok: errors.length === 0, errors, warnings, winnerCount };
@@ -308,6 +319,13 @@ async function runImport(
       ["videoPath", "videoStorageId"],
       ["posterPath", "posterStorageId"],
     ];
+    // A package may carry storage ids directly (re-push of an earlier import,
+    // gap-fill JSONs built from a prior package) — preserve them; a local
+    // path for the same slot uploads fresh and wins below.
+    for (const [, idKey] of pairs) {
+      const existing = assets[idKey];
+      if (typeof existing === "string" && existing.trim()) swapped[idKey] = existing;
+    }
     for (const [pathKey, idKey] of pairs) {
       const rel = assets[pathKey];
       if (typeof rel !== "string" || !rel.trim()) continue;

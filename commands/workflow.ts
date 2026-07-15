@@ -69,7 +69,13 @@ export type WorkflowNodeKind =
   | "scene-frames"
   | "video"
   | "voiceover"
-  | "output";
+  | "output"
+  // #603 Video-module member-gate kinds (module templates only — the CLI
+  // never authors them, but describe/export must round-trip them).
+  | "show-set"
+  | "show-cast"
+  | "show-voices"
+  | "product-truth";
 
 export interface WorkflowNode {
   id: string;
@@ -158,8 +164,9 @@ export interface WorkflowImportError {
 
 // ── Bot catalog mirrors (convex/lib/workflow/catalog.ts) ──────────────────────
 
-// Mirrors convex PortType — #538 adds the Rig node's "rig" output and #539 adds
-// the storyboard/frames/video/audio video wire types.
+// Mirrors convex PortType — #538 adds the Rig node's "rig" output, #539 adds
+// the storyboard/frames/video/audio video wire types, and #603 adds the
+// show-setup chain's "show" ordering wire.
 export type WorkflowPortType =
   | "text"
   | "primer"
@@ -168,7 +175,8 @@ export type WorkflowPortType =
   | "storyboard"
   | "frames"
   | "video"
-  | "audio";
+  | "audio"
+  | "show";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
 
 /** Mirror of convex videoModels.ts DurationSpec (catalog videoModels axis, #539). */

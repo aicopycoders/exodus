@@ -53,15 +53,17 @@ Call `ads_get_ad_accounts`. It returns **every** account the login can touch —
 
 You are not collecting preferences here so much as confirming inferences. Four things get settled, and only one of them ever shows the user a choice.
 
-**a) Objective → metric is invisible.** Ads group by their campaign **objective**; each group's success metric is the account's own self-labeled result type — Meta hands it to you already labeled (`results: {"value": "98 (Website appointments scheduled)"}`, `cost_per_result: {"value": "$91.64 USD (Website appointments scheduled)"}` — the string lives under `.value`). **Never ask the user to pick a metric.** The account already declared it. Offer one free-text escape hatch only — *"If your definition of a winner is different from 'the ads that drove the most results,' tell me in your own words."* — and record whatever they say **verbatim** as `customDefinition`, applied agent-side. Do not turn their words into a number.
+**a) Objective → metric is invisible.** Ads group by their **self-labeled result type** (within objective — §2c); each group's success metric is the account's own label — Meta hands it to you already labeled (`results: {"value": "98 (Website appointments scheduled)"}`, `cost_per_result: {"value": "$91.64 USD (Website appointments scheduled)"}` — the string lives under `.value`). **Never ask the user to pick a metric.** The account already declared it. Offer one free-text escape hatch only — *"If your definition of a winner is different from 'the ads that drove the most results,' tell me in your own words."* — and record whatever they say **verbatim** as `customDefinition`, applied agent-side. Do not turn their words into a number.
 
 **b) Funnel mapping is infer-then-confirm.** Propose, per campaign, an **awareness level** from the Schwartz five — `unaware` / `problem-aware` / `solution-aware` / `product-aware` / `most-aware` — inferred from the campaign objective plus the campaign/adset **names** (naming is read-only creative context; see §6). Present the whole proposed map **once** for a single confirm/adjust pass, then save it. On a re-mine, only **new** campaigns get proposed; already-mapped ones stay put.
 
 **c) The winner rule is fixed — volume over efficiency, all-time, no caps.** State it, don't negotiate it:
 
-> Within each objective group, over the account's full lifetime (`date_preset: "maximum"`), the winners are the **smallest set of ads that together carry ~80% of that group's lifetime results**, where each qualifying ad has **at least 10 results** (a materiality floor — one lucky conversion is not a winner). No top-N cap.
+> Within each result-type group, over the account's full lifetime (`date_preset: "maximum"`), the winners are the **smallest set of creatives that together carry ~80% of that group's lifetime results**, where each qualifying creative has **at least 10 results** (a materiality floor — one lucky conversion is not a winner). No top-N cap.
 
-- **Union with per-format cuts.** Run the same 80%/≥10 rule three ways: **overall**, **within video only**, and **within image only**, then union the results. This guarantees both lanes populate even when one format dominates spend. Each winner records which cut(s) it cleared as `selectionBasis`: any of `overall` / `top-video` / `top-image`.
+- **Groups key on the self-labeled result type, not on objective alone.** Real accounts mix objectives, and one objective can hide two currencies — OUTCOME_LEADS covers both a booked-call funnel (`"Website appointments scheduled"`) and an opt-in funnel (`"Website leads"`), and those must never share one 80% line (the cheap high-volume metric drowns the scarce valuable one). Partition by objective first, then by the parenthetical label on `results.value`; each distinct label is its own group with its own 80% line and its own floor.
+- **The unit you rank is aggregated content, never the raw ad instance.** Advertisers duplicate: the same post runs in many ad sets and campaigns (same post id = the exact same content with its results split across instances), and the same video or image runs under several copy versions. Rank raw instances and a true winner shatters into sub-threshold fragments — or surfaces as several "different" winners that are one ad. Aggregate BEFORE applying the rule, and apply the **floor to the aggregate, never the instance** — four 6-result duplicates are one 24-result winner (§3 has the mechanics): collapse instances sharing an `effective_object_story_id` in every cut, and collapse further by creative asset (same video / same image across copy variants) within the format cuts.
+- **Union with per-format cuts.** Run the same 80%/≥10 rule three ways: **overall** (post-level aggregates), **within video only**, and **within image only** (creative-level aggregates), then union the results. This guarantees both lanes populate even when one format dominates spend. The union dedupes on the aggregate's `accountAdId` (§3); a winner clearing multiple cuts is ONE row whose `selectionBasis` lists every cut it cleared (`overall` / `top-video` / `top-image`), and when a format cut is among them the stored verdict carries the **creative-level** aggregate's numbers and instance count (the broadest collapse it cleared).
 - **Flat curve honesty.** If contribution is flat — no elbow, results spread evenly across hundreds of ads — say so plainly and show the top contributors instead of pretending there's a clean winner set. Never fabricate outliers to hit the 80% line.
 
 **d) There are no losers at v1.** You designate winners only. Don't ask about, or invent, a "worst ads" pass.
@@ -72,8 +74,11 @@ The defaults behind this rule (`window: "maximum"`, `resultsFloor: 10`, `contrib
 
 Mine on `ads_get_ad_entities`. These are hard-won live-probe facts; encode them into how you call, not into a doc you can look up later:
 
-- **Sort server-side, threshold agent-side.** Metric *filtering* on `ads_get_ad_entities` consistently **500s** — never filter by a metric. Metric *sorting* works. Sort by **results descending** and pull **the complete group — every page** — over `date_preset: "maximum"`; you need the group's full results total (the 80% denominator), so a sorted prefix is never enough. Then apply the 80%/≥10 rule yourself in memory.
-- **Retry once on a 500.** Transient 500s happen even on valid calls; an identical retry usually succeeds. Retry a failed call once before treating it as real.
+- **Never mine account-wide — scope every metrics pull to one campaign.** Account-wide ad-level pulls that include `results` **500 consistently** on real accounts (mixed objectives, thousands of near-duplicate test ads) — no limit, no sort tweak, and no retry unsticks them, and `results` 500s at campaign level too. Enumerate campaigns first (attributes, `objective`, and spend all work fine at campaign level), then pull ads **campaign-by-campaign** with `results` over `date_preset: "maximum"` and aggregate agent-side into result-type groups (ads carry `campaign_id`; join `objective` from the campaign pull).
+- **Sort server-side, tally compactly — never hold full blobs, and never floor raw rows.** Metric *filtering* on `ads_get_ad_entities` consistently **500s** — never filter by a metric. Metric *sorting* works. Per campaign: sort by **results descending**, page through, and retain one **compact tuple per result-bearing ad** — ad id, ad name, campaign id, creative id, created time, results, spend — discarding zero-result rows (they can't move any sum) and every other field. **The 10-result floor does NOT apply while paging**: sub-floor instances of one post can sum to a winner (§2c), so no row is ever dropped for being small. A creative-testing account runs 100+ near-duplicate ads per campaign; compact tuples keep the whole account to a few hundred short lines, where retaining or printing whole per-campaign blobs burns the session's context before the winner rule ever runs.
+- **Aggregate across the whole result-type group, then floor, then rank.** A scoring group spans campaigns — finish paging **every** campaign that feeds a group before ranking it (the per-campaign loop is just how you gather; the group is the unit you rank, once). Then batch re-fetch creatives by `creative_ids` for the retained tuples — that yields each ad's `effective_object_story_id` (post identity), `image_hash` / video identity, and **format** (which the format-cut denominators need for every result-bearing row, not just candidates). Merge instances sharing a post id (every cut), then copy variants sharing the same creative asset (format cuts), summing results and spend as you merge. Only **now** apply the ≥10 floor — to aggregate totals, never to instances: four 6-result duplicates are one 24-result winner. Denominators: the overall 80% line divides by the group's total; each format cut divides by that format's own subtotal (`resultsShare` still reports share of the full group total).
+- **The aggregate's identity must survive a re-mine.** Its `accountAdId` is its **earliest-created instance** — stable across re-mines (the top performer can change month to month; the oldest instance can't, and the server dedupes rows on this id — an unstable pick would duplicate the winner on the next import). The **highest-results instance** supplies the copy and `sourceNames`. When an aggregate spans more than one instance the verdict sentence says so plainly ("… across 4 ad instances in 3 campaigns"); summed counts are numbers **you** derived — own that in the sentence, and leave single-instance display strings verbatim.
+- **Retry once on a 500 — but only where 500s are transient.** An identical retry usually clears a one-off 500 on a scoped call. It never clears the two structural 500s above (metric filtering, account-wide results) — don't burn calls proving that again.
 - **Metric values are display strings, not numbers** — `"$8,980.38 USD"`, `"4.20%"`, `"Not available"` for zero-delivery ads. Keep them **verbatim** for the verdict snapshot. You still need to *rank* by them agent-side — parse a working copy for the math, but never mutate the string you store. (Account level also returns a numeric `amount_spent_cents` if you need a clean total.)
 - **`results` / `cost_per_result` self-label the outcome** (`.value` = `"98 (Website appointments scheduled)"`). That label is the metric — carry it into `resultType`.
 - **Hierarchy:** ads carry `campaign_id` + `adset_id`; `objective` lives on the **campaign**. There is no `campaign_name` at ad level — get campaign/adset names from a **campaign-level / adset-level call**, then join by id.
@@ -82,7 +87,9 @@ Mine on `ads_get_ad_entities`. These are hard-won live-probe facts; encode them 
 - **`pageName` comes from the user, not from Meta.** The page tools can return `"(unknown)"` for the page name, and `ads_library_search` (which carries it) is off-limits — so once you have the page id, **confirm the page's name with the user in one line** ("This account posts as page 10715… — that's your <name> page, right?"). It names their own-brand entry in Exodus; don't guess it.
 - **Non-US accounts need `country` set.** The package's `source.country` defaults to `US`, and a wrong country makes the server-side Ad Library match silently miss. Infer it from the account (currency, business) and confirm alongside the page name when it isn't clearly US.
 - **Images: download the bytes at interview time, not push time.** `ads_get_ad_images` (by hash) returns a full-res signed CDN `url` that **expires** (watch the `oe=` param). Grab it while you're confirming the winner, save it locally, and reference the local file in the package.
-- **Video: there is no download URL. Never promise one.** `ads_get_ad_videos` gives `title`, `length`, and a poster `picture` only — no source/download URL. Grab the **poster** image for video winners; the actual mp4 comes from the user in the gap-filler (§8).
+- **Video: there is no download URL. Never promise one.** `ads_get_ad_videos` gives `title`, `length`, and a poster `picture` only — no source/download URL. The actual mp4 comes from the user in the gap-filler (§8).
+- **Every video winner MUST carry its poster.** Download the `picture` from `ads_get_ad_videos` at confirmation time and attach it as `assets.posterPath` — for an unmatched video winner it is the **only** thumbnail the Own Brand gallery will ever have; skip it and the winner renders as a blank placeholder. The CLI dry-run warns on poster-less video winners: treat that warning as a stop, not a formality.
+- **One page per package.** Winner↔library matching scrapes exactly `source.pageId` — a winner posted by any other page can never match and always gap-fills. If the account's winners span more than one Facebook page, split them into **one package per page** (each with that page's `pageId`/`pageName`); each import creates/updates its own own-brand entry and every winner keeps a real shot at matching.
 - **One `breakdowns` value per call.** Stay on `ads_get_ad_entities` for raw data — the `ads_insights_*` tools are opinionated narrative wrappers (trend/funnel prose), not the numbers you're ranking.
 - **Pass the user's real ask through `advertiser_request`** on each tool call — it's Meta's audit surface; give it the user's actual words.
 - **Never call `ads_library_search`.** Winner↔Ad-Library matching happens **server-side in Exodus** after import; the old title-fingerprint approach is dead. Your job ends at the account data.
@@ -91,9 +98,9 @@ Mine on `ads_get_ad_entities`. These are hard-won live-probe facts; encode them 
 
 Before you confirm a single ad, lead with the **account summary** — the strategist wants the shape before the specimens:
 
-> "1,041 ads, 12,400 purchases all-time. 37 ads produced ~80% of them — and 29 of those 37 are video. That format skew is itself a finding."
+> "1,041 ad instances collapsing to 312 distinct creatives. In the Purchases group, 37 creatives produced ~80% of the 12,400 lifetime purchases — and 29 of those 37 are video. That format skew is itself a finding. (The account's second result type, Leads, gets its own line.)"
 
-The format skew, the count of winners, the share they carry — that framing *is* strategic value. Deliver it, then move to confirmation.
+The instance-to-creative collapse, the format skew, the count of winners, the share they carry — that framing *is* strategic value. Deliver it, then move to confirmation.
 
 ## 5. Visual confirmation — the human gate
 
@@ -111,7 +118,7 @@ Campaign / adset / ad names feed two things: your **awareness inference** (§2b)
 
 ## 7. The verdict snapshot & the winner-package JSON
 
-Every winner carries a **verdict snapshot** composed to the schema below. The metrics stay as **display strings verbatim** — never parsed into numbers in what you store — and you compose one plain-language sentence per winner. A **fresh snapshot is written on every re-mine; snapshots are never patched.**
+Every winner carries a **verdict snapshot** composed to the schema below. Single-instance metrics stay as **display strings verbatim** — never parsed into numbers in what you store. An aggregate winner (§2c) is the one exception: its `results`/`spend` are sums you derived across its instances, and its sentence names the instance count so nobody mistakes a derived total for a Meta string. You compose one plain-language sentence per winner. A **fresh snapshot is written on every re-mine; snapshots are never patched.**
 
 ```jsonc
 {
@@ -137,11 +144,11 @@ Every winner carries a **verdict snapshot** composed to the schema below. The me
       "ctaType": "SHOP_NOW",          // optional
       "effectiveObjectStoryId": "pageId_postId",  // optional
       "verdict": {
-        "sentence": "Winner by contribution: 2,214 purchases (6.2% of account) @ $18.20, all-time through Jul 2026",  // REQUIRED
-        "resultType": "Purchases",         // the self-label from results.value's parenthetical
-        "results": "2,214",                // Meta's display strings, never converted to numbers —
-        "resultsShare": "6.2%",            //   resultsShare is the one YOU derive (share of group total)
-        "spend": "$40,297",
+        "sentence": "Winner by contribution: 2,214 purchases (6.2% of group) @ $18.20 across 4 ad instances, all-time through Jul 2026",  // REQUIRED — name the instance count when the winner aggregates >1
+        "resultType": "Purchases",         // the self-label from results.value's parenthetical — also the scoring-group key (§2c)
+        "results": "2,214",                // single instance: Meta's display string verbatim; aggregate: your derived sum (the sentence names the instance count)
+        "resultsShare": "6.2%",            // YOU derive this (share of the result-type group's total)
+        "spend": "$40,297",                // same rule as results: verbatim for single instances, your derived sum for aggregates
         "costPerResult": "$18.20",
         "asOf": "2026-07-14",
         "objective": "OUTCOME_SALES",
@@ -150,16 +157,16 @@ Every winner carries a **verdict snapshot** composed to the schema below. The me
         "strategistNote": "…"         // optional, from §5
       },
       "assets": {
-        "imagePath": "./media/1202….jpg",          // optional — downloaded at interview time
-        "videoPath": "./media/1202….mp4",          // optional — user-supplied file (gap-filler)
-        "posterPath": "./media/1202…-poster.jpg"   // optional
+        "imagePath": "./media/1202….jpg",          // image winners: downloaded at interview time
+        "videoPath": "./media/1202….mp4",          // user-supplied file (gap-filler)
+        "posterPath": "./media/1202…-poster.jpg"   // video winners: REQUIRED in practice — the gallery's only thumbnail (§3)
       }
     }
   ]
 }
 ```
 
-All verdict metrics are display strings verbatim. `assets` is optional everywhere. A **malformed winner is rejected individually server-side** (with a reason in the ledger) — it never aborts the whole import.
+Verdict metrics are display strings verbatim (aggregates: derived sums, named as such — §7 intro). `assets` is optional in the schema, but a video winner without `posterPath` ships a blank gallery card (§3). A **malformed winner is rejected individually server-side** (with a reason in the ledger) — it never aborts the whole import.
 
 ## 8. Import — dry-run, push, then the video gap-filler
 
@@ -173,7 +180,7 @@ Run these in this exact order.
 npx @aicopycoders/exodus winners import state/own-brand-winners/import-<date>.json --dry-run --json
 ```
 
-Show the user the would-create vs would-update split. **If the dry-run reports the Scrape Creators key missing, surface it now** — a real import will fail without it; route them to Settings → Keys (scrapecreators.com). Fix any would-reject rows, then push for real:
+Show the user the would-create vs would-update split. **If the dry-run reports the Scrape Creators key missing, surface it now** — a real import will fail without it; route them to Settings → Keys (scrapecreators.com). **If it warns that a video winner has no posterPath, go back and grab the poster (§3) before pushing** — that warning is the difference between a gallery of ads and a wall of blank placeholders. Fix any would-reject rows, then push for real:
 
 ```bash
 npx @aicopycoders/exodus winners import state/own-brand-winners/import-<date>.json --json
@@ -211,7 +218,9 @@ Re-running re-asks **nothing already pinned** — only genuinely new campaigns g
 
 - **Meta `ads_*` tools not in the session** — stop and point at `https://mcp.facebook.com/ads` (§0). No workaround exists here.
 - **`ads_get_ad_entities` 500 with a metric `filtering`** — that's the known filter bug, not a transient. Drop the filter, sort instead, threshold agent-side (§3).
-- **Any tool 500s once** — retry the identical call once before reporting it.
+- **`ads_get_ad_entities` 500 on an account-wide (or campaign-level) `results` pull** — structural, not transient; retries never help. Scope to one campaign per call and aggregate agent-side (§3).
+- **Any tool 500s once on a scoped call** — retry the identical call once before reporting it.
+- **Dry-run warns "video winner has no posterPath"** — stop and grab the poster via `ads_get_ad_videos` (§3); pushing without it leaves a blank placeholder in the gallery.
 - **A by-id lookup returns only `{id}`** — you omitted `fields`. Re-call with explicit `fields` (§3).
 - **Signed image URL 403 / expired** — it lapsed since the interview. Re-fetch `ads_get_ad_images` and download again immediately.
 - **Dry-run says Scrape Creators key missing** — real import will fail; Settings → Keys first.

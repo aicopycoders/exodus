@@ -84,6 +84,11 @@ export function validatePackageLocally(pkg) {
         if ((typeof w.bodyText !== "string" || !w.bodyText.trim()) &&
             (typeof w.headline !== "string" || !w.headline.trim()))
             warnings.push(`${label}${id ? ` (${id})` : ""}: needs bodyText or headline`);
+        const assets = (w.assets ?? {});
+        const hasPoster = (typeof assets.posterPath === "string" && assets.posterPath.trim()) ||
+            (typeof assets.posterStorageId === "string" && assets.posterStorageId.trim());
+        if (w.format === "video" && !hasPoster)
+            warnings.push(`${label}${id ? ` (${id})` : ""}: video winner has no posterPath — it will show a blank placeholder in the gallery (grab the poster image via ads_get_ad_videos and attach it)`);
     });
     return { ok: errors.length === 0, errors, warnings, winnerCount };
 }
@@ -230,6 +235,11 @@ async function runImport(positional, flags) {
             ["videoPath", "videoStorageId"],
             ["posterPath", "posterStorageId"],
         ];
+        for (const [, idKey] of pairs) {
+            const existing = assets[idKey];
+            if (typeof existing === "string" && existing.trim())
+                swapped[idKey] = existing;
+        }
         for (const [pathKey, idKey] of pairs) {
             const rel = assets[pathKey];
             if (typeof rel !== "string" || !rel.trim())
