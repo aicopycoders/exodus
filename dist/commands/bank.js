@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { apiGet, apiPost } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { formatApiError } from "../lib/format.js";
 import { getChannel } from "../lib/channel.js";
 import { missingRouteLine } from "../lib/route-support.js";
 export const helpText = `
@@ -37,7 +37,7 @@ Examples:
   exodus bank list
   exodus bank show hooks
   exodus bank promote hooks "Stop scrolling — your knees will thank you"
-  exodus bank promote body --file winner.txt --awareness solutionProductAware
+  exodus bank promote body:solutionProductAware --file winner.txt --awareness solutionProductAware
   cat winner.txt | exodus bank promote hooks
   exodus bank promote hooks "..." --spend 4200 --roas 3.1 --ctr 1.8 --note "Q3 winner"
   exodus bank promote hooks "..." --run wr_123 --node bot-4
@@ -66,7 +66,7 @@ function asErrorResult(res, json) {
         code: 1,
         lines: json
             ? [JSON.stringify({ ok: false, status: res.status, data: res.data })]
-            : [formatError(res)],
+            : [formatApiError(res)],
     };
 }
 function table(headers, rows) {

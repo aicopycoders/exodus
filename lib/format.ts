@@ -182,6 +182,46 @@ export function formatBrowse(generations: unknown[]): string {
 }
 
 /**
+ * Render an API error as a single clean line — the 2.0 workflow/bank verb
+ * convention (#913). Pulls the server's message out of the standard error
+ * envelope ({ error: { message, code } } | { error: "…" } | { message }); a
+ * `remedy`, when present, is appended on its own `fix:` line. No `## Error`
+ * markdown markup (that's the legacy {@link formatError} block, kept for the
+ * 1.x verbs that intentionally use it). Falls back to `HTTP <status>` only when
+ * the body carries no message at all.
+ */
+export function formatApiError(res: {
+  ok: boolean;
+  status: number;
+  data: unknown;
+}): string {
+  let message: string | undefined;
+  let remedy: string | undefined;
+  const d = res.data;
+  if (d && typeof d === "object" && !Array.isArray(d)) {
+    const rec = d as Record<string, unknown>;
+    const err = rec["error"];
+    if (typeof err === "string" && err) {
+      message = err;
+    } else if (err && typeof err === "object") {
+      const e = err as Record<string, unknown>;
+      if (typeof e["message"] === "string" && e["message"]) message = e["message"] as string;
+      if (typeof e["remedy"] === "string" && e["remedy"]) remedy = e["remedy"] as string;
+    }
+    if (!message && typeof rec["message"] === "string" && rec["message"]) {
+      message = rec["message"] as string;
+    }
+    if (!remedy && typeof rec["remedy"] === "string" && rec["remedy"]) {
+      remedy = rec["remedy"] as string;
+    }
+  } else if (typeof d === "string" && d.trim()) {
+    message = d.trim();
+  }
+  if (!message) message = `HTTP ${res.status}`;
+  return remedy ? `${message}\nfix: ${remedy}` : message;
+}
+
+/**
  * Format an API error response.
  */
 export function formatError(res: {

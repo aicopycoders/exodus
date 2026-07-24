@@ -35,6 +35,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   kie: "Kie.ai",
   imgflip: "Imgflip",
   scrapecreators: "ScrapeCreators",
+  apify: "Apify",
 };
 
 async function status(): Promise<void> {

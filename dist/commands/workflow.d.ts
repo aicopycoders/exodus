@@ -63,6 +63,7 @@ export interface WorkflowImportResult {
     workflowId?: string;
     nodeCount: number;
     edgeCount: number;
+    triggers?: WorkflowTrigger[];
     unresolved: UnresolvedWorkflowRef[];
     warnings: string[];
 }
@@ -240,6 +241,11 @@ export type WorkflowArtifact = {
     type: "image";
     storageId: string;
     imageUrl?: string;
+} | {
+    type: "session";
+    sessionId: string;
+    label?: string;
+    port?: string;
 };
 export interface WorkflowRunOutput {
     nodeId: string;

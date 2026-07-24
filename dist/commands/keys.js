@@ -26,6 +26,7 @@ const PROVIDER_LABEL = {
     kie: "Kie.ai",
     imgflip: "Imgflip",
     scrapecreators: "ScrapeCreators",
+    apify: "Apify",
 };
 async function status() {
     let remote;

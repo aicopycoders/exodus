@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { apiGet, apiGetText, apiPost, apiPostDashboard, getDashboardUrl, } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
@@ -207,7 +207,24 @@ function asErrorResult(res, json) {
         code: 1,
         lines: json
             ? [JSON.stringify({ ok: false, status: res.status, data: res.data })]
-            : [formatError(res)],
+            : [formatApiError(res)],
+    };
+}
+function resolveIdErrorResult(e, json) {
+    if (e instanceof WorkflowResolveError) {
+        return {
+            code: 1,
+            lines: json
+                ? [JSON.stringify({ ok: false, status: e.status, data: e.data })]
+                : [e.message],
+        };
+    }
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+        code: 1,
+        lines: json
+            ? [JSON.stringify({ ok: false, status: 0, data: { error: { message } } })]
+            : [message],
     };
 }
 function isRecord(value) {
@@ -252,11 +269,25 @@ function outputLines(output) {
     if (output.type === "primer") {
         return [`    primer:${output.primerKind}: ${truncateText(output.text)}`];
     }
-    return [`    image: ${output.imageUrl ?? output.storageId}`];
+    if (output.type === "image") {
+        const url = output.imageUrl ?? output.storageId;
+        return url ? [`    image: ${url}`] : [];
+    }
+    return [];
 }
-function progressLine(node) {
+function progressLine(node, parked = false) {
     const err = node.error ? ` — error: ${node.error}` : "";
+    if (parked) {
+        return `  ⏸ ${node.nodeId} (${node.kind}) awaiting review`;
+    }
     return `  ${statusIcon(node.status)} ${node.nodeId} (${node.kind}) ${node.status}${err}`;
+}
+function gateParkedNodeId(status, pauseReason, pausedNodeId) {
+    if (status !== "awaiting-review")
+        return undefined;
+    if (pauseReason === "taste" || pauseReason === undefined)
+        return pausedNodeId;
+    return undefined;
 }
 export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     if (!pauseReason) {
@@ -398,6 +429,28 @@ export function formatImportSummary(result, mode = {}) {
         lines.push(`workflowId:  ${result.workflowId}`);
     lines.push(`nodes:       ${result.nodeCount}`);
     lines.push(`edges:       ${result.edgeCount}`);
+    if (result.triggers && result.triggers.length > 0) {
+        lines.push("");
+        const enabledCount = result.triggers.filter((t) => t.enabled).length;
+        lines.push(`Triggers (${result.triggers.length}):`);
+        for (const t of result.triggers) {
+            const detail = t.type === "event" ? `event (${t.event})` : `cron (${t.cron})`;
+            if (t.enabled) {
+                const fires = t.type === "event"
+                    ? t.event === "winner-promoted"
+                        ? "fires on every promote"
+                        : `fires on ${t.event}`
+                    : `fires on schedule ${t.cron}`;
+                lines.push(`  ⚠ ${detail} — ENABLED, ${fires}`);
+            }
+            else {
+                lines.push(`  ${detail} — disabled`);
+            }
+        }
+        if (enabledCount > 0) {
+            lines.push(`  ⚠ ${enabledCount} enabled trigger${enabledCount === 1 ? "" : "s"} armed — a background run may start on the owner's keys. Disable with: exodus workflow triggers <id> disable <n>`);
+        }
+    }
     if (result.unresolved.length > 0) {
         lines.push("");
         lines.push(`Unresolved references (${result.unresolved.length}):`);
@@ -430,11 +483,12 @@ export function formatWorkflowRun(run) {
         const inputs = Object.entries(run.inputs).map(([k, v]) => `${k}=${v}`).join(", ");
         lines.push(`inputs:       ${inputs}`);
     }
+    const parkedNodeId = gateParkedNodeId(run.status, run.pauseReason, run.pausedNodeId);
     if (run.nodes.length > 0) {
         lines.push("");
         lines.push(`Nodes (${run.nodes.length}):`);
         for (const node of run.nodes) {
-            lines.push(progressLine(node));
+            lines.push(progressLine(node, parkedNodeId !== undefined && node.nodeId === parkedNodeId));
             for (const output of node.outputs)
                 lines.push(...outputLines(output));
         }
@@ -442,8 +496,9 @@ export function formatWorkflowRun(run) {
     if (run.outputs && run.outputs.length > 0) {
         lines.push("");
         lines.push(`Outputs (${run.outputs.length}):`);
-        for (const output of run.outputs)
-            lines.push(...runOutputLines(output));
+        for (const output of run.outputs) {
+            lines.push(...runOutputLines(output, parkedNodeId !== undefined && output.nodeId === parkedNodeId));
+        }
     }
     if (run.sessions && run.sessions.length > 0) {
         lines.push("");
@@ -454,30 +509,31 @@ export function formatWorkflowRun(run) {
     }
     return lines.join("\n");
 }
-function runOutputLines(output) {
+function runOutputLines(output, awaitingReview = false) {
     const slug = output.botSlug ? ` (${output.botSlug})` : "";
+    const review = awaitingReview ? " — awaiting review, not yet approved" : "";
     if (output.type === "image") {
-        return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}`];
+        return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
     }
     if (output.type === "video") {
         const tag = output.final === true ? "final video" : "video";
-        return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}`];
+        return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}${review}`];
     }
     if (output.type === "audio") {
-        return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}`];
+        return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}${review}`];
     }
     if (output.type === "frames") {
         const n = output.frames?.length ?? 0;
-        return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}`];
+        return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}${review}`];
     }
     if (output.type === "storyboard") {
-        return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan`];
+        return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan${review}`];
     }
     const raw = output.text ?? "";
     const normalized = raw.replace(/\s+/g, " ").trim();
     const body = truncateText(raw, 400);
     const note = normalized.length > 400 ? "\n    (truncated — use --json for the full text)" : "";
-    return [`  ${output.label} [text]${slug}:`, `    ${body}${note}`];
+    return [`  ${output.label} [text]${slug}${review}:`, `    ${body}${note}`];
 }
 export function formatDescribe(res) {
     const lines = [];
@@ -812,15 +868,31 @@ function formatImportError(res) {
         lines.push(`fix: ${remedy}`);
         return lines.join("\n");
     }
-    return formatError(res);
+    return formatApiError(res);
+}
+class WorkflowResolveError extends Error {
+    status;
+    data;
+    constructor(status, data, message) {
+        super(message);
+        this.status = status;
+        this.data = data;
+        this.name = "WorkflowResolveError";
+    }
 }
 export async function resolveWorkflowId(ref, deps) {
     const res = await deps.get(LIST_PATH);
     if (!res.ok)
-        throw new Error(formatError(res));
+        throw new WorkflowResolveError(res.status, res.data, formatApiError(res));
     const workflows = res.data.workflows ?? [];
-    const match = workflows.find((w) => w.name.toLowerCase() === ref.toLowerCase());
-    return match?._id ?? ref;
+    const byName = workflows.find((w) => w.name.toLowerCase() === ref.toLowerCase());
+    if (byName)
+        return byName._id;
+    const byId = workflows.find((w) => w._id === ref);
+    if (byId)
+        return byId._id;
+    const message = `No workflow named "${ref}" on this brand — run: exodus workflow list`;
+    throw new WorkflowResolveError(404, { error: { code: "NOT_FOUND", message } }, message);
 }
 export async function listFlow(json, deps) {
     const res = await deps.get(LIST_PATH);
@@ -838,7 +910,7 @@ export async function describeFlow(workflowRef, opts, deps) {
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const res = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
     if (!res.ok)
@@ -872,7 +944,7 @@ export async function runFlow(workflowRef, opts, deps) {
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const body = {
         workflowId,
@@ -927,12 +999,15 @@ async function waitForRun(runId, opts, deps) {
                     opts.onProgressLine(line);
                 }
             }
+            const parkedNodeId = gateParkedNodeId(raw["status"], raw["pauseReason"], raw["pausedNodeId"]);
             const nodes = Array.isArray(raw["nodes"]) ? raw["nodes"] : [];
             for (const node of nodes) {
-                if (seen.get(node.nodeId) === node.status)
+                const isParked = parkedNodeId !== undefined && node.nodeId === parkedNodeId;
+                const renderKey = `${node.status}:${isParked}`;
+                if (seen.get(node.nodeId) === renderKey)
                     continue;
-                seen.set(node.nodeId, node.status);
-                opts.onProgressLine(progressLine(node));
+                seen.set(node.nodeId, renderKey);
+                opts.onProgressLine(progressLine(node, isParked));
             }
         },
     });
@@ -977,7 +1052,7 @@ export async function exportFlow(workflowRef, opts, deps) {
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const versionParam = opts.version !== undefined ? `&version=${encodeURIComponent(String(opts.version))}` : "";
     const res = await deps.get(`${EXPORT_PATH}?id=${encodeURIComponent(workflowId)}${versionParam}`);
@@ -1011,7 +1086,7 @@ export async function versionsFlow(workflowRef, opts, deps, channel = getChannel
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const res = await deps.get(`${VERSIONS_PATH}?id=${encodeURIComponent(workflowId)}`);
     const unsupported = missingRouteLine(res, "workflow versions", channel);
@@ -1148,7 +1223,7 @@ export async function triggersListFlow(workflowRef, opts, deps) {
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const fetched = await fetchTriggers(workflowId, deps);
     if (!fetched.ok)
@@ -1177,7 +1252,7 @@ export async function triggersSetEnabledFlow(workflowRef, n, enabled, opts, deps
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const fetched = await fetchTriggers(workflowId, deps);
     if (!fetched.ok)
@@ -1206,7 +1281,7 @@ export async function triggersFireFlow(workflowRef, opts, deps) {
         workflowId = await resolveWorkflowId(workflowRef, deps);
     }
     catch (e) {
-        return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+        return resolveIdErrorResult(e, opts.json ?? false);
     }
     const fetched = await fetchTriggers(workflowId, deps);
     if (!fetched.ok)
@@ -1335,9 +1410,9 @@ function formatTextError(res) {
     }
     catch {
         const snippet = body.replace(/\s+/g, " ").trim().slice(0, 300);
-        return formatError({ ok: false, status: res.status, data: snippet || "(empty response)" });
+        return formatApiError({ ok: false, status: res.status, data: snippet || "(empty response)" });
     }
-    return formatError({ ok: false, status: res.status, data: parsed });
+    return formatApiError({ ok: false, status: res.status, data: parsed });
 }
 export async function schemaFlow(opts, deps) {
     const res = await deps.get(SCHEMA_PATH);
@@ -1357,9 +1432,6 @@ export async function schemaFlow(opts, deps) {
         return formatSchemaFilter(payload, ["transformFaces"], "face", opts.face);
     }
     return { code: 0, lines: [formatSchema(payload)] };
-}
-function shortId(id) {
-    return id.length <= 12 ? id : `${id.slice(0, 11)}…`;
 }
 export function formatAge(value, now = Date.now()) {
     if (value === undefined || value === null)
@@ -1399,7 +1471,7 @@ export function formatInbox(rows, now = Date.now()) {
     if (rows.length === 0)
         return NO_INBOX;
     return table(["run", "workflow", "kind", "node", "via", "age"], rows.map((r) => [
-        shortId(r._id),
+        r._id,
         r.workflowName || "(unnamed)",
         parkBadge(r.pauseReason),
         r.pausedNodeId ?? "-",
@@ -1607,17 +1679,28 @@ export async function gateEditFlow(runId, n, sources, opts, deps) {
         return triggerErrorResult(res, "workflow gate edit", opts.json);
     return okLine(`Edited candidate ${n} at ${pf.run.pausedNodeId}.`, { ok: true, runId, nodeId: pf.run.pausedNodeId, outputIndex: cand.outputIndex }, opts.json);
 }
+function resolveGateSessionId(run) {
+    const gateNode = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
+    const artifact = (gateNode?.outputs ?? []).find((a) => a.type === "session" && a.port === "session" && !!a.sessionId);
+    if (artifact)
+        return artifact.sessionId;
+    const sessions = run.sessions ?? [];
+    const byNode = sessions.find((s) => s.nodeId === run.pausedNodeId);
+    if (byNode)
+        return byNode.sessionId;
+    return undefined;
+}
 export async function gatePushFlow(runId, message, opts, deps) {
     const pf = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const session = (pf.run.sessions ?? []).find((s) => s.nodeId === pf.run.pausedNodeId);
-    if (!session)
+    const sessionId = resolveGateSessionId(pf.run);
+    if (!sessionId)
         return errLine("This gate has no live session — nothing to push to.", opts.json);
     if (!deps.postDashboard) {
         return errLine("gate push is unavailable here (no dashboard client).", opts.json);
     }
-    const chat = await deps.postDashboard(CHAT_PATH, { sessionId: session.sessionId, text: message }, { timeoutMs: CHAT_TIMEOUT_MS });
+    const chat = await deps.postDashboard(CHAT_PATH, { sessionId, text: message }, { timeoutMs: CHAT_TIMEOUT_MS });
     if (!chat.ok) {
         const err = routeErrorText(chat.data, chat.status);
         return {

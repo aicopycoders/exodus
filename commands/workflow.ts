@@ -7,7 +7,7 @@ import {
   getDashboardUrl,
   type ApiResponse,
 } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { formatApiError } from "../lib/format.js";
 import { pollUntilDone, type PollOptions, type PollResult } from "../lib/poll.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
@@ -267,6 +267,12 @@ export interface WorkflowImportResult {
   workflowId?: string;
   nodeCount: number;
   edgeCount: number;
+  // #921: the trigger set LIVE on the workflow after this import (in update mode
+  // a contract that omits the key leaves the existing triggers, so this echoes
+  // those). The CLI flags any ENABLED one — an import must never silently arm a
+  // background-run rule. Optional ON THE TYPE only (deployed CLIs mirror this
+  // interface and predate the field); importWorkflow always populates it.
+  triggers?: WorkflowTrigger[];
   unresolved: UnresolvedWorkflowRef[];
   warnings: string[];
 }
@@ -545,7 +551,12 @@ export type WorkflowArtifact =
   // hand-edits one. Both optional so non-gate text artifacts stay shape-compatible.
   | { type: "text"; text: string; label?: string; port?: string; humanEdited?: boolean }
   | { type: "primer"; text: string; primerKind: string }
-  | { type: "image"; storageId: string; imageUrl?: string };
+  | { type: "image"; storageId: string; imageUrl?: string }
+  // #855 (MS-1) / #926: a session handle recorded on a node's outputs. A
+  // session-mode Bot wires its `session` output into the gate's `session` input;
+  // the parked gate node carries this artifact (port "session"), which is how
+  // `gate push` resolves the gate's live session (mirror of convex graph.ts).
+  | { type: "session"; sessionId: string; label?: string; port?: string };
 
 /**
  * A FINAL deliverable (#508): a producing node's artifact wired into the Output
@@ -768,7 +779,37 @@ function asErrorResult(res: ApiResponse<unknown>, json: boolean): FlowResult {
     code: 1,
     lines: json
       ? [JSON.stringify({ ok: false, status: res.status, data: res.data })]
-      : [formatError(res)],
+      // #913: the 2.0 verbs render server errors as the clean one-liner their
+      // sibling verbs use (message + remedy), never the legacy `## Error` block.
+      : [formatApiError(res)],
+  };
+}
+
+/**
+ * #931: resolveWorkflowId's failures (a name/id miss, or a failed workflow-list
+ * fetch) must honor --json exactly like every other error path. Previously each
+ * flow's catch emitted a bare `e.message` string even under --json, so a parsing
+ * agent got an unparseable line. resolveWorkflowId throws {@link WorkflowResolveError}
+ * carrying the same `{ status, data }` an ApiResponse would, so here we can emit
+ * the identical `{ ok: false, status, data }` envelope asErrorResult produces —
+ * or, in human mode, the clean one-liner + remedy.
+ */
+function resolveIdErrorResult(e: unknown, json: boolean): FlowResult {
+  if (e instanceof WorkflowResolveError) {
+    return {
+      code: 1,
+      lines: json
+        ? [JSON.stringify({ ok: false, status: e.status, data: e.data })]
+        : [e.message],
+    };
+  }
+  // A non-resolve error still shouldn't leak a bare string under --json.
+  const message = e instanceof Error ? e.message : String(e);
+  return {
+    code: 1,
+    lines: json
+      ? [JSON.stringify({ ok: false, status: 0, data: { error: { message } } })]
+      : [message],
   };
 }
 
@@ -815,12 +856,48 @@ function outputLines(output: WorkflowArtifact): string[] {
   if (output.type === "primer") {
     return [`    primer:${output.primerKind}: ${truncateText(output.text)}`];
   }
-  return [`    image: ${output.imageUrl ?? output.storageId}`];
+  if (output.type === "image") {
+    // #923: a text-only run's session/empty artifacts once rendered a bare
+    // `image: undefined` line — omit a port with no value entirely.
+    const url = output.imageUrl ?? output.storageId;
+    return url ? [`    image: ${url}`] : [];
+  }
+  // #926: a session handle carries no reviewer-facing text — nothing to print
+  // in the node output list (and never a `<port>: undefined` line).
+  return [];
 }
 
-function progressLine(node: WorkflowRunNode): string {
+/**
+ * One node status line. #923/#929: while the run is parked (`awaiting-review`)
+ * on THIS node, the node row itself already reads `done` (the gate records its
+ * candidates before the human resolves) — but the pausedNodeId is the truth, so
+ * render it as `⏸ … awaiting review` rather than a misleading `✓ … done`.
+ */
+function progressLine(node: WorkflowRunNode, parked = false): string {
   const err = node.error ? ` — error: ${node.error}` : "";
+  if (parked) {
+    return `  ⏸ ${node.nodeId} (${node.kind}) awaiting review`;
+  }
   return `  ${statusIcon(node.status)} ${node.nodeId} (${node.kind}) ${node.status}${err}`;
+}
+
+/**
+ * #931: which node (if any) should render as `⏸ awaiting review` — and get the
+ * `— awaiting review, not yet approved` outputs suffix. ONLY a copy-review gate
+ * qualifies: a "taste" park, or a legacy video cost-gate park (absent pauseReason).
+ * "repair", "slots", and "call" parks are ALSO `awaiting-review` but their paused
+ * node is not a gate (a repair collector is deliberately idle), so those node rows
+ * stay as-is — the pause banner above already names the reason. Returns the
+ * paused node id when the override applies, else undefined.
+ */
+function gateParkedNodeId(
+  status: string | undefined,
+  pauseReason: WorkflowPauseReason | undefined,
+  pausedNodeId: string | undefined,
+): string | undefined {
+  if (status !== "awaiting-review") return undefined;
+  if (pauseReason === "taste" || pauseReason === undefined) return pausedNodeId;
+  return undefined;
 }
 
 /**
@@ -1013,6 +1090,35 @@ export function formatImportSummary(
   lines.push(`nodes:       ${result.nodeCount}`);
   lines.push(`edges:       ${result.edgeCount}`);
 
+  // #921: report the trigger set this import installed, WARNING loudly on any
+  // enabled one — a CLI import must never silently arm a background-run rule.
+  // Older servers omit the field entirely (nothing to show); an empty array
+  // means "no triggers", also nothing to warn about.
+  if (result.triggers && result.triggers.length > 0) {
+    lines.push("");
+    const enabledCount = result.triggers.filter((t) => t.enabled).length;
+    lines.push(`Triggers (${result.triggers.length}):`);
+    for (const t of result.triggers) {
+      const detail = t.type === "event" ? `event (${t.event})` : `cron (${t.cron})`;
+      if (t.enabled) {
+        const fires =
+          t.type === "event"
+            ? t.event === "winner-promoted"
+              ? "fires on every promote"
+              : `fires on ${t.event}`
+            : `fires on schedule ${t.cron}`;
+        lines.push(`  ⚠ ${detail} — ENABLED, ${fires}`);
+      } else {
+        lines.push(`  ${detail} — disabled`);
+      }
+    }
+    if (enabledCount > 0) {
+      lines.push(
+        `  ⚠ ${enabledCount} enabled trigger${enabledCount === 1 ? "" : "s"} armed — a background run may start on the owner's keys. Disable with: exodus workflow triggers <id> disable <n>`,
+      );
+    }
+  }
+
   if (result.unresolved.length > 0) {
     lines.push("");
     lines.push(`Unresolved references (${result.unresolved.length}):`);
@@ -1045,11 +1151,22 @@ export function formatWorkflowRun(run: WorkflowRun): string {
     lines.push(`inputs:       ${inputs}`);
   }
 
+  // #923/#929: while the run is parked at a copy-review GATE, the pausedNodeId is
+  // the truth even though its node row already reads `done` — flag it (and its
+  // outputs) so nothing reads as finished/approved before the human resolves.
+  // #931: gate on the park KIND — repair/slots/call parks are also awaiting-review
+  // but their paused node is not a gate, so they must NOT be relabeled.
+  const parkedNodeId = gateParkedNodeId(
+    run.status,
+    run.pauseReason,
+    run.pausedNodeId,
+  );
+
   if (run.nodes.length > 0) {
     lines.push("");
     lines.push(`Nodes (${run.nodes.length}):`);
     for (const node of run.nodes) {
-      lines.push(progressLine(node));
+      lines.push(progressLine(node, parkedNodeId !== undefined && node.nodeId === parkedNodeId));
       for (const output of node.outputs) lines.push(...outputLines(output));
     }
   }
@@ -1057,7 +1174,14 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   if (run.outputs && run.outputs.length > 0) {
     lines.push("");
     lines.push(`Outputs (${run.outputs.length}):`);
-    for (const output of run.outputs) lines.push(...runOutputLines(output));
+    for (const output of run.outputs) {
+      lines.push(
+        ...runOutputLines(
+          output,
+          parkedNodeId !== undefined && output.nodeId === parkedNodeId,
+        ),
+      );
+    }
   }
 
   // #893: continue any chat sessions this run opened.
@@ -1074,33 +1198,39 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   return lines.join("\n");
 }
 
-/** Render one flattened final deliverable — the chaining surface (#508). */
-function runOutputLines(output: WorkflowRunOutput): string[] {
+/**
+ * Render one flattened final deliverable — the chaining surface (#508).
+ * #929: when the run is parked and this deliverable belongs to the parked gate,
+ * `awaitingReview` flags it so an agent harvesting outputs on `awaiting-review`
+ * can't mistake the un-gated candidate for approved copy.
+ */
+function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): string[] {
   const slug = output.botSlug ? ` (${output.botSlug})` : "";
+  const review = awaitingReview ? " — awaiting review, not yet approved" : "";
   if (output.type === "image") {
-    return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}`];
+    return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
   }
   // #539 media deliverables — one line each; the JSON output carries full detail.
   if (output.type === "video") {
     const tag = output.final === true ? "final video" : "video";
-    return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}`];
+    return [`  ${output.label} [${tag}]${slug}: ${output.videoUrl ?? "(no url)"}${review}`];
   }
   if (output.type === "audio") {
-    return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}`];
+    return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}${review}`];
   }
   if (output.type === "frames") {
     const n = output.frames?.length ?? 0;
-    return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}`];
+    return [`  ${output.label} [frames]${slug}: ${n} scene${n === 1 ? "" : "s"}${review}`];
   }
   if (output.type === "storyboard") {
-    return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan`];
+    return [`  ${output.label} [storyboard]${slug}: use --json for the scene plan${review}`];
   }
   const raw = output.text ?? "";
   const normalized = raw.replace(/\s+/g, " ").trim();
   const body = truncateText(raw, 400);
   const note =
     normalized.length > 400 ? "\n    (truncated — use --json for the full text)" : "";
-  return [`  ${output.label} [text]${slug}:`, `    ${body}${note}`];
+  return [`  ${output.label} [text]${slug}${review}:`, `    ${body}${note}`];
 }
 
 // ── describe rendering (#506) ────────────────────────────────────────────
@@ -1483,17 +1613,53 @@ function formatImportError(res: ApiResponse<unknown>): string {
   }
 
   // FORBIDDEN / NOT_FOUND / BAD_REQUEST / anything else → the shared clean render.
-  return formatError(res);
+  return formatApiError(res);
 }
 
 // ── Network-touching flows (dependency-injected for tests) ───────────────
 
+/**
+ * #931: thrown by resolveWorkflowId so each flow's catch can render a structured
+ * `{ ok: false, status, data }` envelope under --json (via {@link resolveIdErrorResult}),
+ * matching every other error path — instead of leaking a bare human string.
+ * `message` stays the clean human one-liner + remedy for non-JSON mode.
+ */
+class WorkflowResolveError extends Error {
+  constructor(
+    readonly status: number,
+    readonly data: unknown,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkflowResolveError";
+  }
+}
+
 export async function resolveWorkflowId(ref: string, deps: WorkflowRunDeps): Promise<string> {
   const res = await deps.get(LIST_PATH);
-  if (!res.ok) throw new Error(formatError(res));
+  // The list fetch itself failed — carry the server response through so --json
+  // callers get the same `{ status, data }` envelope every server error yields.
+  if (!res.ok) throw new WorkflowResolveError(res.status, res.data, formatApiError(res));
   const workflows = (res.data as WorkflowListResponse).workflows ?? [];
-  const match = workflows.find((w) => w.name.toLowerCase() === ref.toLowerCase());
-  return match?._id ?? ref;
+  // A NAME (case-insensitive) resolves to its id.
+  const byName = workflows.find((w) => w.name.toLowerCase() === ref.toLowerCase());
+  if (byName) return byName._id;
+  // A raw id the member passed directly is only trusted when it's a workflow
+  // actually visible to this brand (present in the list, cross-brand rows
+  // included). #919: never fall through to sending an unrecognized name/id as
+  // the `id` param — the server rejects it as "id is not a valid workflow id",
+  // which reads like a CLI plumbing failure when the member passed a name. Fail
+  // client-side with the remedy instead.
+  const byId = workflows.find((w) => w._id === ref);
+  if (byId) return byId._id;
+  // #931: a client-side miss synthesizes a NOT_FOUND envelope (mirroring the
+  // server error shape asErrorResult renders) so --json stays parseable.
+  const message = `No workflow named "${ref}" on this brand — run: exodus workflow list`;
+  throw new WorkflowResolveError(
+    404,
+    { error: { code: "NOT_FOUND", message } },
+    message,
+  );
 }
 
 export async function listFlow(json: boolean, deps: WorkflowRunDeps): Promise<FlowResult> {
@@ -1515,7 +1681,8 @@ export async function describeFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
 
   const res = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
@@ -1557,7 +1724,8 @@ export async function runFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
 
   const body = {
@@ -1620,7 +1788,9 @@ async function waitForRun(
   },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  const seen = new Map<string, WorkflowNodeRunStatus>();
+  // #931: keyed on the RENDERED state (`${status}:${parked}`), not status alone —
+  // see the dedup note in the poll loop below.
+  const seen = new Map<string, string>();
   let pausedNotified = false;
   const pollResult = await deps.poll({
     path: `${STATUS_PATH}?runId=${encodeURIComponent(runId)}`,
@@ -1645,11 +1815,27 @@ async function waitForRun(
           opts.onProgressLine(line);
         }
       }
+      // #923/#929: while parked at a copy-review gate, the paused node streams as
+      // `⏸ awaiting review` rather than a misleading `✓ done` (matches the final
+      // formatWorkflowRun). #931: gate on the park KIND, same as the final render —
+      // repair/slots/call parks leave their paused node as-is.
+      const parkedNodeId = gateParkedNodeId(
+        raw["status"] as string | undefined,
+        raw["pauseReason"] as WorkflowPauseReason | undefined,
+        raw["pausedNodeId"] as string | undefined,
+      );
       const nodes = Array.isArray(raw["nodes"]) ? (raw["nodes"] as WorkflowRunNode[]) : [];
       for (const node of nodes) {
-        if (seen.get(node.nodeId) === node.status) continue;
-        seen.set(node.nodeId, node.status);
-        opts.onProgressLine(progressLine(node));
+        // #931: dedup on the RENDERED state, not status alone. A gate node can
+        // reach `done` while the run is still `running`, then the run flips to
+        // `awaiting-review` with the node STILL `done` — keying on status alone
+        // suppressed the ⏸ transition. Fold the parked flag into the key so the
+        // transition to parked always emits.
+        const isParked = parkedNodeId !== undefined && node.nodeId === parkedNodeId;
+        const renderKey = `${node.status}:${isParked}`;
+        if (seen.get(node.nodeId) === renderKey) continue;
+        seen.set(node.nodeId, renderKey);
+        opts.onProgressLine(progressLine(node, isParked));
       }
     },
   });
@@ -1705,7 +1891,8 @@ export async function exportFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
 
   const versionParam =
@@ -1758,7 +1945,8 @@ export async function versionsFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
 
   const res = await deps.get(`${VERSIONS_PATH}?id=${encodeURIComponent(workflowId)}`);
@@ -1959,7 +2147,8 @@ export async function triggersListFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
   const fetched = await fetchTriggers(workflowId, deps);
   if (!fetched.ok) return triggerErrorResult(fetched.res, "workflow triggers", opts.json);
@@ -2001,7 +2190,8 @@ export async function triggersSetEnabledFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
   const fetched = await fetchTriggers(workflowId, deps);
   if (!fetched.ok) return triggerErrorResult(fetched.res, verb, opts.json);
@@ -2048,7 +2238,8 @@ export async function triggersFireFlow(
   try {
     workflowId = await resolveWorkflowId(workflowRef, deps);
   } catch (e) {
-    return { code: 1, lines: [e instanceof Error ? e.message : String(e)] };
+    // #931: honor --json — a name/id miss is a structured envelope, not a bare line.
+    return resolveIdErrorResult(e, opts.json ?? false);
   }
   const fetched = await fetchTriggers(workflowId, deps);
   if (!fetched.ok) return triggerErrorResult(fetched.res, verb, opts.json);
@@ -2231,9 +2422,10 @@ export async function templatesExportFlow(
 
 /**
  * Render an error from a RAW-text endpoint. The body is a string; if it parses
- * to our apiError envelope, reuse formatError (surfaces the 404's code+message,
- * e.g. templates "unknown key" naming the valid keys). Otherwise print the raw
- * body so nothing is swallowed.
+ * to our apiError envelope, reuse the clean one-liner render (#913: surfaces the
+ * 404's message, e.g. templates "unknown key" naming the valid keys — NOT the
+ * legacy `## Error` markdown block). Otherwise print the raw body so nothing is
+ * swallowed.
  */
 function formatTextError(res: ApiResponse<string>): string {
   const body = res.data;
@@ -2242,9 +2434,9 @@ function formatTextError(res: ApiResponse<string>): string {
     parsed = JSON.parse(body);
   } catch {
     const snippet = body.replace(/\s+/g, " ").trim().slice(0, 300);
-    return formatError({ ok: false, status: res.status, data: snippet || "(empty response)" });
+    return formatApiError({ ok: false, status: res.status, data: snippet || "(empty response)" });
   }
-  return formatError({ ok: false, status: res.status, data: parsed });
+  return formatApiError({ ok: false, status: res.status, data: parsed });
 }
 
 export async function schemaFlow(
@@ -2300,11 +2492,6 @@ export interface WorkflowInboxResponse {
   runs: WorkflowInboxRow[];
 }
 
-/** Compact a long Convex id for the inbox glance. */
-function shortId(id: string): string {
-  return id.length <= 12 ? id : `${id.slice(0, 11)}…`;
-}
-
 /**
  * A coarse relative age ("3d" / "5h" / "2m" / "9s"); `now` is injectable so the
  * inbox render is deterministic under test. Mirrors session.ts's formatAge.
@@ -2348,7 +2535,9 @@ export function formatInbox(rows: WorkflowInboxRow[], now = Date.now()): string 
   return table(
     ["run", "workflow", "kind", "node", "via", "age"],
     rows.map((r) => [
-      shortId(r._id),
+      // #928: print the FULL runId — it's the handle every resolve verb needs
+      // (gate/repair/answer). shortId's ellipsis left the human view a dead end.
+      r._id,
       r.workflowName || "(unnamed)",
       parkBadge(r.pauseReason),
       r.pausedNodeId ?? "-",
@@ -2628,6 +2817,33 @@ export async function gateEditFlow(
   );
 }
 
+/**
+ * #926: the id of the gate's wired live session. Preference order:
+ *   1. the session artifact on the PAUSED GATE NODE's outputs (type "session",
+ *      port "session") — how the server resolves it (edge-aware, the documented
+ *      bot.session → gate.session wiring);
+ *   2. the legacy sessions[]-by-pausedNodeId find (never matched the documented
+ *      wiring, but harmless as a fallback).
+ * #931: NO single-live-session heuristic. If the gate has no wired session but
+ * the run opened one UNRELATED bot session, pushing into it would mutate the
+ * wrong conversation (and the server's append-from-session rejects it anyway) —
+ * so a miss returns undefined and the caller errors cleanly.
+ */
+function resolveGateSessionId(run: WorkflowRun): string | undefined {
+  const gateNode = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
+  const artifact = (gateNode?.outputs ?? []).find(
+    (a): a is Extract<WorkflowArtifact, { type: "session" }> =>
+      a.type === "session" && a.port === "session" && !!a.sessionId,
+  );
+  if (artifact) return artifact.sessionId;
+
+  const sessions = run.sessions ?? [];
+  const byNode = sessions.find((s) => s.nodeId === run.pausedNodeId);
+  if (byNode) return byNode.sessionId;
+
+  return undefined;
+}
+
 export async function gatePushFlow(
   runId: string,
   message: string,
@@ -2637,9 +2853,17 @@ export async function gatePushFlow(
   const pf = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
   if (!pf.ok) return pf.result;
 
-  // The gate's LIVE session is the sessions entry whose nodeId matches the park.
-  const session = (pf.run.sessions ?? []).find((s) => s.nodeId === pf.run.pausedNodeId);
-  if (!session) return errLine("This gate has no live session — nothing to push to.", opts.json);
+  // #926: resolve the gate's WIRED session. The session reaches the gate through
+  // a graph edge (bot.session → gate.session), so the server records it as a
+  // session artifact on the PAUSED GATE NODE's outputs (type "session", port
+  // "session") — exactly how the server itself resolves it
+  // (appendGateCandidateFromSession). The old `sessions[].find(s.nodeId ===
+  // pausedNodeId)` never matched, because sessions[] carries the session-
+  // CREATING bot's nodeId, not the gate's — so push was dead for the documented
+  // wiring. Fall back to that legacy find only; #931 removed the single-live-
+  // session heuristic (it could push into an UNRELATED conversation).
+  const sessionId = resolveGateSessionId(pf.run);
+  if (!sessionId) return errLine("This gate has no live session — nothing to push to.", opts.json);
   if (!deps.postDashboard) {
     return errLine("gate push is unavailable here (no dashboard client).", opts.json);
   }
@@ -2648,7 +2872,7 @@ export async function gatePushFlow(
   // `session chat` — errors surface verbatim, not #896-mapped).
   const chat = await deps.postDashboard(
     CHAT_PATH,
-    { sessionId: session.sessionId, text: message },
+    { sessionId, text: message },
     { timeoutMs: CHAT_TIMEOUT_MS },
   );
   if (!chat.ok) {

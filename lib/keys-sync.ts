@@ -35,9 +35,14 @@ export const PROVIDER_ENV_MAP: Record<string, string> = {
 // `scrapecreators` follows the same pattern: the Wild Source scraper key is
 // snapshotted onto the scraper run row server-side and decrypted in the
 // Trigger worker — the local host never reads it from .env.
+// `apify` is the same story (#911): the Wild Source Apify scraper key is used
+// server-side per run from Settings → Keys, never from a local .env var. It
+// belongs on the "used server-side; no .env entry needed" line with its
+// siblings, not in the ambiguous "no known env var mapping" skip bucket.
 export const SERVER_RESOLVED_PROVIDERS = new Set<string>([
   "imgflip",
   "scrapecreators",
+  "apify",
 ]);
 
 export interface RemoteKeys {

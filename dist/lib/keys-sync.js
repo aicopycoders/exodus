@@ -11,6 +11,7 @@ export const PROVIDER_ENV_MAP = {
 export const SERVER_RESOLVED_PROVIDERS = new Set([
     "imgflip",
     "scrapecreators",
+    "apify",
 ]);
 export async function fetchRemoteKeys() {
     const res = await apiGetDashboard("/api/settings/keys");

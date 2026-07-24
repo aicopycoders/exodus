@@ -52,6 +52,7 @@ export interface BankPromoteBody {
 export interface BankPromoteResponse {
     entryId: string;
     bankName: string;
+    event?: string;
 }
 export interface FlowResult {
     code: number;

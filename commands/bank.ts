@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { apiGet, apiPost, type ApiResponse } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { formatApiError } from "../lib/format.js";
 import { getChannel, type Channel } from "../lib/channel.js";
 import { missingRouteLine } from "../lib/route-support.js";
 
@@ -38,7 +38,7 @@ Examples:
   exodus bank list
   exodus bank show hooks
   exodus bank promote hooks "Stop scrolling — your knees will thank you"
-  exodus bank promote body --file winner.txt --awareness solutionProductAware
+  exodus bank promote body:solutionProductAware --file winner.txt --awareness solutionProductAware
   cat winner.txt | exodus bank promote hooks
   exodus bank promote hooks "..." --spend 4200 --roas 3.1 --ctr 1.8 --note "Q3 winner"
   exodus bank promote hooks "..." --run wr_123 --node bot-4
@@ -115,6 +115,12 @@ export interface BankPromoteBody {
 export interface BankPromoteResponse {
   entryId: string;
   bankName: string;
+  // #921: the platform event a promote dispatched (currently "winner-promoted").
+  // The human output already prints the flywheel note; this is its --json
+  // counterpart so a parsing agent keeps the signal that a background run may
+  // have started. Optional — older servers omit it (promote passes res.data
+  // through verbatim under --json, so the field surfaces whenever present).
+  event?: string;
 }
 
 const LIST_PATH = "/api/v2/banks";
@@ -160,7 +166,7 @@ function asErrorResult(res: ApiResponse<unknown>, json: boolean): FlowResult {
     code: 1,
     lines: json
       ? [JSON.stringify({ ok: false, status: res.status, data: res.data })]
-      : [formatError(res)],
+      : [formatApiError(res)],
   };
 }
 

@@ -140,6 +140,37 @@ export function formatBrowse(generations) {
     }
     return lines.join("\n");
 }
+export function formatApiError(res) {
+    let message;
+    let remedy;
+    const d = res.data;
+    if (d && typeof d === "object" && !Array.isArray(d)) {
+        const rec = d;
+        const err = rec["error"];
+        if (typeof err === "string" && err) {
+            message = err;
+        }
+        else if (err && typeof err === "object") {
+            const e = err;
+            if (typeof e["message"] === "string" && e["message"])
+                message = e["message"];
+            if (typeof e["remedy"] === "string" && e["remedy"])
+                remedy = e["remedy"];
+        }
+        if (!message && typeof rec["message"] === "string" && rec["message"]) {
+            message = rec["message"];
+        }
+        if (!remedy && typeof rec["remedy"] === "string" && rec["remedy"]) {
+            remedy = rec["remedy"];
+        }
+    }
+    else if (typeof d === "string" && d.trim()) {
+        message = d.trim();
+    }
+    if (!message)
+        message = `HTTP ${res.status}`;
+    return remedy ? `${message}\nfix: ${remedy}` : message;
+}
 export function formatError(res) {
     const lines = [];
     lines.push(`## Error`);
