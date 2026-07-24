@@ -14,6 +14,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-creative | Creative-Suite Engines (native / copy-derived / ref-match) — when you've already picked an engine |
 | exodus-template | Ad-Type Format Variations across 50 structured formats |
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
+| exodus-workflow | Run/build saved multi-node workflows, resolve inbox gate/repair parks, continue sessions, fire triggers, read banks + promote winners |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
 | exodus-winners | Mine your own Meta ad account for winners (needs the Meta Ads MCP) and import them into Exodus |
@@ -167,6 +168,31 @@ Typical flow:
 Keys (strict BYOK, preflighted server-side): classic memes need the member's
 Imgflip login; AI memes need their Kie.ai key; captions always need an LLM key.
 Returns: runId + dashboard URL /creative-suite/runs/<runId> (results land in the library).
+```
+
+---
+
+## exodus-workflow
+
+**What it does:** Run, chain, build, and edit saved multi-node Exodus Workflows from the CLI — the automations that wire Genesis bots, primers, briefs, and image nodes together on the dashboard canvas. Also resolves runs that park at a gate or repair step (from the inbox), continues bot chat sessions, enables/fires triggers, reads copy banks, and promotes a winner (which fires the Winner Flywheel).
+
+```operator-guide
+Say something like:
+  "exodus, run my launch workflow"
+  "exodus, what does this workflow need"
+  "exodus, check my workflow inbox"
+  "exodus, review that gate" / "exodus, approve the run"
+  "exodus, continue that session"
+  "exodus, promote this winner"
+
+Representative commands:
+  exodus workflow list
+  exodus workflow run <wf> --wait
+  exodus workflow inbox
+  exodus workflow gate <runId> pick 3,7 | edit 4 | push "punchier" | approve | reject
+  exodus session list | show | chat
+  exodus bank list | show <key> | promote <key>
+Every workflow/session/bank verb takes --json — that output is the machine API.
 ```
 
 ---

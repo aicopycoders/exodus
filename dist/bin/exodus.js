@@ -20,6 +20,8 @@ const OTHER_COMMANDS = new Set([
     "migrate",
     "segment",
     "workflow",
+    "session",
+    "bank",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",

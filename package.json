@@ -1,6 +1,6 @@
 {
   "name": "@aicopycoders/exodus",
-  "version": "2026.7.200-beta.11",
+  "version": "2026.7.200-beta.12",
   "description": "CLI + Claude Code skills for the Copycoders Exodus ad pipeline",
   "repository": {
     "type": "git",
@@ -28,8 +28,11 @@
     "prepack": "npm run build && npm run bundle-assets",
     "dev": "tsx bin/exodus.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "js-yaml": "^4.1.1"
+  },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.0.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.7.0",

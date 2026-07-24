@@ -30,6 +30,8 @@ const OTHER_COMMANDS = new Set([
   "migrate",
   "segment",
   "workflow",
+  "session",
+  "bank",
 ]);
 
 // Commands kept runnable (back-compat / power users) but hidden from the

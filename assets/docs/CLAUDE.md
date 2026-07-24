@@ -59,6 +59,7 @@ These are the **Exodus** pipelines — the automatic system that drives the Gene
 | **Creative** | `exodus-creative` | A specific creative-suite engine (native / copy-derived renders from copy, or ref-match to a reference image) when you've already picked one. Otherwise start at **Image**. |
 | **Template** | `exodus-template` | Finished ad copy → many static ads across 50 structured formats (testimonial, hero, UGC…). Otherwise start at **Image**. |
 | **Meme** | `exodus-meme` | Meme ads — recommends formats for a brief, then one batched run renders AI-image and classic Imgflip-template memes server-side. |
+| **Workflow** | `exodus-workflow` | Run and build saved multi-node workflow automations from the CLI, resolve gate/repair parks from the inbox, continue bot sessions, fire triggers, and read banks or promote winners. |
 | **Browse** | `exodus-browse` | View history and retrieve past outputs |
 | **Drive** | `exodus-drive` | Read/write Google Docs, Sheets, and Drive files via `npx @aicopycoders/exodus drive` (uses the dashboard's Google OAuth — no local CLI) |
 | **Winners** | `exodus-winners` | Mine your own Meta ad account for winning ads (via the Meta Ads MCP) and import them into Exodus as generative fuel — interview, visual confirmation, `npx @aicopycoders/exodus winners import` |

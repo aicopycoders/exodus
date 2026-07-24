@@ -108,6 +108,16 @@ export async function apiGet(path, opts) {
     }
     return { ok: res.ok, status: res.status, data: data };
 }
+export async function apiGetText(path, opts) {
+    const { apiUrl, apiKey } = getConfig();
+    const url = `${apiUrl}${path}`;
+    const res = await fetch(url, {
+        method: "GET",
+        headers: buildHeaders(apiKey, undefined, opts),
+    });
+    const text = await res.text();
+    return { ok: res.ok, status: res.status, data: text };
+}
 export async function apiPost(path, body, opts) {
     const { apiUrl, apiKey } = getConfig();
     const url = `${apiUrl}${path}`;
@@ -187,15 +197,29 @@ export async function apiGetDashboard(path, opts) {
     }
     return { ok: res.ok, status: res.status, data: data };
 }
-export async function apiPostDashboard(path, body) {
+export async function apiPostDashboard(path, body, opts) {
     const { apiKey } = getConfig();
     const url = `${getDashboardUrl()}${path}`;
-    const headers = buildHeaders(apiKey);
-    const res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
+    const headers = buildHeaders(apiKey, undefined, {
+        activeBrandOverride: opts?.activeBrandOverride,
     });
+    const controller = opts?.timeoutMs ? new AbortController() : undefined;
+    const timer = controller
+        ? setTimeout(() => controller.abort(), opts.timeoutMs)
+        : undefined;
+    let res;
+    try {
+        res = await fetch(url, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            signal: controller?.signal,
+        });
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
     const text = await res.text();
     let data;
     try {

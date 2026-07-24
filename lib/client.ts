@@ -158,6 +158,28 @@ export async function apiGet<T>(
   return { ok: res.ok, status: res.status, data: data as T };
 }
 
+/**
+ * A GET that PRESERVES the raw response body as text — the counterpart to
+ * `apiGet`, which JSON-parses every body (and mangles non-JSON into an error
+ * object). Use this whenever the server renders a non-JSON payload the caller
+ * must keep byte-for-byte — e.g. the canonical YAML from
+ * `/api/v2/workflows/templates?key=…`, which `templates export` writes verbatim.
+ * Reuses buildHeaders/getConfig exactly like apiGet; never parses `data`.
+ */
+export async function apiGetText(
+  path: string,
+  opts?: { skipActiveBrand?: boolean; activeBrandOverride?: string },
+): Promise<ApiResponse<string>> {
+  const { apiUrl, apiKey } = getConfig();
+  const url = `${apiUrl}${path}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: buildHeaders(apiKey, undefined, opts),
+  });
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, data: text };
+}
+
 export async function apiPost<T>(
   path: string,
   body: unknown,
@@ -263,16 +285,32 @@ export async function apiGetDashboard<T>(
 
 export async function apiPostDashboard<T>(
   path: string,
-  body: unknown
+  body: unknown,
+  opts?: { timeoutMs?: number; activeBrandOverride?: string },
 ): Promise<ApiResponse<T>> {
   const { apiKey } = getConfig();
   const url = `${getDashboardUrl()}${path}`;
-  const headers = buildHeaders(apiKey);
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+  const headers = buildHeaders(apiKey, undefined, {
+    activeBrandOverride: opts?.activeBrandOverride,
   });
+  // Optional abort timeout so callers can bound a long-running dashboard route
+  // (e.g. the sessions chat route's 300s maxDuration). Omitted elsewhere =
+  // unchanged: no signal, so existing call sites behave exactly as before.
+  const controller = opts?.timeoutMs ? new AbortController() : undefined;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), opts!.timeoutMs)
+    : undefined;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   // Vercel/CDN error responses (504s, 502s, etc.) return HTML, not JSON.
   // Surface them as a structured error instead of crashing on JSON.parse.

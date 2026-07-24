@@ -18,7 +18,10 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Static image ads ("make images", "statics", "render this ad") | `exodus-image` (the image front door — it menus engines and confirms before firing) |
 | A specific image engine they already chose | `exodus-creative` (native / copy-derived / ref-match) or `exodus-template` (33 ad-type formats) |
 | Meme ads ("exodus, meme this offer", "make me meme ads") | `exodus-meme` |
-| Run / chain / build / edit a saved workflow ("run my workflow", "what does this workflow need", "build a workflow that…", "list my workflows") | `exodus-workflow` |
+| Run / chain / build / edit a saved workflow, enable/fire its triggers, or roll back a version ("run my workflow", "what does this workflow need", "build a workflow that…", "list my workflows", "enable/fire the trigger", "roll back my workflow", "workflow versions") | `exodus-workflow` |
+| Check the workflow inbox or review/resolve a parked run — gate or repair ("check my workflow inbox", "review that gate", "approve the run", "repair that run") | `exodus-workflow` |
+| Continue a bot chat session ("continue that session", "chat with the bot session", "list my sessions") | `exodus-workflow` |
+| Read copy banks or promote a winner ("show my hook bank", "list my banks", "promote this winner") | `exodus-workflow` |
 | Onboard a new brand / build the primer | `exodus-primer` (with winning ads) or `exodus-foundation` (no ads yet) |
 | List/switch/troubleshoot brands | `exodus-brand` |
 | See past runs / find an output | `exodus-browse` |
