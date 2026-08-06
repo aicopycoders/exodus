@@ -19,7 +19,7 @@
 //   but the CLI auths via Bearer only. Follow-up: add ref-image plumbing
 //   to convex/http.ts:6972.
 import { apiGet, apiPost, apiPostDashboard, getDashboardUrl } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError } from "../lib/format.js";
 import {
   AD_TYPES,
   AD_TYPE_NAMES,
@@ -334,7 +334,7 @@ async function runStatus(flags: Record<string, string | boolean>): Promise<void>
   const d = res.data;
   console.log(`runId:        ${d._id ?? runId}`);
   if (d.name) console.log(`name:         ${d.name}`);
-  console.log(`status:       ${d.status ?? "—"}`);
+  console.log(`status:       ${displayRunStatus(d.status, "—")}`);
   if (d.completedImageCount !== undefined || d.requestedImageCount !== undefined) {
     console.log(
       `progress:     ${d.completedImageCount ?? 0} / ${d.requestedImageCount ?? "?"} completed${

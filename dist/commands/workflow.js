@@ -1,7 +1,10 @@
 import fs from "node:fs";
+import path from "node:path";
+import nodePath from "node:path";
 import { apiGet, apiGetText, apiPost, apiPostDashboard, getDashboardUrl, } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
+import { normalizeRunStatus, runStatusLabel, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
@@ -15,8 +18,8 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--input key=value ...] [--terminal <nodeId> ...] [--wait] [--json]
-  exodus workflow status [--id <runId>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--wait] [--out <dir>] [--json]
+  exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
   exodus workflow validate <file> [--update <workflowId>] [--json]
@@ -26,12 +29,11 @@ Usage:
   exodus workflow triggers <workflowId|name> disable <n> [--json]
   exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--wait] [--json]
   exodus workflow inbox [--json]
-  exodus workflow gate <runId> [--json]
-  exodus workflow gate <runId> pick <n,..> [--json]
-  exodus workflow gate <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
-  exodus workflow gate <runId> push "<msg>" [--json]
-  exodus workflow gate <runId> approve [--wait] [--json]
-  exodus workflow gate <runId> reject [--reason "..."] [--json]
+  exodus workflow checkpoint <runId> [show] [--json]
+  exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
+  exodus workflow checkpoint <runId> approve [--reject <n[,n..]>] [--wait] [--json]
+  exodus workflow checkpoint <runId> retry [--wait] [--json]
+  exodus workflow checkpoint <runId> cancel [--reason "..."] [--json]
   exodus workflow repair <runId> retry|skip|kill [--wait] [--json]
   exodus workflow answer <runId> --slot key=value [--slot key=value ...] [--json]
 
@@ -43,13 +45,37 @@ Flags:
                          --input key=@path loads the value from a file (path is
                          resolved from the current directory); --input key=@@text
                          keeps a leading "@" as a literal character.
+                         FILE fields (an Asset Input — "workflow describe" shows
+                         them as source "asset") take a local file path instead:
+                         --input hero=./photos/hero.png. The CLI uploads the file
+                         and sends the stored asset in its place; a leading "@"
+                         is accepted and ignored. Pass an asset id from an
+                         earlier upload to reuse it. Accepted files: image PNG,
+                         JPEG, WebP, GIF (≤15MB) · video MP4, MOV, WebM (≤200MB)
+                         · audio MP3, M4A, WAV, OGG (≤50MB) · document PDF, TXT,
+                         MD, DOC, DOCX (≤25MB).
+  --fill <name>          (run) Launch from a saved fill — a named set of inputs
+                         saved on THIS brand's copy of the workflow. Its values
+                         become the run's inputs; any --input you also pass wins
+                         for that one key, so a fill is a starting point, not a
+                         lock. Names are exact (case-sensitive); an unknown one
+                         is rejected before the run starts. Fills are created and
+                         named in the dashboard's run dialog.
   --terminal <nodeId>    (run) Repeatable. Scope the run to the upstream closure
                          of these end node(s) — only nodes feeding a picked
                          terminal execute; the rest are recorded out-of-scope.
                          Omit to run the whole graph.
-  --wait                 Poll until the workflow run reaches a terminal status
+  --wait                 Poll until the workflow run reaches a terminal status.
+                         (checkpoint retry) Waits until the step's fresh output
+                         is ready and the run parks again — that IS its finish
+                         line; a redo never runs the workflow to completion.
   --id <runId>           Workflow run id for status detail
   --out <file>           Write the export to a file instead of stdout
+  --out <dir>            (run --wait / status --id) Save every delivered output
+                         of the finished run into this directory (created if
+                         missing) and print the paths — text as .md, storyboards
+                         and frame sets as .json, images/video/audio downloaded.
+                         Unfulfilled slots are reported, never written.
   --version <n>          (export) Export a saved historical version instead of the
                          current head. <n> is the real 1-based version id from
                          "workflow versions" (a positive integer). A version
@@ -69,9 +95,17 @@ Flags:
                          use validate as the standalone front door.
   --text "..."           (triggers fire) The input an EVENT trigger's run carries.
                          Required for event triggers; rejected for cron triggers.
-                         (gate edit) The replacement copy for one candidate.
-  --file <path>          (gate edit) Load the replacement copy from a file.
-  --reason "..."         (gate reject) Optional reason recorded on the cancel.
+                         (checkpoint edit) The replacement copy for one output.
+  --file <path>          (checkpoint edit) Load the replacement copy from a file.
+  --reason "..."         (checkpoint cancel) Optional reason recorded on the
+                         cancel.
+  --reject <n[,n..]>     (checkpoint approve) Only for a checkpoint that is
+                         reviewing a Splitter fan-out item by item. Drops those
+                         ITEM numbers (the "Item N of M" headings in the show
+                         listing, 1-based) and approves the rest. Rejecting is
+                         filtering, not failing — the run carries on with the
+                         survivors. Rejecting every item is refused: cancel
+                         instead.
   --slot key=value       (answer) Repeatable. One answer per pending slot.
   --kind <kind>          (schema) Print just one node kind's ports + config rules
   --face <face>          (schema) Print just one transform face's spec
@@ -85,11 +119,18 @@ Examples:
   exodus workflow templates export complete-ad-set --out my.yaml
   exodus workflow schema
   exodus workflow schema --kind transform
-  exodus workflow schema --face splitter
+  exodus workflow schema --kind splitter
+  exodus workflow schema --kind collector
+  exodus workflow schema --face collector
   exodus workflow run "Launch Flow" --input brief="new offer" --wait
   exodus workflow run "Launch Flow" --input brief=@brief.txt
+  exodus workflow run "Product Shots" --input hero=./photos/hero.png --wait
+  exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
+  exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
   exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
+  exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status --id wr_123
+  exodus workflow status --id wr_123 --out ./deliverables
   exodus workflow versions "Launch Flow"
   exodus workflow export "Launch Flow" --out workflow.yaml
   exodus workflow export "Launch Flow" --version 3 --out v3.yaml
@@ -101,12 +142,12 @@ Examples:
   exodus workflow triggers "Winner Flywheel" enable 1
   exodus workflow triggers "Winner Flywheel" fire 1 --text "new offer" --wait
   exodus workflow inbox
-  exodus workflow gate wr_123
-  exodus workflow gate wr_123 pick 1,3
-  exodus workflow gate wr_123 edit 2 --text "punchier hook"
-  exodus workflow gate wr_123 push "make it shorter"
-  exodus workflow gate wr_123 approve --wait
-  exodus workflow gate wr_123 reject --reason "off-brand"
+  exodus workflow checkpoint wr_123
+  exodus workflow checkpoint wr_123 edit 1 --text "tighter opener"
+  exodus workflow checkpoint wr_123 approve --wait
+  exodus workflow checkpoint wr_123 approve --reject 2,5 --wait
+  exodus workflow checkpoint wr_123 retry --wait
+  exodus workflow checkpoint wr_123 cancel --reason "wrong direction"
   exodus workflow repair wr_123 retry --wait
   exodus workflow answer wr_123 --slot tone=casual --slot length=short
 
@@ -116,11 +157,19 @@ Examples:
   exodus workflow export X --version 3 --out v3.yaml && exodus workflow import v3.yaml --update <id>
 
 Notes:
+  workflow describe prints the ENTRY CONTRACT — every input the workflow asks
+  for, whether it's required or optional, the shape it accepts (a dropdown and
+  its choices, a number, a true/false toggle; a plain text box shows no tag),
+  and the author's help text. Supply those keys with --input; a value the
+  contract can't accept is rejected before the run starts, naming the field.
+  "workflow run --fill <name>" launches from a saved fill instead of typing the
+  inputs again — the fill's values fill the contract, and any --input you pass
+  alongside it overrides just that key.
   Cold-start is a template, not a blank file: "workflow templates" lists the
   starters (incl. Winner Flywheel), "workflow templates export <key> --out f.yaml"
   writes the server-rendered YAML verbatim — edit it, then "workflow import f.yaml".
   "workflow schema" prints the LIVE graph vocabulary (node kinds, ports, config
-  rules, transform faces, gate policies, wiring rules) from the backend you're
+  rules, transform faces, collector policy, wiring rules) from the backend you're
   deployed against, so what you author matches what will validate; --kind/--face
   narrow it, --json is the machine payload. "workflow validate <file>" checks a
   file against the live backend (it IS import --dry-run under its own door).
@@ -141,15 +190,15 @@ Notes:
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
   workflow inbox lists every run parked waiting on you, badged by park kind
-  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A gate park
-  is resolved with the "gate" verbs: pick candidates by their 1-based number
-  (pick 1,3), edit one candidate's copy in place (edit 2 --text ...), push a
-  steering message into the gate's live chat session to bank a fresh candidate
-  (push "..."), then approve (resume) or reject (cancel). A require-all
-  collector that stalled on a dead input is a "repair" park — retry it, skip the
-  dead input, or kill the run. A nested sub-workflow waiting on inputs is a
-  "slots" park — answer it with repeatable --slot key=value flags (run "answer"
-  with no --slot to list the slot ids it wants).
+  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A run parked
+  at a checkpoint is resolved with the "checkpoint" verbs: show what the step
+  produced, edit one output in place (edit 1 --text ...), approve (resume),
+  retry (re-run just that step), or cancel. A require-all collector that stalled
+  on a dead input is a "repair" park — retry it, skip the dead input, or kill the
+  run. A nested sub-workflow waiting on inputs is a "slots" park — answer it with
+  repeatable --slot key=value flags (run "answer" with no --slot to list the slot
+  ids it wants). The "gate" verbs retired in 2.0 along with the Gate node — the
+  command now prints a pointer at "checkpoint" and exits 1.
 `.trim();
 const LIST_PATH = "/api/v2/workflows";
 const RUN_PATH = "/api/v2/workflows/run";
@@ -157,6 +206,8 @@ const STATUS_PATH = "/api/v2/workflow";
 const EXPORT_PATH = "/api/v2/workflows/export";
 const IMPORT_PATH = "/api/v2/workflows/import";
 const DESCRIBE_PATH = "/api/v2/workflows/describe";
+const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
+const ASSETS_PATH = "/api/v2/workflows/assets";
 const CATALOG_PATH = "/api/v2/workflows/catalog";
 const TRIGGERS_SET_ENABLED_PATH = "/api/v2/workflows/triggers/set-enabled";
 const TRIGGERS_FIRE_PATH = "/api/v2/workflows/triggers/fire";
@@ -166,15 +217,13 @@ const VERSIONS_PATH = "/api/v2/workflows/versions";
 const VERSIONS_CAP = 50;
 const INBOX_PATH = "/api/v2/workflow/inbox";
 const APPROVE_PATH = "/api/v2/workflow/approve";
-const GATE_PICK_PATH = "/api/v2/workflow/gate/pick";
-const GATE_EDIT_PATH = "/api/v2/workflow/gate/edit";
-const GATE_APPEND_PATH = "/api/v2/workflow/gate/append-from-session";
 const CANCEL_PATH = "/api/v2/workflow/cancel";
 const ANSWER_PATH = "/api/v2/workflow/answer";
 const REPAIR_RETRY_PATH = "/api/v2/workflow/repair/retry";
 const REPAIR_SKIP_PATH = "/api/v2/workflow/repair/skip";
-const CHAT_PATH = "/api/sessions/chat";
-const CHAT_TIMEOUT_MS = 320_000;
+const CHECKPOINT_RETRY_PATH = "/api/v2/workflow/checkpoint/retry";
+const CHECKPOINT_EDIT_PATH = "/api/v2/workflow/checkpoint/edit";
+const CHECKPOINT_RESOLVE_ITEMS_PATH = "/api/v2/workflow/checkpoint/resolve-items";
 const RUN_PAGE_PREFIX = "/runs/";
 const VALUE_FLAGS = new Set([
     "id",
@@ -184,6 +233,7 @@ const VALUE_FLAGS = new Set([
     "slug",
     "update",
     "terminal",
+    "fill",
     "text",
     "kind",
     "face",
@@ -191,7 +241,18 @@ const VALUE_FLAGS = new Set([
     "file",
     "reason",
     "slot",
+    "reject",
 ]);
+function defaultMkdirp(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+}
+async function defaultDownloadToFile(url, path) {
+    const res = await fetch(url);
+    if (!res.ok)
+        throw new Error(`download failed with HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(path, buf);
+}
 const defaultDeps = {
     get: (path) => apiGet(path),
     getText: (path) => apiGetText(path),
@@ -199,8 +260,33 @@ const defaultDeps = {
     readFile: (path) => fs.readFileSync(path, "utf-8"),
     writeFile: (path, text) => fs.writeFileSync(path, text, "utf-8"),
     poll: (opts) => pollUntilDone(opts),
+    mkdirp: defaultMkdirp,
+    downloadToFile: defaultDownloadToFile,
     postDashboard: (path, body, opts) => apiPostDashboard(path, body, opts),
     dashboardUrl: getDashboardUrl(),
+    statFile: (filePath) => {
+        try {
+            const stat = fs.statSync(filePath);
+            return stat.isFile() ? { size: stat.size } : null;
+        }
+        catch {
+            return null;
+        }
+    },
+    readFileBytes: (filePath) => fs.readFileSync(filePath),
+    uploadBytes: async (uploadUrl, contentType, bytes) => {
+        const res = await fetch(uploadUrl, {
+            method: "POST",
+            headers: { "Content-Type": contentType },
+            body: new Blob([bytes]),
+        });
+        if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            return { ok: false, status: res.status, body };
+        }
+        const parsed = (await res.json().catch(() => ({})));
+        return { ok: true, status: res.status, storageId: parsed.storageId };
+    },
 };
 function asErrorResult(res, json) {
     return {
@@ -278,17 +364,20 @@ function outputLines(output) {
 function progressLine(node, parked = false) {
     const err = node.error ? ` — error: ${node.error}` : "";
     if (parked) {
-        return `  ⏸ ${node.nodeId} (${node.kind}) awaiting review`;
+        return `  ⏸ ${node.nodeId} (${node.kind}) awaiting approval`;
     }
     return `  ${statusIcon(node.status)} ${node.nodeId} (${node.kind}) ${node.status}${err}`;
 }
 function gateParkedNodeId(status, pauseReason, pausedNodeId) {
-    if (status !== "awaiting-review")
+    if (!status || normalizeRunStatus(status) !== "awaiting-approval")
         return undefined;
-    if (pauseReason === "taste" || pauseReason === undefined)
+    if (pauseReason === "taste" || pauseReason === "checkpoint" || pauseReason === undefined) {
         return pausedNodeId;
+    }
     return undefined;
 }
+const RETIRED_GATE_VERB_POINTER = "The Gate node retired in 2.0 — runs now pause with the checkpoint switch on a node. " +
+    "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
 export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     if (!pauseReason) {
         return [
@@ -298,12 +387,24 @@ export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     if (pauseReason === "call") {
         return ["  ⏸ waiting on a child workflow run — it resumes on its own."];
     }
+    if (pauseReason === "checkpoint") {
+        return [
+            "  ⏸ paused at a checkpoint — a step's output is waiting on your approval.",
+            `     Resolve here:  exodus workflow checkpoint ${runId}`,
+            `     Or in the app: ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
+        ];
+    }
+    if (pauseReason === "taste") {
+        return [
+            "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen with the checkpoint switch.",
+            `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
+            `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
+            "     Then run the workflow again.",
+        ];
+    }
     const resolveVerb = pauseReason === "repair"
         ? `exodus workflow repair ${runId} retry|skip|kill`
-        : pauseReason === "slots"
-            ? `exodus workflow answer ${runId} --slot key=value`
-            :
-                `exodus workflow gate ${runId}`;
+        : `exodus workflow answer ${runId} --slot key=value`;
     return [
         "  ⏸ paused for review — waiting on you.",
         `     Resolve here:  ${resolveVerb}`,
@@ -331,7 +432,7 @@ function expandInputValue(key, value, readFile) {
     }
     return value;
 }
-export function parseInputFlags(args, readFile) {
+export function parseRawInputFlags(args) {
     const inputs = {};
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -354,9 +455,258 @@ export function parseInputFlags(args, readFile) {
         const key = raw.slice(0, eq).trim();
         if (!key)
             throw new Error(`--input must include a key (got "${raw}")`);
-        inputs[key] = expandInputValue(key, raw.slice(eq + 1), readFile);
+        inputs[key] = raw.slice(eq + 1);
     }
     return inputs;
+}
+export function parseInputFlags(args, readFile) {
+    const inputs = parseRawInputFlags(args);
+    for (const [key, value] of Object.entries(inputs)) {
+        inputs[key] = expandInputValue(key, value, readFile);
+    }
+    return inputs;
+}
+const MB = 1024 * 1024;
+export const ASSET_UPLOAD_POLICY = {
+    image: {
+        mimeByExtension: {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        },
+        maxBytes: 15 * MB,
+        accepts: "PNG, JPEG, WebP, GIF",
+    },
+    video: {
+        mimeByExtension: {
+            ".mp4": "video/mp4",
+            ".m4v": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+        },
+        maxBytes: 200 * MB,
+        accepts: "MP4, MOV, WebM",
+    },
+    audio: {
+        mimeByExtension: {
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+        },
+        maxBytes: 50 * MB,
+        accepts: "MP3, M4A, WAV, OGG",
+    },
+    document: {
+        mimeByExtension: {
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+            ".md": "text/markdown",
+            ".doc": "application/msword",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+        maxBytes: 25 * MB,
+        accepts: "PDF, TXT, Markdown, DOC, DOCX",
+    },
+};
+const MEDIA_FAMILIES = ["image", "video", "audio", "document"];
+function sizeLabel(bytes) {
+    return `${(bytes / MB).toFixed(1)}MB`;
+}
+function capLabel(bytes) {
+    return `${Math.round(bytes / MB)}MB`;
+}
+function assetMimeFor(filePath, assetType) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (!ext)
+        return null;
+    for (const family of assetType ? [assetType] : MEDIA_FAMILIES) {
+        const mime = ASSET_UPLOAD_POLICY[family].mimeByExtension[ext];
+        if (mime)
+            return { mime, family };
+    }
+    return null;
+}
+function acceptedLabel(assetType) {
+    if (assetType) {
+        const policy = ASSET_UPLOAD_POLICY[assetType];
+        return `${assetType} files (${policy.accepts}, up to ${capLabel(policy.maxBytes)})`;
+    }
+    return MEDIA_FAMILIES.map((family) => `${family} (${ASSET_UPLOAD_POLICY[family].accepts})`).join(", ");
+}
+function looksLikePath(value) {
+    if (value.includes("/") || value.includes("\\"))
+        return true;
+    if (value.startsWith("~"))
+        return true;
+    return /\.[A-Za-z0-9]{1,8}$/.test(value);
+}
+function planAssetUpload(field, filePath, size, assetType, deps) {
+    const name = path.basename(filePath);
+    const picked = assetMimeFor(filePath, assetType);
+    if (!picked) {
+        throw new Error(`--input ${field}: can't tell what kind of file "${name}" is — ${field} takes ${acceptedLabel(assetType)}`);
+    }
+    const { maxBytes } = ASSET_UPLOAD_POLICY[picked.family];
+    if (size > maxBytes) {
+        throw new Error(`--input ${field}: "${name}" is ${sizeLabel(size)} — over the ${capLabel(maxBytes)} limit for ${picked.family} uploads`);
+    }
+    if (!deps.readFileBytes || !deps.uploadBytes) {
+        throw new Error(`--input ${field}: cannot upload files here (no file access)`);
+    }
+    return { field, filePath, name, size, mime: picked.mime, family: picked.family };
+}
+async function pushAssetFile(plan, deps) {
+    const { field, name } = plan;
+    const mint = await deps.post(ASSET_UPLOAD_URL_PATH, {});
+    if (!mint.ok) {
+        throw new Error(missingRouteLine(mint, "workflow file inputs") ?? formatApiError(mint));
+    }
+    const minted = mint.data;
+    if (!minted.uploadUrl) {
+        throw new Error(`--input ${field}: the server did not return an upload URL for "${name}"`);
+    }
+    if (!minted.receiptId) {
+        throw new Error(`--input ${field}: the server did not return an upload receipt for "${name}"`);
+    }
+    let bytes;
+    try {
+        bytes = deps.readFileBytes(plan.filePath);
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`--input ${field}: could not read file "${plan.filePath}": ${msg}`);
+    }
+    const put = await deps.uploadBytes(minted.uploadUrl, plan.mime, bytes);
+    if (!put.ok || !put.storageId) {
+        const detail = put.body ? `: ${put.body.slice(0, 200)}` : "";
+        throw new Error(`--input ${field}: upload of "${name}" failed (HTTP ${put.status})${detail}`);
+    }
+    const registered = await deps.post(ASSETS_PATH, {
+        storageId: put.storageId,
+        receiptId: minted.receiptId,
+        filename: name,
+    });
+    if (!registered.ok) {
+        throw new Error(missingRouteLine(registered, "workflow file inputs") ?? formatApiError(registered));
+    }
+    const data = registered.data;
+    if (!data.assetId) {
+        throw new Error(`--input ${field}: the server did not return an asset id for "${name}"`);
+    }
+    return { assetId: data.assetId, mediaType: data.mediaType ?? plan.family };
+}
+function formatInputProblems(problems) {
+    if (problems.length === 1)
+        return problems[0];
+    return [
+        `${problems.length} of the --input values can't be used:`,
+        ...problems.map((line) => `  ${line}`),
+    ].join("\n");
+}
+function withReusableAssetIds(message, done) {
+    if (done.length === 0)
+        return message;
+    const flags = done.map((d) => `--input ${d.field}=${d.assetId}`).join(" ");
+    return (`${message}\n` +
+        `These files did upload — pass their ids to skip re-uploading them: ${flags}`);
+}
+function looksLikeFileArgument(value, deps) {
+    if (value.startsWith("@@"))
+        return false;
+    if (value.startsWith("@"))
+        return true;
+    if ((deps.statFile?.(value) ?? null) !== null)
+        return true;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value))
+        return false;
+    if (/\s/.test(value))
+        return false;
+    return looksLikePath(value);
+}
+async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
+    const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
+    if (!described.ok) {
+        const fileish = Object.keys(raw).filter((key) => looksLikeFileArgument(raw[key], deps));
+        if (fileish.length > 0) {
+            const reason = formatApiError(described).split("\n")[0];
+            throw new Error(`--input ${fileish.join(", ")}: couldn't confirm this workflow's inputs ` +
+                `(describe failed: ${reason}) — retry, or pass an already-uploaded asset id ` +
+                `instead of a file path.`);
+        }
+        const text = {};
+        for (const [key, value] of Object.entries(raw)) {
+            text[key] = expandInputValue(key, value, deps.readFile);
+        }
+        return text;
+    }
+    const descriptors = described.data.inputs ?? [];
+    const assetFields = new Map();
+    for (const descriptor of descriptors) {
+        if (descriptor?.source === "asset")
+            assetFields.set(descriptor.fieldName, descriptor);
+    }
+    if (!scoped) {
+        const missing = [...assetFields.values()].filter((d) => d.required && (raw[d.fieldName] ?? "").trim() === "");
+        if (missing.length > 0) {
+            const names = missing.map((d) => d.fieldName).join(", ");
+            const first = missing[0];
+            throw new Error(`Missing required file input(s): ${names}. Pass each one as a local file — ` +
+                `e.g. --input ${first.fieldName}=./path/to/file` +
+                (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""));
+        }
+    }
+    const prepared = {};
+    const planned = [];
+    const problems = [];
+    for (const [key, value] of Object.entries(raw)) {
+        const descriptor = assetFields.get(key);
+        if (!descriptor) {
+            try {
+                prepared[key] = expandInputValue(key, value, deps.readFile);
+            }
+            catch (e) {
+                problems.push(e instanceof Error ? e.message : String(e));
+            }
+            continue;
+        }
+        const hinted = value.startsWith("@");
+        const candidate = hinted ? value.slice(1) : value;
+        const stat = deps.statFile?.(candidate) ?? null;
+        if (!stat) {
+            if (hinted || looksLikePath(candidate)) {
+                problems.push(`--input ${key}: file not found: ${candidate}`);
+                continue;
+            }
+            prepared[key] = value;
+            continue;
+        }
+        try {
+            planned.push(planAssetUpload(key, candidate, stat.size, descriptor.assetType, deps));
+        }
+        catch (e) {
+            problems.push(e instanceof Error ? e.message : String(e));
+        }
+    }
+    if (problems.length > 0)
+        throw new Error(formatInputProblems(problems));
+    const done = [];
+    for (const plan of planned) {
+        let uploaded;
+        try {
+            uploaded = await pushAssetFile(plan, deps);
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            throw new Error(withReusableAssetIds(message, done));
+        }
+        note(`  uploaded ${plan.name} → ${plan.field} (${uploaded.mediaType}, ${sizeLabel(plan.size)})`);
+        prepared[plan.field] = uploaded.assetId;
+        done.push({ field: plan.field, assetId: uploaded.assetId });
+    }
+    return prepared;
 }
 export function parseTerminalFlags(args) {
     const ids = [];
@@ -382,6 +732,31 @@ export function parseTerminalFlags(args) {
     }
     return ids;
 }
+export function parseFillFlag(args) {
+    let name;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        let raw;
+        if (arg === "--fill") {
+            raw = args[i + 1];
+            i++;
+        }
+        else if (arg.startsWith("--fill=")) {
+            raw = arg.slice("--fill=".length);
+        }
+        else {
+            continue;
+        }
+        if (raw === undefined || raw.startsWith("--")) {
+            throw new Error("--fill requires a saved fill's name");
+        }
+        const trimmed = raw.trim();
+        if (!trimmed)
+            throw new Error("--fill requires a saved fill's name");
+        name = trimmed;
+    }
+    return name;
+}
 export function formatWorkflowList(workflows) {
     if (workflows.length === 0)
         return "No workflows found for the active brand.";
@@ -396,7 +771,7 @@ export function formatWorkflowList(workflows) {
 export function formatRecentRuns(runs) {
     if (runs.length === 0)
         return "No workflow runs found for the active brand.";
-    return table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, r.status, dateOnly(r.createdAt), r._id]));
+    return table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runStatusLabel(r.status), dateOnly(r.createdAt), r._id]));
 }
 export function formatWorkflowVersions(versions) {
     if (versions.length === 0) {
@@ -474,7 +849,7 @@ export function formatWorkflowRun(run) {
     lines.push(`workflowId:   ${run.workflowId}`);
     if (run.triggerRunId)
         lines.push(`triggerRunId: ${run.triggerRunId}`);
-    lines.push(`verdict:      ${run.status}${counts ? ` (${counts})` : ""}`);
+    lines.push(`verdict:      ${runStatusLabel(run.status)}${counts ? ` (${counts})` : ""}`);
     if (run.isTerminal)
         lines.push("terminal:     yes");
     if (run.error)
@@ -492,6 +867,12 @@ export function formatWorkflowRun(run) {
             for (const output of node.outputs)
                 lines.push(...outputLines(output));
         }
+    }
+    if (run.deliveries && run.deliveries.length > 0) {
+        lines.push("");
+        lines.push(`Deliveries (${run.deliveries.length}):`);
+        for (const delivery of run.deliveries)
+            lines.push(...deliveryLines(delivery));
     }
     if (run.outputs && run.outputs.length > 0) {
         lines.push("");
@@ -511,7 +892,7 @@ export function formatWorkflowRun(run) {
 }
 function runOutputLines(output, awaitingReview = false) {
     const slug = output.botSlug ? ` (${output.botSlug})` : "";
-    const review = awaitingReview ? " — awaiting review, not yet approved" : "";
+    const review = awaitingReview ? " — awaiting approval, not yet approved" : "";
     if (output.type === "image") {
         return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
     }
@@ -521,6 +902,12 @@ function runOutputLines(output, awaitingReview = false) {
     }
     if (output.type === "audio") {
         return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}${review}`];
+    }
+    if (output.type === "document") {
+        const name = output.filename ? ` ${output.filename}` : "";
+        return [
+            `  ${output.label} [document]${slug}:${name} ${output.documentUrl ?? "(no url)"}${review}`,
+        ];
     }
     if (output.type === "frames") {
         const n = output.frames?.length ?? 0;
@@ -534,6 +921,140 @@ function runOutputLines(output, awaitingReview = false) {
     const body = truncateText(raw, 400);
     const note = normalized.length > 400 ? "\n    (truncated — use --json for the full text)" : "";
     return [`  ${output.label} [text]${slug}${review}:`, `    ${body}${note}`];
+}
+function deliveryLines(delivery) {
+    const status = delivery.status === "unfulfilled" && delivery.error
+        ? `unfulfilled — ${delivery.error}`
+        : delivery.status;
+    const lines = [`  ${delivery.label} (${delivery.key}) · ${delivery.type} · ${status}`];
+    for (const artifact of delivery.artifacts) {
+        for (const line of runOutputLines(artifact))
+            lines.push(`  ${line}`);
+    }
+    return lines;
+}
+const ASSET_FALLBACK_EXT = {
+    image: "png",
+    video: "mp4",
+    audio: "mp3",
+};
+export function workflowFilenameSlug(name) {
+    const slug = (name ?? "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return slug || "workflow";
+}
+function extensionFromUrl(url) {
+    const withoutQuery = url.split(/[?#]/)[0];
+    const m = withoutQuery.match(/\.([a-z0-9]{1,5})$/i);
+    return m ? m[1].toLowerCase() : undefined;
+}
+function planArtifactFile(artifact) {
+    if (artifact.type === "text") {
+        return { kind: "text", ext: "md", body: artifact.text ?? "" };
+    }
+    if (artifact.type === "storyboard") {
+        const json = artifact.storyboardJson;
+        if (!json)
+            return { kind: "none", reason: "no storyboard JSON on this artifact" };
+        return { kind: "text", ext: "json", body: json.endsWith("\n") ? json : `${json}\n` };
+    }
+    if (artifact.type === "frames") {
+        return {
+            kind: "text",
+            ext: "json",
+            body: `${JSON.stringify(artifact.frames ?? [], null, 2)}\n`,
+        };
+    }
+    const url = artifact.type === "image"
+        ? (artifact.imageUrl ?? undefined)
+        : artifact.type === "video"
+            ? artifact.videoUrl
+            : artifact.type === "document"
+                ?
+                    artifact.documentUrl
+                : artifact.audioUrl;
+    if (!url)
+        return { kind: "none", reason: "no downloadable URL on this artifact" };
+    const filenameExt = artifact.type === "document" && artifact.filename
+        ? extensionFromUrl(artifact.filename)
+        : undefined;
+    return {
+        kind: "download",
+        ext: filenameExt ??
+            extensionFromUrl(url) ??
+            ASSET_FALLBACK_EXT[artifact.type] ??
+            "bin",
+        url,
+    };
+}
+export async function saveDeliveries(run, dir, deps) {
+    const paths = [];
+    if (!run.isTerminal) {
+        return {
+            paths,
+            lines: [
+                `Nothing saved — this run isn't finished yet (${run.status}). Try again once it is: exodus workflow status --id ${run._id} --out ${dir}`,
+            ],
+        };
+    }
+    const deliveries = run.deliveries ?? [];
+    if (deliveries.length === 0) {
+        return {
+            paths,
+            lines: [
+                "Nothing saved — this run has no named delivery slots. Either the workflow has no Output nodes, or the backend it ran on predates named outputs.",
+            ],
+        };
+    }
+    const mkdirp = deps.mkdirp ?? defaultMkdirp;
+    const downloadToFile = deps.downloadToFile ?? defaultDownloadToFile;
+    mkdirp(dir);
+    const stem = `${workflowFilenameSlug(run.workflowName)}-${run._id.slice(-8)}`;
+    const lines = [`Saved deliveries to ${dir}:`];
+    for (const delivery of deliveries) {
+        if (delivery.status !== "delivered" || delivery.artifacts.length === 0) {
+            const why = delivery.error !== undefined
+                ? `unfulfilled: ${delivery.error}`
+                : delivery.status === "delivered"
+                    ? "delivered but empty"
+                    : "unfulfilled";
+            lines.push(`  skipped  ${delivery.label} (${delivery.key}) — ${why}`);
+            continue;
+        }
+        for (let i = 0; i < delivery.artifacts.length; i++) {
+            const plan = planArtifactFile(delivery.artifacts[i]);
+            const suffix = i === 0 ? "" : `-${i + 1}`;
+            if (plan.kind === "none") {
+                lines.push(`  skipped  ${delivery.label} (${delivery.key})${suffix} — ${plan.reason}`);
+                continue;
+            }
+            const file = nodePath.join(dir, `${stem}-${workflowFilenameSlug(delivery.key)}${suffix}.${plan.ext}`);
+            try {
+                if (plan.kind === "text")
+                    deps.writeFile(file, plan.body);
+                else
+                    await downloadToFile(plan.url, file);
+                lines.push(`  wrote    ${file}`);
+                paths.push(file);
+            }
+            catch (e) {
+                lines.push(`  failed   ${file} — ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+    }
+    lines.push(`${paths.length} file${paths.length === 1 ? "" : "s"} written.`);
+    return { lines, paths };
+}
+function inputValueHint(input) {
+    if (input.type === "select") {
+        const options = input.options ?? [];
+        return options.length > 0 ? `one of: ${options.join(", ")}` : undefined;
+    }
+    if (input.type === "toggle")
+        return "true or false";
+    return undefined;
 }
 export function formatDescribe(res) {
     const lines = [];
@@ -550,8 +1071,13 @@ export function formatDescribe(res) {
     else {
         for (const input of res.inputs) {
             const req = input.required ? "required" : "optional";
+            const type = input.type && input.type !== "text" ? ` (${input.type})` : "";
             const bundle = input.bundleSize !== undefined ? `, bundle=${input.bundleSize}` : "";
-            lines.push(`  ${input.fieldName} — ${input.source}, ${req}${bundle}`);
+            const family = input.source === "asset" && input.assetType ? ` (${input.assetType})` : "";
+            lines.push(`  ${input.fieldName} — ${input.source}${family}${type}, ${req}${bundle}`);
+            const hint = inputValueHint(input);
+            if (hint)
+                lines.push(`      ${hint}`);
             if (input.description)
                 lines.push(`      ${input.description}`);
         }
@@ -721,9 +1247,12 @@ function schemaValueLines(value, indent) {
             if (isRecord(el)) {
                 const label = schemaEntryLabel(el);
                 if (label) {
-                    lines.push(`${indent}- ${label.value}`);
+                    const parked = el["parked"] === true;
+                    lines.push(`${indent}- ${label.value}${parked ? " (parked)" : ""}`);
                     const rest = { ...el };
                     delete rest[label.key];
+                    if (parked)
+                        delete rest["parked"];
                     lines.push(...schemaValueLines(rest, `${indent}    `));
                 }
                 else {
@@ -760,7 +1289,6 @@ const SCHEMA_SECTIONS = [
     { title: "Port types", keys: ["portTypes"] },
     { title: "Node kinds", keys: ["nodeKinds"] },
     { title: "Transform faces", keys: ["transformFaces"] },
-    { title: "Gate policies", keys: ["gatePolicies"] },
     { title: "Collector policy", keys: ["collectorPolicy"] },
     { title: "Deposits", keys: ["deposits"] },
     { title: "Slots", keys: ["slots"] },
@@ -946,9 +1474,33 @@ export async function runFlow(workflowRef, opts, deps) {
     catch (e) {
         return resolveIdErrorResult(e, opts.json ?? false);
     }
+    const preface = [];
+    const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
+    let inputs;
+    try {
+        inputs = await prepareRunInputs(workflowId, opts.inputs, deps, (line) => {
+            if (opts.json)
+                return;
+            if (opts.onProgressLine)
+                opts.onProgressLine(line);
+            else
+                preface.push(line);
+        }, scoped);
+    }
+    catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return {
+            code: 1,
+            lines: opts.json
+                ?
+                    [JSON.stringify({ ok: false, status: 400, data: { error: { code: "BAD_REQUEST", message } } })]
+                : [...preface, message],
+        };
+    }
     const body = {
         workflowId,
-        ...(Object.keys(opts.inputs).length > 0 ? { inputs: opts.inputs } : {}),
+        ...(Object.keys(inputs).length > 0 ? { inputs } : {}),
+        ...(opts.fill && opts.fill.trim() !== "" ? { fill: opts.fill.trim() } : {}),
         ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
             ? { terminalNodeIds: opts.terminalNodeIds }
             : {}),
@@ -963,35 +1515,54 @@ export async function runFlow(workflowRef, opts, deps) {
     const lines = opts.json
         ? []
         : [
+            ...preface,
             "Workflow run started.",
             `runId:        ${data.runId}`,
             `triggerRunId: ${data.triggerRunId}`,
             `Poll: exodus workflow status --id ${data.runId}`,
         ];
-    if (!opts.wait)
+    if (!opts.wait) {
+        if (opts.out !== undefined && !opts.json) {
+            lines.push(`Nothing saved to ${opts.out} yet — the run is still going. Add --wait, or save later: exodus workflow status --id ${data.runId} --out ${opts.out}`);
+        }
         return { code: 0, lines };
+    }
     if (!opts.json && opts.onProgressLine) {
         for (const line of lines)
             opts.onProgressLine(line);
         lines.length = 0;
     }
-    const waited = await waitForRun(data.runId, { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base }, deps);
+    const waited = await waitForRun(data.runId, { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base, out: opts.out }, deps);
     if (opts.json)
         return waited;
     return { code: waited.code, lines: [...lines, ...waited.lines] };
 }
+const WAIT_TERMINAL_STATUSES = TERMINAL_RUN_STATUSES.flatMap((s) => storedWorkflowStatusForms(s));
 async function waitForRun(runId, opts, deps) {
     const seen = new Map();
     let pausedNotified = false;
+    const landOnPark = opts.landOnPark;
     const pollResult = await deps.poll({
         path: `${STATUS_PATH}?runId=${encodeURIComponent(runId)}`,
         intervalMs: 3_000,
         timeoutMs: 60 * 60 * 1000,
-        terminalStatuses: ["completed", "partial", "failed", "canceled"],
+        terminalStatuses: landOnPark
+            ? [...WAIT_TERMINAL_STATUSES, ...storedWorkflowStatusForms("awaiting-approval")]
+            : WAIT_TERMINAL_STATUSES,
+        ...(landOnPark
+            ? {
+                isDone: (raw) => !(typeof raw["status"] === "string" &&
+                    normalizeRunStatus(raw["status"]) === "awaiting-approval") || raw["pauseReason"] === landOnPark.pauseReason,
+            }
+            : {}),
         onProgress: (raw) => {
             if (opts.json || !opts.onProgressLine)
                 return;
-            if (raw["status"] === "awaiting-review" && !pausedNotified) {
+            const rawStatus = raw["status"];
+            const parked = typeof rawStatus === "string" &&
+                normalizeRunStatus(rawStatus) === "awaiting-approval";
+            const isLanding = landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason;
+            if (parked && !pausedNotified && !isLanding) {
                 pausedNotified = true;
                 const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
                 const pauseReason = raw["pauseReason"];
@@ -1011,11 +1582,24 @@ async function waitForRun(runId, opts, deps) {
             }
         },
     });
+    const terminalRun = !pollResult.timedOut &&
+        isRecord(pollResult.data) &&
+        typeof pollResult.data["_id"] === "string"
+        ? pollResult.data
+        : undefined;
+    const saved = opts.out !== undefined && terminalRun
+        ? await saveDeliveries(terminalRun, opts.out, deps)
+        : undefined;
     if (opts.json) {
         return {
             code: pollResult.ok ? 0 : 1,
             lines: [
-                JSON.stringify({ ...opts.jsonBase, result: pollResult.data, timedOut: pollResult.timedOut }),
+                JSON.stringify({
+                    ...opts.jsonBase,
+                    result: pollResult.data,
+                    timedOut: pollResult.timedOut,
+                    ...(saved ? { saved: saved.paths } : {}),
+                }),
             ],
         };
     }
@@ -1026,23 +1610,50 @@ async function waitForRun(runId, opts, deps) {
         };
     }
     const lines = [""];
-    if (isRecord(pollResult.data) && typeof pollResult.data["_id"] === "string") {
-        lines.push(formatWorkflowRun(pollResult.data));
+    if (terminalRun) {
+        lines.push(formatWorkflowRun(terminalRun));
     }
     else {
         lines.push(`Polling failed: ${JSON.stringify(pollResult.data)}`);
     }
+    if (saved)
+        lines.push("", ...saved.lines);
+    if (landOnPark &&
+        isRecord(pollResult.data) &&
+        typeof pollResult.data["status"] === "string" &&
+        normalizeRunStatus(pollResult.data["status"]) === "awaiting-approval" &&
+        pollResult.data["pauseReason"] === landOnPark.pauseReason) {
+        const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
+        lines.push("", landOnPark.headline, ...formatPauseNotice(landOnPark.pauseReason, runId, dashboardUrl).slice(1));
+    }
     return { code: pollResult.ok ? 0 : 1, lines };
 }
 export async function statusFlow(opts, deps) {
+    if (opts.out !== undefined && !opts.id) {
+        return {
+            code: 1,
+            lines: [
+                "--out saves ONE run's outputs, so it needs the run: exodus workflow status --id <runId> --out <dir>",
+            ],
+        };
+    }
     const path = opts.id ? `${STATUS_PATH}?runId=${encodeURIComponent(opts.id)}` : STATUS_PATH;
     const res = await deps.get(path);
     if (!res.ok)
         return asErrorResult(res, opts.json);
-    if (opts.json)
-        return { code: 0, lines: [JSON.stringify(res.data)] };
-    if (opts.id)
-        return { code: 0, lines: [formatWorkflowRun(res.data)] };
+    const saved = opts.out !== undefined && opts.id
+        ? await saveDeliveries(res.data, opts.out, deps)
+        : undefined;
+    if (opts.json) {
+        const payload = saved ? { ...res.data, saved: saved.paths } : res.data;
+        return { code: 0, lines: [JSON.stringify(payload)] };
+    }
+    if (opts.id) {
+        const lines = [formatWorkflowRun(res.data)];
+        if (saved)
+            lines.push("", ...saved.lines);
+        return { code: 0, lines };
+    }
     const runs = (res.data.runs ?? []);
     return { code: 0, lines: [formatRecentRuns(runs)] };
 }
@@ -1457,6 +2068,8 @@ export function parkBadge(pauseReason) {
         return "repair";
     if (pauseReason === "slots")
         return "slots";
+    if (pauseReason === "checkpoint")
+        return "checkpoint";
     return "legacy";
 }
 export function invocationBadge(row) {
@@ -1500,44 +2113,36 @@ function errLine(message, json, status) {
 function okLine(message, payload, json) {
     return { code: 0, lines: [json ? JSON.stringify(payload) : message] };
 }
-function routeErrorText(data, status) {
-    if (isRecord(data)) {
-        const err = data.error;
-        if (typeof err === "string" && err)
-            return err;
-        if (isRecord(err) && typeof err.message === "string")
-            return err.message;
-        if (typeof data.message === "string" && data.message)
-            return data.message;
-    }
-    return `HTTP ${status}`;
-}
 function asWorkflowRun(data) {
     return isRecord(data) && typeof data["_id"] === "string"
         ? data
         : undefined;
 }
 function describePark(run) {
-    if (run.status !== "awaiting-review")
-        return `status: ${run.status}`;
+    if (normalizeRunStatus(run.status) !== "awaiting-approval") {
+        return `status: ${runStatusLabel(run.status)}`;
+    }
     switch (run.pauseReason) {
         case "taste":
-            return "parked at a gate (taste review)";
+            return "parked at a Gate box, which retired in 2.0 (cancel and re-run)";
         case "repair":
             return "parked for repair";
         case "slots":
             return "parked for slot answers";
         case "call":
             return "parked on a child workflow";
+        case "checkpoint":
+            return `parked at a checkpoint (use: exodus workflow checkpoint ${run._id})`;
         default:
-            return "parked at the cost gate (legacy — no text gate)";
+            return "parked at the cost gate (legacy)";
     }
 }
 const PARK_LABEL = {
-    taste: "a gate review",
+    taste: "a retired Gate review",
     repair: "a repair",
     slots: "slot answers",
     call: "a child workflow",
+    checkpoint: "a checkpoint approval",
 };
 async function preflightPark(runId, expected, verb, json, deps) {
     const res = await deps.get(`${STATUS_PATH}?runId=${encodeURIComponent(runId)}`);
@@ -1547,44 +2152,89 @@ async function preflightPark(runId, expected, verb, json, deps) {
     if (!run) {
         return { ok: false, result: errLine(`Could not read run ${runId}.`, json) };
     }
-    if (run.status !== "awaiting-review" || run.pauseReason !== expected) {
+    const allowed = Array.isArray(expected)
+        ? expected
+        : [expected];
+    if (normalizeRunStatus(run.status) !== "awaiting-approval" ||
+        run.pauseReason === undefined ||
+        !allowed.includes(run.pauseReason)) {
         return {
             ok: false,
-            result: errLine(`Run ${runId} is not parked for ${PARK_LABEL[expected]} — it is ${describePark(run)}.`, json),
+            result: errLine(`Run ${runId} is not parked for ${PARK_LABEL[allowed[0]]} — it is ${describePark(run)}.`, json),
         };
     }
     return { ok: true, run };
 }
-function gateCandidates(run) {
+function checkpointOutputs(run) {
     const node = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
     if (!node)
         return [];
     const out = [];
     let n = 0;
     (node.outputs ?? []).forEach((a, idx) => {
-        if (a.type === "text" && a.port === "selection") {
-            n += 1;
-            out.push({ n, outputIndex: idx, text: a.text, humanEdited: !!a.humanEdited });
-        }
+        if (a.type !== "text")
+            return;
+        n += 1;
+        out.push({
+            n,
+            outputIndex: idx,
+            text: a.text,
+            label: a.label,
+            humanEdited: !!a.humanEdited,
+            ...(a.item ? { item: a.item } : {}),
+        });
     });
     return out;
 }
-function formatCandidates(cands) {
-    if (cands.length === 0)
-        return "  (this gate has no selection candidates)";
-    return cands
-        .map((c) => `  ${c.n}. ${truncateText(c.text, 200)}${c.humanEdited ? "  (edited)" : ""}`)
-        .join("\n");
+function checkpointItemIndexes(outputs) {
+    const seen = new Set();
+    for (const o of outputs)
+        if (o.item)
+            seen.add(o.item.index);
+    return [...seen].sort((a, b) => a - b);
 }
-function rangeError(num, count, json) {
+function checkpointNode(run) {
+    return (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
+}
+function checkpointOutputRow(o, indent) {
+    const label = o.label ? ` [${o.label}]` : "";
+    const edited = o.humanEdited ? "  (edited)" : "";
+    return `${indent}${o.n}.${label} ${truncateText(o.text, 200)}${edited}`;
+}
+function formatCheckpointOutputs(outputs) {
+    if (outputs.length === 0)
+        return "  (this step produced no text to review)";
+    const indexes = checkpointItemIndexes(outputs);
+    if (indexes.length === 0) {
+        return outputs.map((o) => checkpointOutputRow(o, "  ")).join("\n");
+    }
+    const lines = [];
+    for (const index of indexes) {
+        const rows = outputs.filter((o) => o.item?.index === index);
+        const total = rows[0]?.item?.total ?? indexes.length;
+        lines.push(`  Item ${index + 1} of ${total}`);
+        for (const row of rows)
+            lines.push(checkpointOutputRow(row, "    "));
+    }
+    const shared = outputs.filter((o) => !o.item);
+    if (shared.length > 0) {
+        lines.push("  Not tied to an item");
+        for (const row of shared)
+            lines.push(checkpointOutputRow(row, "    "));
+    }
+    return lines.join("\n");
+}
+function checkpointRangeError(num, count, json) {
     const range = count > 0 ? ` (valid: 1–${count})` : "";
-    return errLine(`Candidate ${num} is out of range — this gate has ${count} candidate${count === 1 ? "" : "s"}${range}.`, json);
+    return errLine(`Output ${num} is out of range — this step has ${count} text output${count === 1 ? "" : "s"}${range}.`, json);
 }
-export async function gateShowFlow(runId, opts, deps) {
-    const pf = await preflightPark(runId, "taste", "workflow gate", opts.json, deps);
+export async function checkpointShowFlow(runId, opts, deps) {
+    const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const cands = gateCandidates(pf.run);
+    const outputs = checkpointOutputs(pf.run);
+    const node = checkpointNode(pf.run);
+    const itemIndexes = checkpointItemIndexes(outputs);
     if (opts.json) {
         return {
             code: 0,
@@ -1592,53 +2242,108 @@ export async function gateShowFlow(runId, opts, deps) {
                 JSON.stringify({
                     runId,
                     pausedNodeId: pf.run.pausedNodeId,
-                    candidates: cands.map((c) => ({ n: c.n, text: c.text, humanEdited: c.humanEdited })),
+                    pausedNodeKind: node?.kind,
+                    ...(node?.botSlug ? { botSlug: node.botSlug } : {}),
+                    ...(itemIndexes.length > 0 ? { itemIndexes } : {}),
+                    outputs: outputs.map((o) => ({
+                        n: o.n,
+                        text: o.text,
+                        ...(o.label ? { label: o.label } : {}),
+                        humanEdited: o.humanEdited,
+                        ...(o.item ? { item: o.item } : {}),
+                    })),
                 }),
             ],
         };
     }
+    const stepLabel = node
+        ? `${node.nodeId} (${node.botSlug ? `${node.kind}: ${node.botSlug}` : node.kind})`
+        : (pf.run.pausedNodeId ?? "-");
+    const itemsNote = itemIndexes.length > 0
+        ? [
+            `This step ran once per item (${itemIndexes.length} of them). Approve keeps every item;`,
+            "reject drops the ones you name and the run carries on with the rest.",
+            "",
+        ]
+        : [];
+    const rejectLine = itemIndexes.length > 0
+        ? [`Reject:  exodus workflow checkpoint ${runId} approve --reject 2 --wait`]
+        : [];
     return {
         code: 0,
         lines: [
-            `Gate — ${pf.run.workflowName}`,
+            `Checkpoint — ${pf.run.workflowName}`,
             `runId:      ${runId}`,
-            `gate node:  ${pf.run.pausedNodeId ?? "-"}`,
+            `step:       ${stepLabel}`,
             "",
-            `Candidates (${cands.length}):`,
-            formatCandidates(cands),
+            "This step is done and the run is holding here until you say go.",
             "",
-            `Pick:    exodus workflow gate ${runId} pick 1,2`,
-            `Edit:    exodus workflow gate ${runId} edit 1 --text "..."`,
-            `Approve: exodus workflow gate ${runId} approve --wait`,
-            `Reject:  exodus workflow gate ${runId} reject --reason "..."`,
+            ...itemsNote,
+            `Its output (${outputs.length}):`,
+            formatCheckpointOutputs(outputs),
+            "",
+            `Approve: exodus workflow checkpoint ${runId} approve --wait`,
+            ...rejectLine,
+            `Edit:    exodus workflow checkpoint ${runId} edit 1 --text "..."`,
+            `Redo:    exodus workflow checkpoint ${runId} retry --wait`,
+            `Cancel:  exodus workflow checkpoint ${runId} cancel --reason "..."`,
         ],
     };
 }
-export async function gatePickFlow(runId, numbers, opts, deps) {
-    const pf = await preflightPark(runId, "taste", "workflow gate pick", opts.json, deps);
+export function parseRejectItems(raw) {
+    const bad = (why) => ({
+        ok: false,
+        message: `${why} --reject takes the item numbers you see in "checkpoint show", like --reject 2 or --reject 2,5.`,
+    });
+    if (raw === undefined || raw.trim() === "")
+        return bad("--reject needs at least one item number.");
+    const parts = raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+    if (parts.length === 0)
+        return bad("--reject needs at least one item number.");
+    const items = [];
+    for (const part of parts) {
+        if (!/^\d+$/.test(part))
+            return bad(`"${part}" isn't an item number.`);
+        const n = Number(part);
+        if (n < 1)
+            return bad("Items are numbered from 1.");
+        if (!items.includes(n))
+            items.push(n);
+    }
+    return { ok: true, items: items.sort((a, b) => a - b) };
+}
+export async function checkpointApproveFlow(runId, opts, deps) {
+    let rejectItems;
+    if (opts.reject !== undefined) {
+        const parsed = parseRejectItems(opts.reject);
+        if (!parsed.ok)
+            return errLine(parsed.message, opts.json);
+        rejectItems = parsed.items;
+    }
+    const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint approve", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const cands = gateCandidates(pf.run);
-    const seen = new Set();
-    for (const num of numbers) {
-        if (!Number.isInteger(num) || num < 1 || num > cands.length) {
-            return rangeError(num, cands.length, opts.json);
-        }
-        if (seen.has(num))
-            return errLine(`Candidate ${num} is listed twice.`, opts.json);
-        seen.add(num);
+    if (rejectItems === undefined) {
+        const res = await deps.post(APPROVE_PATH, { runId });
+        if (!res.ok)
+            return triggerErrorResult(res, "workflow checkpoint approve", opts.json);
+        const triggerRunId = res.data.triggerRunId;
+        return resumeAndMaybeWait(runId, triggerRunId, ["Checkpoint approved — the run resumes."], opts, deps);
     }
-    const selectedIndices = numbers.map((num) => num - 1);
-    const res = await deps.post(GATE_PICK_PATH, {
-        runId,
-        nodeId: pf.run.pausedNodeId,
-        selectedIndices,
-    });
+    const rejections = rejectItems.map((n) => n - 1);
+    const res = await deps.post(CHECKPOINT_RESOLVE_ITEMS_PATH, { runId, rejections });
     if (!res.ok)
-        return triggerErrorResult(res, "workflow gate pick", opts.json);
-    return okLine(`Picked candidate${numbers.length === 1 ? "" : "s"} ${numbers.join(", ")} at ${pf.run.pausedNodeId}. Approve to resume: exodus workflow gate ${runId} approve --wait`, { ok: true, runId, nodeId: pf.run.pausedNodeId, selectedIndices }, opts.json);
+        return triggerErrorResult(res, "workflow checkpoint approve", opts.json);
+    const data = (res.data ?? {});
+    const rejected = (data.rejected ?? rejections).map((i) => i + 1).sort((a, b) => a - b);
+    const kept = data.remaining ?? 0;
+    const total = kept + rejected.length;
+    return resumeAndMaybeWait(runId, data.triggerRunId, [`Approved — kept ${kept} of ${total} items (rejected: ${rejected.join(", ")}).`], opts, deps, undefined, { rejected, remaining: kept });
 }
-export async function gateEditFlow(runId, n, sources, opts, deps) {
+export async function checkpointEditFlow(runId, n, sources, opts, deps) {
     const provided = [sources.text, sources.file, sources.stdin].filter((x) => x !== undefined);
     if (provided.length === 0) {
         return errLine("Provide the replacement text via one of --text, --file <path>, or piped stdin.", opts.json);
@@ -1662,91 +2367,38 @@ export async function gateEditFlow(runId, n, sources, opts, deps) {
     else {
         text = sources.stdin;
     }
-    const pf = await preflightPark(runId, "taste", "workflow gate edit", opts.json, deps);
+    const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint edit", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const cands = gateCandidates(pf.run);
-    const cand = cands.find((c) => c.n === n);
-    if (!cand)
-        return rangeError(n, cands.length, opts.json);
-    const res = await deps.post(GATE_EDIT_PATH, {
+    const outputs = checkpointOutputs(pf.run);
+    const target = outputs.find((o) => o.n === n);
+    if (!target)
+        return checkpointRangeError(n, outputs.length, opts.json);
+    const res = await deps.post(CHECKPOINT_EDIT_PATH, {
         runId,
         nodeId: pf.run.pausedNodeId,
-        outputIndex: cand.outputIndex,
+        outputIndex: target.outputIndex,
         text,
     });
     if (!res.ok)
-        return triggerErrorResult(res, "workflow gate edit", opts.json);
-    return okLine(`Edited candidate ${n} at ${pf.run.pausedNodeId}.`, { ok: true, runId, nodeId: pf.run.pausedNodeId, outputIndex: cand.outputIndex }, opts.json);
+        return triggerErrorResult(res, "workflow checkpoint edit", opts.json);
+    return okLine(`Edited output ${n} at ${pf.run.pausedNodeId}. Approve to continue: exodus workflow checkpoint ${runId} approve --wait`, { ok: true, runId, nodeId: pf.run.pausedNodeId, outputIndex: target.outputIndex }, opts.json);
 }
-function resolveGateSessionId(run) {
-    const gateNode = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
-    const artifact = (gateNode?.outputs ?? []).find((a) => a.type === "session" && a.port === "session" && !!a.sessionId);
-    if (artifact)
-        return artifact.sessionId;
-    const sessions = run.sessions ?? [];
-    const byNode = sessions.find((s) => s.nodeId === run.pausedNodeId);
-    if (byNode)
-        return byNode.sessionId;
-    return undefined;
-}
-export async function gatePushFlow(runId, message, opts, deps) {
-    const pf = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
+export async function checkpointRetryFlow(runId, opts, deps) {
+    const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint retry", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const sessionId = resolveGateSessionId(pf.run);
-    if (!sessionId)
-        return errLine("This gate has no live session — nothing to push to.", opts.json);
-    if (!deps.postDashboard) {
-        return errLine("gate push is unavailable here (no dashboard client).", opts.json);
-    }
-    const chat = await deps.postDashboard(CHAT_PATH, { sessionId, text: message }, { timeoutMs: CHAT_TIMEOUT_MS });
-    if (!chat.ok) {
-        const err = routeErrorText(chat.data, chat.status);
-        return {
-            code: 1,
-            lines: opts.json
-                ? [JSON.stringify({ ok: false, status: chat.status, error: err })]
-                : [`exodus workflow gate push: ${err} (HTTP ${chat.status})`],
-        };
-    }
-    const res = await deps.post(GATE_APPEND_PATH, { runId, nodeId: pf.run.pausedNodeId });
+    const res = await deps.post(CHECKPOINT_RETRY_PATH, { runId });
     if (!res.ok)
-        return triggerErrorResult(res, "workflow gate push", opts.json);
-    const after = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
-    const cands = after.ok ? gateCandidates(after.run) : [];
-    const newest = cands[cands.length - 1];
-    if (opts.json) {
-        return {
-            code: 0,
-            lines: [
-                JSON.stringify({
-                    ok: true,
-                    runId,
-                    nodeId: pf.run.pausedNodeId,
-                    candidate: newest ? { n: newest.n, text: newest.text } : null,
-                }),
-            ],
-        };
-    }
-    const lines = [`Pushed to the gate — banked a new candidate at ${pf.run.pausedNodeId}.`];
-    if (newest) {
-        lines.push("", `New candidate:`, `  ${newest.n}. ${truncateText(newest.text, 200)}`);
-    }
-    return { code: 0, lines };
-}
-export async function gateApproveFlow(runId, opts, deps) {
-    const pf = await preflightPark(runId, "taste", "workflow gate approve", opts.json, deps);
-    if (!pf.ok)
-        return pf.result;
-    const res = await deps.post(APPROVE_PATH, { runId });
-    if (!res.ok)
-        return triggerErrorResult(res, "workflow gate approve", opts.json);
+        return triggerErrorResult(res, "workflow checkpoint retry", opts.json);
     const triggerRunId = res.data.triggerRunId;
-    return resumeAndMaybeWait(runId, triggerRunId, ["Gate approved — the run resumes."], opts, deps);
+    return resumeAndMaybeWait(runId, triggerRunId, ["Redoing the step — its old output is discarded."], opts, deps, {
+        pauseReason: "checkpoint",
+        headline: "  ⏸ The step re-ran — its fresh output is waiting on your approval.",
+    });
 }
-export async function gateRejectFlow(runId, opts, deps) {
-    const pf = await preflightPark(runId, "taste", "workflow gate reject", opts.json, deps);
+export async function checkpointCancelFlow(runId, opts, deps) {
+    const pf = await preflightPark(runId, ["checkpoint", "taste"], "workflow checkpoint cancel", opts.json, deps);
     if (!pf.ok)
         return pf.result;
     const res = await deps.post(CANCEL_PATH, {
@@ -1754,8 +2406,8 @@ export async function gateRejectFlow(runId, opts, deps) {
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
     });
     if (!res.ok)
-        return triggerErrorResult(res, "workflow gate reject", opts.json);
-    return okLine(`Gate rejected — run ${runId} canceled.`, { ok: true, runId }, opts.json);
+        return triggerErrorResult(res, "workflow checkpoint cancel", opts.json);
+    return okLine(`Checkpoint canceled — run ${runId} stopped.`, { ok: true, runId }, opts.json);
 }
 export async function repairFlow(runId, action, opts, deps) {
     const verb = `workflow repair ${action}`;
@@ -1775,8 +2427,8 @@ export async function repairFlow(runId, action, opts, deps) {
     const triggerRunId = res.data.triggerRunId;
     return resumeAndMaybeWait(runId, triggerRunId, [`Repair ${action} started — the run resumes.`], opts, deps);
 }
-async function resumeAndMaybeWait(runId, triggerRunId, headline, opts, deps) {
-    const base = { runId, triggerRunId };
+async function resumeAndMaybeWait(runId, triggerRunId, headline, opts, deps, landOnPark, extraJson) {
+    const base = { runId, triggerRunId, ...(extraJson ?? {}) };
     const startLines = [
         ...headline,
         `runId:        ${runId}`,
@@ -1792,7 +2444,12 @@ async function resumeAndMaybeWait(runId, triggerRunId, headline, opts, deps) {
         for (const line of startLines)
             opts.onProgressLine(line);
     }
-    const waited = await waitForRun(runId, { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base }, deps);
+    const waited = await waitForRun(runId, {
+        json: opts.json,
+        onProgressLine: opts.onProgressLine,
+        jsonBase: base,
+        ...(landOnPark ? { landOnPark } : {}),
+    }, deps);
     if (opts.json)
         return waited;
     const prefix = opts.onProgressLine ? [] : startLines;
@@ -1876,20 +2533,6 @@ async function printResult(result) {
     if (result.code !== 0)
         process.exit(result.code);
 }
-function parsePickNumbers(raw) {
-    if (raw === undefined)
-        return undefined;
-    const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    if (parts.length === 0)
-        return undefined;
-    const nums = [];
-    for (const p of parts) {
-        if (!/^\d+$/.test(p))
-            return undefined;
-        nums.push(Number(p));
-    }
-    return nums;
-}
 async function readAllStdin() {
     const chunks = [];
     for await (const chunk of process.stdin)
@@ -1963,14 +2606,16 @@ export async function run(flags) {
         const workflowRef = rest[0];
         if (!workflowRef) {
             console.error("Error: workflow run requires <workflowId|name>.");
-            console.log("Usage: exodus workflow run <workflowId|name> [--input key=value ...] [--wait] [--json]");
+            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--wait] [--json]");
             process.exit(1);
         }
         let inputs;
         let terminalNodeIds;
+        let fill;
         try {
-            inputs = parseInputFlags(process.argv.slice(3), defaultDeps.readFile);
+            inputs = parseRawInputFlags(process.argv.slice(3));
             terminalNodeIds = parseTerminalFlags(process.argv.slice(3));
+            fill = parseFillFlag(process.argv.slice(3));
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1979,13 +2624,15 @@ export async function run(flags) {
         return printResult(await runFlow(workflowRef, {
             inputs,
             terminalNodeIds,
+            fill,
             wait: flags["wait"] === true,
             json,
+            out: flagString(flags, "out"),
             onProgressLine: (line) => console.log(line),
         }, defaultDeps));
     }
     if (sub === "status") {
-        return printResult(await statusFlow({ id: flagString(flags, "id"), json }, defaultDeps));
+        return printResult(await statusFlow({ id: flagString(flags, "id"), json, out: flagString(flags, "out") }, defaultDeps));
     }
     if (sub === "versions") {
         const workflowRef = rest[0];
@@ -2026,48 +2673,47 @@ export async function run(flags) {
         return printResult(await inboxFlow(json, defaultDeps));
     }
     if (sub === "gate") {
+        console.error(RETIRED_GATE_VERB_POINTER);
+        process.exit(1);
+    }
+    if (sub === "checkpoint") {
         const runId = rest[0];
         if (!runId) {
-            console.error("Error: workflow gate requires <runId>.");
-            console.log("Usage: exodus workflow gate <runId> [pick <n,..> | edit <n> | push \"msg\" | approve | reject]");
+            console.error("Error: workflow checkpoint requires <runId>.");
+            console.log('Usage: exodus workflow checkpoint <runId> [show | edit <n> | approve [--reject <n,..>] | retry | cancel]');
             process.exit(1);
         }
         const action = rest[1];
-        if (!action)
-            return printResult(await gateShowFlow(runId, { json }, defaultDeps));
-        if (action === "pick") {
-            const numbers = parsePickNumbers(rest[2]);
-            if (!numbers) {
-                console.error(`Error: gate pick needs comma-separated 1-based numbers (e.g. \`pick 3,7\`).`);
-                process.exit(1);
-            }
-            return printResult(await gatePickFlow(runId, numbers, { json }, defaultDeps));
+        if (!action || action === "show") {
+            return printResult(await checkpointShowFlow(runId, { json }, defaultDeps));
         }
         if (action === "edit") {
             const n = parseTriggerIndex(rest[2]);
             if (n === undefined) {
-                console.error("Error: gate edit needs a 1-based candidate number <n>.");
-                console.log(`Usage: exodus workflow gate <runId> edit <n> [--text "..." | --file <path> | (stdin)]`);
+                console.error("Error: checkpoint edit needs a 1-based output number <n>.");
+                console.log(`Usage: exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)]`);
                 process.exit(1);
             }
             const stdin = await maybeReadStdin(flags);
-            return printResult(await gateEditFlow(runId, n, { text: flagString(flags, "text"), file: flagString(flags, "file"), stdin }, { json }, defaultDeps));
-        }
-        if (action === "push") {
-            const message = rest[2];
-            if (!message) {
-                console.error('Error: gate push needs a message (e.g. `push "make it punchier"`).');
-                process.exit(1);
-            }
-            return printResult(await gatePushFlow(runId, message, { json }, defaultDeps));
+            return printResult(await checkpointEditFlow(runId, n, { text: flagString(flags, "text"), file: flagString(flags, "file"), stdin }, { json }, defaultDeps));
         }
         if (action === "approve") {
-            return printResult(await gateApproveFlow(runId, { wait: flags["wait"] === true, json, onProgressLine: (line) => console.log(line) }, defaultDeps));
+            return printResult(await checkpointApproveFlow(runId, {
+                wait: flags["wait"] === true,
+                json,
+                onProgressLine: (line) => console.log(line),
+                ...(flags["reject"] !== undefined
+                    ? { reject: flagString(flags, "reject") ?? "" }
+                    : {}),
+            }, defaultDeps));
         }
-        if (action === "reject") {
-            return printResult(await gateRejectFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps));
+        if (action === "retry") {
+            return printResult(await checkpointRetryFlow(runId, { wait: flags["wait"] === true, json, onProgressLine: (line) => console.log(line) }, defaultDeps));
         }
-        console.error(`Error: unknown gate action "${action}" (expected pick, edit, push, approve, or reject).`);
+        if (action === "cancel") {
+            return printResult(await checkpointCancelFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps));
+        }
+        console.error(`Error: unknown checkpoint action "${action}" (expected show, edit, approve, retry, or cancel).`);
         process.exit(1);
     }
     if (sub === "repair") {

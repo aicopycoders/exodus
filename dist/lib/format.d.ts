@@ -1,3 +1,5 @@
+export declare function displayRunStatus(raw: unknown, missing?: string): string;
+export declare function tickerRunStatus(raw: unknown): string;
 export declare function formatGeneration(data: Record<string, unknown>): string;
 export declare function formatGenesisRun(data: Record<string, unknown>): string;
 export declare function formatBrowse(generations: unknown[]): string;

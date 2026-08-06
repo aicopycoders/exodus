@@ -1,10 +1,16 @@
 // Shared Intel result formatter. Lives in lib/ (not commands/intel.ts) so base
 // commands like `status` can render Intel runs without importing a CUSTOM-tier
 // command module. intel.ts re-exports this for backward compatibility. (I-N12)
+
+import { displayRunStatus } from "./format.js";
+
 export function formatIntelResult(data: Record<string, unknown>): string {
   const lines: string[] = [];
   lines.push("## Intel Analysis Result");
-  lines.push(`**Status:** ${data["status"] ?? "unknown"}`);
+  // #994: the run's status prints as one of the seven ruled words. Intel's
+  // phase words (phase1_complete) read as "Running" — the phase itself is
+  // already reported on the **Phase:** line below.
+  lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
 
   if (data["mode"]) lines.push(`**Mode:** ${data["mode"]}`);
   if (data["phase"] !== undefined) lines.push(`**Phase:** ${data["phase"]}`);

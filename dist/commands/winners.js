@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { apiGet, apiPost } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError, tickerRunStatus } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
 export const helpText = `
 exodus winners — Import your own brand's winning ads as generative fuel
@@ -290,7 +290,7 @@ async function runImport(positional, flags) {
             const status = typeof data.status === "string" ? data.status : "";
             if (!json && status && status !== lastStatus) {
                 lastStatus = status;
-                console.log(`  status: ${status}`);
+                console.log(`  status: ${tickerRunStatus(status)}`);
             }
         },
     });
@@ -343,7 +343,7 @@ async function uploadAsset(absPath, json) {
 }
 function printOutcomeTable(data) {
     const winners = data.winners ?? [];
-    console.log(`\nImport ${data.importId ?? "?"}: ${data.status ?? "?"}`);
+    console.log(`\nImport ${data.importId ?? "?"}: ${displayRunStatus(data.status, "?")}`);
     if (data.error)
         console.log(`  error: ${data.error}`);
     const created = winners.filter((w) => w.created === true).length;

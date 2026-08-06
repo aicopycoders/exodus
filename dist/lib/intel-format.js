@@ -1,7 +1,8 @@
+import { displayRunStatus } from "./format.js";
 export function formatIntelResult(data) {
     const lines = [];
     lines.push("## Intel Analysis Result");
-    lines.push(`**Status:** ${data["status"] ?? "unknown"}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     if (data["mode"])
         lines.push(`**Mode:** ${data["mode"]}`);
     if (data["phase"] !== undefined)

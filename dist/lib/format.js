@@ -1,3 +1,21 @@
+import { normalizeRunStatus, runStatusLabel } from "./runStatus.js";
+export function displayRunStatus(raw, missing = "unknown") {
+    return typeof raw === "string" && raw.trim() ? runStatusLabel(raw) : missing;
+}
+const GENERIC_ACTIVE_STATUSES = new Set([
+    "queued",
+    "pending",
+    "running",
+    "processing",
+    "in-progress",
+]);
+export function tickerRunStatus(raw) {
+    if (typeof raw !== "string" || !raw.trim())
+        return "";
+    const canonical = normalizeRunStatus(raw);
+    const isPhaseWord = (canonical === "running" || canonical === "queued") && !GENERIC_ACTIVE_STATUSES.has(raw);
+    return isPhaseWord ? raw : runStatusLabel(raw);
+}
 function stepIcon(status) {
     if (status === "completed" || status === "done")
         return "✓";
@@ -29,9 +47,8 @@ function formatSteps(steps) {
 }
 export function formatGeneration(data) {
     const lines = [];
-    const status = data["status"] ?? "unknown";
     lines.push(`## Generation Result`);
-    lines.push(`**Status:** ${status}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     if (data["agentName"] || data["agent"]) {
         lines.push(`**Agent:** ${data["agentName"] ?? data["agent"]}`);
     }
@@ -69,9 +86,8 @@ export function formatGeneration(data) {
 }
 export function formatGenesisRun(data) {
     const lines = [];
-    const status = data["status"] ?? "unknown";
     lines.push(`## Genesis Run`);
-    lines.push(`**Status:** ${status}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     if (data["awarenessLevel"] || data["awareness"]) {
         lines.push(`**Awareness Level:** ${data["awarenessLevel"] ?? data["awareness"]}`);
     }
@@ -134,7 +150,7 @@ export function formatBrowse(generations) {
             date = isNaN(parsed.getTime()) ? "—" : parsed.toISOString().slice(0, 10);
         }
         const agent = gen["agentName"] ?? gen["agentId"] ?? gen["agent"] ?? gen["pipeline"] ?? "—";
-        const status = gen["status"] ?? "—";
+        const status = displayRunStatus(gen["status"], "—");
         const doc = gen["googleDocUrl"] ?? gen["docUrl"] ?? "—";
         lines.push(`${date} | ${agent} | ${status} | ${doc}`);
     }

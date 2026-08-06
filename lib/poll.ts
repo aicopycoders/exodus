@@ -1,12 +1,15 @@
 import { apiGet } from "./client.js";
-
-const DEFAULT_TERMINAL_STATUSES = ["completed", "failed"];
+import { isTerminalRunStatus, normalizeRunStatus } from "./runStatus.js";
 
 export interface PollOptions {
   path: string;
   intervalMs?: number;
   timeoutMs?: number;
-  /** Additional statuses that should stop polling (e.g. phase boundaries). */
+  /**
+   * Additional statuses that should stop polling (e.g. phase boundaries like
+   * genesis's `awaiting_hook_selection`). ADDITIVE to the canonical terminal
+   * set below — never a replacement.
+   */
   terminalStatuses?: string[];
   onProgress?: (data: Record<string, unknown>) => void;
   /**
@@ -38,7 +41,10 @@ export async function pollUntilDone(opts: PollOptions): Promise<PollResult> {
     isDone,
   } = opts;
 
-  const terminal = new Set([...DEFAULT_TERMINAL_STATUSES, ...(terminalStatuses ?? [])]);
+  // #994: the canonical terminal check spans BOTH vocabularies (a published CLI
+  // meets old and new backends), so this set only carries the caller's EXTRA
+  // stop-words — phase boundaries that are not run-terminal at all.
+  const extraTerminal = new Set(terminalStatuses ?? []);
   const deadline = Date.now() + timeoutMs;
 
   while (true) {
@@ -55,13 +61,20 @@ export async function pollUntilDone(opts: PollOptions): Promise<PollResult> {
       return { ok: false, data: res.data, timedOut: false };
     }
 
-    // status=failed always terminates. Otherwise both checks must agree:
-    // the default status-based terminator AND any caller-supplied isDone.
-    if (status === "failed") {
+    // A dead run always terminates, whatever isDone says — an isDone that waits
+    // on downstream output would never fire, so the poll would burn to timeout.
+    // #994: "dead" is failed OR cancelled, in either vocabulary
+    // (failed/error/stalled, cancelled/canceled/superseded).
+    const canonical = status ? normalizeRunStatus(status) : undefined;
+    if (canonical === "failed" || canonical === "cancelled") {
       return { ok: false, data: res.data, timedOut: false };
     }
 
-    const statusTerminal = status ? terminal.has(status) : false;
+    // Otherwise both checks must agree: the status-based terminator (canonical
+    // terminal set ∪ the caller's extra stop-words) AND any caller isDone.
+    const statusTerminal = status
+      ? isTerminalRunStatus(status) || extraTerminal.has(status)
+      : false;
     const customDone = isDone ? isDone(res.data) : true;
     if (statusTerminal && customDone) {
       return { ok: true, data: res.data, timedOut: false };

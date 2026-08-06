@@ -22,7 +22,7 @@ import {
   apiPost,
   getDashboardUrl,
 } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError } from "../lib/format.js";
 
 export const helpText = `
 exodus creative — Creative-suite engines (native, copy-derived, ref-match)
@@ -248,7 +248,9 @@ async function runStatus(flags: Record<string, string | boolean>): Promise<void>
   console.log(`runId:        ${d._id}`);
   if (d.name) console.log(`name:         ${d.name}`);
   if (d.engine) console.log(`engine:       ${d.engine}`);
-  console.log(`status:       ${d.status ?? "—"}${d.isTerminal ? " (terminal)" : ""}`);
+  console.log(
+    `status:       ${displayRunStatus(d.status, "—")}${d.isTerminal ? " (terminal)" : ""}`,
+  );
   if (d.completedImages !== undefined || d.totalImages !== undefined) {
     console.log(`progress:     ${d.completedImages ?? 0} / ${d.totalImages ?? "?"} completed${
       d.failedImages ? `, ${d.failedImages} failed` : ""

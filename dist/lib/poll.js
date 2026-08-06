@@ -1,11 +1,11 @@
 import { apiGet } from "./client.js";
-const DEFAULT_TERMINAL_STATUSES = ["completed", "failed"];
+import { isTerminalRunStatus, normalizeRunStatus } from "./runStatus.js";
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 export async function pollUntilDone(opts) {
     const { path, intervalMs = 3000, timeoutMs = 600_000, terminalStatuses, onProgress, isDone, } = opts;
-    const terminal = new Set([...DEFAULT_TERMINAL_STATUSES, ...(terminalStatuses ?? [])]);
+    const extraTerminal = new Set(terminalStatuses ?? []);
     const deadline = Date.now() + timeoutMs;
     while (true) {
         const res = await apiGet(path);
@@ -16,10 +16,13 @@ export async function pollUntilDone(opts) {
         if (!res.ok) {
             return { ok: false, data: res.data, timedOut: false };
         }
-        if (status === "failed") {
+        const canonical = status ? normalizeRunStatus(status) : undefined;
+        if (canonical === "failed" || canonical === "cancelled") {
             return { ok: false, data: res.data, timedOut: false };
         }
-        const statusTerminal = status ? terminal.has(status) : false;
+        const statusTerminal = status
+            ? isTerminalRunStatus(status) || extraTerminal.has(status)
+            : false;
         const customDone = isDone ? isDone(res.data) : true;
         if (statusTerminal && customDone) {
             return { ok: true, data: res.data, timedOut: false };

@@ -1,5 +1,5 @@
 import { apiGet } from "../lib/client.js";
-import { formatGeneration, formatGenesisRun, formatError } from "../lib/format.js";
+import { formatGeneration, formatGenesisRun, formatError, displayRunStatus } from "../lib/format.js";
 import { hydrateScoutIdeasCount } from "../lib/scout-hydrate.js";
 import { formatIntelResult as formatIntelResultRich } from "../lib/intel-format.js";
 export const helpText = `
@@ -31,7 +31,7 @@ export function formatIntelResult(data) {
 export function formatPulseResult(data) {
     const lines = [];
     lines.push("## Pulse Status");
-    lines.push(`**Status:** ${data["status"] ?? "unknown"}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     if (data["accountId"])
         lines.push(`**Account ID:** ${data["accountId"]}`);
     if (data["commentsAnalyzed"] !== undefined)
@@ -61,7 +61,7 @@ export function formatPulseResult(data) {
 export function formatScoutResult(data) {
     const lines = [];
     lines.push("## Scout Status");
-    lines.push(`**Status:** ${data["status"] ?? "unknown"}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     const pipelineSlug = data["pipelineSlug"];
     if (pipelineSlug)
         lines.push(`**Pipeline:** ${pipelineSlug}`);
@@ -123,7 +123,7 @@ export function formatScoutResult(data) {
 export function formatCreativeSuiteStatus(title, data) {
     const lines = [];
     lines.push(`## ${title}`);
-    lines.push(`**Status:** ${data["status"] ?? "unknown"}`);
+    lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
     const show = (label, key) => {
         const v = data[key];
         if (v !== undefined && v !== null && v !== "")

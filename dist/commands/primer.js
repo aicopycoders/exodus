@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { apiGetDashboard, apiPostDashboard } from "../lib/client.js";
 import { promptChoice, promptMultiline, openInEditor } from "../lib/prompts.js";
+import { normalizeRunStatus } from "../lib/runStatus.js";
 import { refreshBrandProfileMd } from "./brand.js";
 export const helpText = `
 exodus primer — Build a brand's primer (the single foundation step)
@@ -152,7 +153,7 @@ async function buildPrimer(submission) {
             process.stdout.write("·");
             continue;
         }
-        if (data.status === "failed") {
+        if (normalizeRunStatus(data.status) === "failed") {
             console.log("");
             fail(`primer build failed: ${data.error ?? "unknown error"}`);
         }

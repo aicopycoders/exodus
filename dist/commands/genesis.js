@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
 import { pollUntilDone } from "../lib/poll.js";
-import { formatGenesisRun, formatError } from "../lib/format.js";
+import { displayRunStatus, formatGenesisRun, formatError, tickerRunStatus } from "../lib/format.js";
 import { formatCcCommand } from "../lib/cc-command.js";
 import { resolveActiveBrand } from "../lib/layout.js";
 import { captureReelAndWrite } from "../lib/reel-write.js";
@@ -441,7 +441,7 @@ async function waitForGenesisRun(runId) {
             const status = data["status"];
             const currentStep = data["currentStep"];
             if (status) {
-                process.stdout.write(`\r  ${status}${currentStep ? ` — ${currentStep}` : ""}        `);
+                process.stdout.write(`\r  ${tickerRunStatus(status)}${currentStep ? ` — ${currentStep}` : ""}        `);
             }
         },
     });
@@ -515,7 +515,7 @@ async function runHooks(flags) {
         process.exit(1);
     }
     if (res.data.status !== "awaiting_hook_selection") {
-        console.log(`Run ${runId} is not awaiting hook selection (status: ${res.data.status ?? "unknown"}).`);
+        console.log(`Run ${runId} is not awaiting hook selection (status: ${displayRunStatus(res.data.status)}).`);
         return;
     }
     const pool = Array.isArray(res.data.hookPool) ? res.data.hookPool : [];
@@ -677,7 +677,7 @@ async function pollScrape(runId, noWait, timeoutMs) {
                 ? ` captured=${captured ?? 0} qualified=${qualified ?? 0}`
                 : "";
             if (status)
-                process.stdout.write(`\r  status: ${status}${counts}              `);
+                process.stdout.write(`\r  status: ${tickerRunStatus(status)}${counts}              `);
         },
     });
     console.log();

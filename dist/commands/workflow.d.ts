@@ -1,8 +1,9 @@
 import { type ApiResponse } from "../lib/client.js";
 import { type PollOptions, type PollResult } from "../lib/poll.js";
+import { LEGACY_WORKFLOW_RUN_STATUS_VALUES, type RunStatus } from "../lib/runStatus.js";
 import { type Channel } from "../lib/channel.js";
 export declare const helpText: string;
-export type WorkflowNodeKind = "brief" | "bot" | "primer" | "image" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "push" | "gate" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform";
+export type WorkflowNodeKind = "brief" | "asset" | "bot" | "primer" | "image" | "image-rig" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform" | "formatter" | "splitter" | "collector";
 export type WorkflowSlotState = "locked" | "auto" | "ask" | "inferred";
 export interface WorkflowSlot {
     id: string;
@@ -67,7 +68,7 @@ export interface WorkflowImportResult {
     unresolved: UnresolvedWorkflowRef[];
     warnings: string[];
 }
-export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "session-fan-out" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger";
+export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "duplicate-input-key" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger" | "nested-split" | "fan-overlap" | "lane-ineligible" | "collector-unpaired";
 export interface GraphIssue {
     code: GraphIssueCode;
     message: string;
@@ -83,7 +84,7 @@ export interface WorkflowImportError {
     issues?: GraphIssue[];
     currentUpdatedAt?: string;
 }
-export type WorkflowPortType = "text" | "primer" | "image" | "rig" | "storyboard" | "frames" | "video" | "audio" | "show" | "session";
+export type WorkflowPortType = "text" | "primer" | "image" | "rig" | "storyboard" | "frames" | "video" | "audio" | "document" | "show" | "session";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
 export type WorkflowDurationSpec = {
     kind: "fixed";
@@ -163,20 +164,25 @@ export interface WorkflowCatalog {
     };
 }
 export type WorkflowBriefSource = "text" | "swipe-ad" | "swipe-bundle" | "organic-url" | "ad-url";
+export type WorkflowMediaType = "image" | "video" | "audio" | "document";
+export type WorkflowEntryFieldType = "text" | "select" | "number" | "toggle";
 export interface WorkflowInputDescriptor {
     fieldName: string;
     nodeId: string;
-    source: WorkflowBriefSource;
+    source: WorkflowBriefSource | "asset";
     required: boolean;
     description?: string;
+    type?: WorkflowEntryFieldType;
+    options?: string[];
     bundleSize?: number;
+    assetType?: WorkflowMediaType;
 }
 export interface WorkflowPrerequisiteDescriptor {
     primerKind: WorkflowPrimerKind;
     nodeIds: string[];
 }
 export interface WorkflowOutputDescriptor {
-    type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
+    type: "text" | "image" | "video" | "audio" | "document" | "frames" | "storyboard";
     label: string;
     nodeId: string;
     botSlug?: string;
@@ -225,32 +231,40 @@ export interface WorkflowVersion {
 export interface WorkflowVersionsResponse {
     versions: WorkflowVersion[];
 }
-export type WorkflowRunStatus = "queued" | "running" | "awaiting-review" | "completed" | "partial" | "failed" | "canceled";
+export type WorkflowRunStatus = RunStatus | (typeof LEGACY_WORKFLOW_RUN_STATUS_VALUES)[number];
 export type WorkflowNodeRunStatus = "idle" | "running" | "done" | "failed" | "skipped";
+export interface ArtifactItemIdentity {
+    index: number;
+    total: number;
+}
 export type WorkflowArtifact = {
     type: "text";
     text: string;
     label?: string;
     port?: string;
     humanEdited?: boolean;
+    item?: ArtifactItemIdentity;
 } | {
     type: "primer";
     text: string;
     primerKind: string;
+    item?: ArtifactItemIdentity;
 } | {
     type: "image";
     storageId: string;
     imageUrl?: string;
+    item?: ArtifactItemIdentity;
 } | {
     type: "session";
     sessionId: string;
     label?: string;
     port?: string;
+    item?: ArtifactItemIdentity;
 };
 export interface WorkflowRunOutput {
     nodeId: string;
     botSlug?: string;
-    type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
+    type: "text" | "image" | "video" | "audio" | "document" | "frames" | "storyboard";
     label: string;
     text?: string;
     imageUrl?: string;
@@ -265,10 +279,26 @@ export interface WorkflowRunOutput {
         imageUrl?: string;
     }>;
     storyboardJson?: string;
+    documentUrl?: string;
+    filename?: string;
+    mimeType?: string;
+}
+export type WorkflowOutputSlotType = "text" | "structured" | "asset" | "collection";
+export interface WorkflowRunDelivery {
+    key: string;
+    label: string;
+    type: WorkflowOutputSlotType;
+    description?: string;
+    order: number;
+    nodeId: string;
+    status: "delivered" | "unfulfilled";
+    error?: string;
+    artifacts: WorkflowRunOutput[];
 }
 export interface WorkflowRunNode {
     nodeId: string;
     kind: string;
+    botSlug?: string;
     status: WorkflowNodeRunStatus;
     error?: string;
     startedAt?: number;
@@ -287,7 +317,7 @@ export interface WorkflowRunSession {
     title: string;
     botSlug: string;
 }
-export type WorkflowPauseReason = "taste" | "repair" | "slots" | "call";
+export type WorkflowPauseReason = "taste" | "repair" | "slots" | "call" | "checkpoint";
 export interface WorkflowPendingSlot {
     id: string;
     label?: string;
@@ -312,6 +342,7 @@ export interface WorkflowRun {
     isTerminal: boolean;
     nodes: WorkflowRunNode[];
     outputs?: WorkflowRunOutput[];
+    deliveries?: WorkflowRunDelivery[];
     sessions?: WorkflowRunSession[];
     pauseReason?: WorkflowPauseReason;
     pausedNodeId?: string;
@@ -327,10 +358,22 @@ export interface WorkflowRunDeps {
     readFile: (path: string) => string;
     writeFile: (path: string, text: string) => void;
     poll: (opts: PollOptions) => Promise<PollResult>;
+    mkdirp?: (dir: string) => void;
+    downloadToFile?: (url: string, path: string) => Promise<void>;
     postDashboard?: (path: string, body: unknown, opts?: {
         timeoutMs?: number;
     }) => Promise<ApiResponse<unknown>>;
     dashboardUrl?: string;
+    statFile?: (filePath: string) => {
+        size: number;
+    } | null;
+    readFileBytes?: (filePath: string) => Uint8Array;
+    uploadBytes?: (uploadUrl: string, contentType: string, bytes: Uint8Array) => Promise<{
+        ok: boolean;
+        status: number;
+        storageId?: string;
+        body?: string;
+    }>;
 }
 export interface FlowResult {
     code: number;
@@ -339,13 +382,22 @@ export interface FlowResult {
 interface RunFlowOptions {
     inputs: Record<string, string>;
     terminalNodeIds?: string[];
+    fill?: string;
     wait: boolean;
     json: boolean;
+    out?: string;
     onProgressLine?: (line: string) => void;
 }
 export declare function formatPauseNotice(pauseReason: WorkflowPauseReason | undefined, runId: string, dashboardUrl: string): string[];
+export declare function parseRawInputFlags(args: string[]): Record<string, string>;
 export declare function parseInputFlags(args: string[], readFile?: (path: string) => string): Record<string, string>;
+export declare const ASSET_UPLOAD_POLICY: Record<WorkflowMediaType, {
+    mimeByExtension: Record<string, string>;
+    maxBytes: number;
+    accepts: string;
+}>;
 export declare function parseTerminalFlags(args: string[]): string[];
+export declare function parseFillFlag(args: string[]): string | undefined;
 export declare function formatWorkflowList(workflows: WorkflowListItem[]): string;
 export declare function formatRecentRuns(runs: WorkflowRunProjection[]): string;
 export declare function formatWorkflowVersions(versions: WorkflowVersion[]): string;
@@ -355,6 +407,12 @@ export declare function formatImportSummary(result: WorkflowImportResult, mode?:
     validate?: boolean;
 }): string;
 export declare function formatWorkflowRun(run: WorkflowRun): string;
+export interface DeliverySaveResult {
+    lines: string[];
+    paths: string[];
+}
+export declare function workflowFilenameSlug(name: string): string;
+export declare function saveDeliveries(run: WorkflowRun, dir: string, deps: WorkflowRunDeps): Promise<DeliverySaveResult>;
 export declare function formatDescribe(res: WorkflowDescribeResponse): string;
 export declare function formatBotsList(catalog: WorkflowCatalog, category?: string): string;
 export declare function formatBotDetail(bot: CatalogBot): string;
@@ -374,6 +432,7 @@ export declare function runFlow(workflowRef: string, opts: RunFlowOptions, deps:
 export declare function statusFlow(opts: {
     id?: string;
     json: boolean;
+    out?: string;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
 export declare function exportFlow(workflowRef: string, opts: {
     out?: string;
@@ -428,7 +487,7 @@ export interface WorkflowInboxRow {
     workflowName: string;
     pausedNodeId?: string;
     pausedNodeKind?: string;
-    pauseReason?: "taste" | "repair" | "slots";
+    pauseReason?: "taste" | "repair" | "slots" | "checkpoint";
     counts?: WorkflowCounts;
     createdAt: number | string;
     queuedAt?: number | string;
@@ -448,28 +507,35 @@ export declare function parkBadge(pauseReason: string | undefined): string;
 export declare function invocationBadge(row: WorkflowInboxRow): string;
 export declare function formatInbox(rows: WorkflowInboxRow[], now?: number): string;
 export declare function inboxFlow(json: boolean, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gateShowFlow(runId: string, opts: {
+export declare function checkpointShowFlow(runId: string, opts: {
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gatePickFlow(runId: string, numbers: number[], opts: {
+export declare function parseRejectItems(raw: string | undefined): {
+    ok: true;
+    items: number[];
+} | {
+    ok: false;
+    message: string;
+};
+export declare function checkpointApproveFlow(runId: string, opts: {
+    wait: boolean;
     json: boolean;
+    onProgressLine?: (line: string) => void;
+    reject?: string;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gateEditFlow(runId: string, n: number, sources: {
+export declare function checkpointEditFlow(runId: string, n: number, sources: {
     text?: string;
     file?: string;
     stdin?: string;
 }, opts: {
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gatePushFlow(runId: string, message: string, opts: {
-    json: boolean;
-}, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gateApproveFlow(runId: string, opts: {
+export declare function checkpointRetryFlow(runId: string, opts: {
     wait: boolean;
     json: boolean;
     onProgressLine?: (line: string) => void;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function gateRejectFlow(runId: string, opts: {
+export declare function checkpointCancelFlow(runId: string, opts: {
     reason?: string;
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;

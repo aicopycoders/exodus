@@ -1,5 +1,5 @@
 import { apiGet, apiPost, apiPostDashboard, getDashboardUrl } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError } from "../lib/format.js";
 import { AD_TYPES, AD_TYPE_NAMES, REPTILE_TRIGGERS, } from "../lib/template-constants.js";
 export const helpText = `
 exodus template — Fernando's Template pipeline (${AD_TYPES.length} AD_TYPES, resume)
@@ -225,7 +225,7 @@ async function runStatus(flags) {
     console.log(`runId:        ${d._id ?? runId}`);
     if (d.name)
         console.log(`name:         ${d.name}`);
-    console.log(`status:       ${d.status ?? "—"}`);
+    console.log(`status:       ${displayRunStatus(d.status, "—")}`);
     if (d.completedImageCount !== undefined || d.requestedImageCount !== undefined) {
         console.log(`progress:     ${d.completedImageCount ?? 0} / ${d.requestedImageCount ?? "?"} completed${d.failedImageCount ? `, ${d.failedImageCount} failed` : ""}`);
     }

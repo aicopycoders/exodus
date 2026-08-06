@@ -1,5 +1,46 @@
 // Format API responses as structured markdown-style text readable by Claude.
 
+import { normalizeRunStatus, runStatusLabel } from "./runStatus.js";
+
+/**
+ * #994: the ruled display word for a RUN status (Queued / Running / Awaiting
+ * approval / Succeeded / Succeeded with warnings / Failed / Cancelled), with a
+ * caller-chosen fallback when the payload carries no status at all. An absent
+ * status is unknown, never silently rendered as "Running".
+ */
+export function displayRunStatus(raw: unknown, missing = "unknown"): string {
+  return typeof raw === "string" && raw.trim() ? runStatusLabel(raw) : missing;
+}
+
+/** Words that mean nothing more than "queued"/"running" — no phase to keep. */
+const GENERIC_ACTIVE_STATUSES = new Set([
+  "queued",
+  "pending",
+  "running",
+  "processing",
+  "in-progress",
+]);
+
+/**
+ * #994: the status word for a LIVE progress ticker (a `\r`-redrawn line that
+ * streams a run's phase while it works). Mid-run phase names — walking, mining,
+ * enriching, storyboard-running — stream verbatim: they are progress copy, and
+ * collapsing every one of them to "Running" would throw away the only signal
+ * the ticker carries. The moment the run settles (any terminal state, or a park
+ * awaiting approval) it prints the ruled display word instead, so a raw status
+ * word is never what the operator is left looking at.
+ */
+export function tickerRunStatus(raw: unknown): string {
+  if (typeof raw !== "string" || !raw.trim()) return "";
+  const canonical = normalizeRunStatus(raw);
+  const isPhaseWord =
+    (canonical === "running" || canonical === "queued") && !GENERIC_ACTIVE_STATUSES.has(raw);
+  return isPhaseWord ? raw : runStatusLabel(raw);
+}
+
+// NOTE (#994): step statuses are a DIFFERENT, unrenamed vocabulary (a step is
+// completed/failed, not a run) — stepIcon stays keyed on the raw step words.
+// Only RUN-level statuses go through runStatusLabel.
 function stepIcon(status: unknown): string {
   if (status === "completed" || status === "done") return "✓";
   if (status === "failed" || status === "error") return "✗";
@@ -31,9 +72,8 @@ function formatSteps(steps: unknown): string {
 export function formatGeneration(data: Record<string, unknown>): string {
   const lines: string[] = [];
 
-  const status = data["status"] ?? "unknown";
   lines.push(`## Generation Result`);
-  lines.push(`**Status:** ${status}`);
+  lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
 
   if (data["agentName"] || data["agent"]) {
     lines.push(`**Agent:** ${data["agentName"] ?? data["agent"]}`);
@@ -85,9 +125,8 @@ export function formatGeneration(data: Record<string, unknown>): string {
 export function formatGenesisRun(data: Record<string, unknown>): string {
   const lines: string[] = [];
 
-  const status = data["status"] ?? "unknown";
   lines.push(`## Genesis Run`);
-  lines.push(`**Status:** ${status}`);
+  lines.push(`**Status:** ${displayRunStatus(data["status"])}`);
 
   if (data["awarenessLevel"] || data["awareness"]) {
     lines.push(`**Awareness Level:** ${data["awarenessLevel"] ?? data["awareness"]}`);
@@ -172,7 +211,7 @@ export function formatBrowse(generations: unknown[]): string {
     }
 
     const agent = gen["agentName"] ?? gen["agentId"] ?? gen["agent"] ?? gen["pipeline"] ?? "—";
-    const status = gen["status"] ?? "—";
+    const status = displayRunStatus(gen["status"], "—");
     const doc = gen["googleDocUrl"] ?? gen["docUrl"] ?? "—";
 
     lines.push(`${date} | ${agent} | ${status} | ${doc}`);

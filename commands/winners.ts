@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { apiGet, apiPost } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError, tickerRunStatus } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
 
 export const helpText = `
@@ -371,10 +371,13 @@ async function runImport(
     path: `/api/v2/winners/imports/${importId}`,
     terminalStatuses: ["done"],
     onProgress: (data) => {
+      // #994: the import's mid-run phases (validating/matching/enriching) are
+      // the progress signal and stream verbatim; a settled import prints the
+      // ruled display word.
       const status = typeof data.status === "string" ? data.status : "";
       if (!json && status && status !== lastStatus) {
         lastStatus = status;
-        console.log(`  status: ${status}`);
+        console.log(`  status: ${tickerRunStatus(status)}`);
       }
     },
   });
@@ -426,7 +429,7 @@ async function uploadAsset(absPath: string, json: boolean): Promise<string | nul
 
 function printOutcomeTable(data: ImportStatusResponse): void {
   const winners = data.winners ?? [];
-  console.log(`\nImport ${data.importId ?? "?"}: ${data.status ?? "?"}`);
+  console.log(`\nImport ${data.importId ?? "?"}: ${displayRunStatus(data.status, "?")}`);
   if (data.error) console.log(`  error: ${data.error}`);
   const created = winners.filter((w) => w.created === true).length;
   const updated = winners.filter((w) => w.created === false).length;

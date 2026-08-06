@@ -1,5 +1,6 @@
 import { apiGet } from "../lib/client.js";
 import { formatBrowse, formatError } from "../lib/format.js";
+import { isActiveRunStatus } from "../lib/runStatus.js";
 export const helpText = `
 exodus browse — List recent pipeline runs (hooks, ads, image concepts, etc.)
 
@@ -119,7 +120,7 @@ export async function run(flags) {
         ? all
         : all.filter((g) => {
             const status = g["status"];
-            if (status !== "running" && status !== "pending")
+            if (!status || !isActiveRunStatus(status))
                 return true;
             const created = normalizeCreatedAt(g);
             return created > 0 && now - created < STUCK_THRESHOLD_MS;

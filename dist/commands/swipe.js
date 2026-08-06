@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { apiGet, apiPost } from "../lib/client.js";
-import { formatError } from "../lib/format.js";
+import { displayRunStatus, formatError } from "../lib/format.js";
 export const helpText = `
 exodus swipe — Swipe pipeline lifecycle + competitor watchlist
 
@@ -121,7 +121,7 @@ async function runRunPipeline(flags) {
         return;
     }
     console.log(`Run started: ${res.data.runId}`);
-    console.log(`  status:        ${res.data.status ?? "selecting"}`);
+    console.log(`  status:        ${displayRunStatus(res.data.status, "Running")}`);
     if (res.data.triggerRunId)
         console.log(`  triggerRunId:  ${res.data.triggerRunId}`);
     console.log(`\nPoll:    exodus swipe status ${res.data.runId}`);
@@ -224,13 +224,13 @@ async function runHistory(flags) {
     for (const r of runs) {
         const when = r.startedAt ? new Date(r.startedAt).toLocaleString() : "?";
         const doc = r.docUrl ? `  doc=${r.docUrl}` : r.error ? `  error=${r.error}` : "";
-        console.log(`  ${r.runId}  ${r.status}  ads=${r.adsSelectedCount}  by=${r.triggeredBy}  ${when}${doc}`);
+        console.log(`  ${r.runId}  ${displayRunStatus(r.status, "—")}  ads=${r.adsSelectedCount}  by=${r.triggeredBy}  ${when}${doc}`);
     }
 }
 function printRunStatus(r) {
     console.log(`Run ${r.runId ?? "?"}`);
     console.log(`  brand:    ${r.targetBrandSlug ?? "?"}`);
-    console.log(`  status:   ${r.status ?? "?"}`);
+    console.log(`  status:   ${displayRunStatus(r.status, "?")}`);
     console.log(`  by:       ${r.triggeredBy ?? "?"}`);
     console.log(`  ads:      ${r.adsSelectedCount ?? 0}`);
     if (r.startedAt)

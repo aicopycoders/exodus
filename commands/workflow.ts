@@ -1,4 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
+// #1002 (--out saving) predates the #1000 `path` import — same module, second
+// alias kept so neither feature's call sites churn.
+import nodePath from "node:path";
 import {
   apiGet,
   apiGetText,
@@ -9,6 +13,14 @@ import {
 } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
 import { pollUntilDone, type PollOptions, type PollResult } from "../lib/poll.js";
+import {
+  normalizeRunStatus,
+  runStatusLabel,
+  storedWorkflowStatusForms,
+  LEGACY_WORKFLOW_RUN_STATUS_VALUES,
+  TERMINAL_RUN_STATUSES,
+  type RunStatus,
+} from "../lib/runStatus.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel, type Channel } from "../lib/channel.js";
@@ -23,8 +35,8 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--input key=value ...] [--terminal <nodeId> ...] [--wait] [--json]
-  exodus workflow status [--id <runId>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--wait] [--out <dir>] [--json]
+  exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
   exodus workflow validate <file> [--update <workflowId>] [--json]
@@ -34,12 +46,11 @@ Usage:
   exodus workflow triggers <workflowId|name> disable <n> [--json]
   exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--wait] [--json]
   exodus workflow inbox [--json]
-  exodus workflow gate <runId> [--json]
-  exodus workflow gate <runId> pick <n,..> [--json]
-  exodus workflow gate <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
-  exodus workflow gate <runId> push "<msg>" [--json]
-  exodus workflow gate <runId> approve [--wait] [--json]
-  exodus workflow gate <runId> reject [--reason "..."] [--json]
+  exodus workflow checkpoint <runId> [show] [--json]
+  exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
+  exodus workflow checkpoint <runId> approve [--reject <n[,n..]>] [--wait] [--json]
+  exodus workflow checkpoint <runId> retry [--wait] [--json]
+  exodus workflow checkpoint <runId> cancel [--reason "..."] [--json]
   exodus workflow repair <runId> retry|skip|kill [--wait] [--json]
   exodus workflow answer <runId> --slot key=value [--slot key=value ...] [--json]
 
@@ -51,13 +62,37 @@ Flags:
                          --input key=@path loads the value from a file (path is
                          resolved from the current directory); --input key=@@text
                          keeps a leading "@" as a literal character.
+                         FILE fields (an Asset Input — "workflow describe" shows
+                         them as source "asset") take a local file path instead:
+                         --input hero=./photos/hero.png. The CLI uploads the file
+                         and sends the stored asset in its place; a leading "@"
+                         is accepted and ignored. Pass an asset id from an
+                         earlier upload to reuse it. Accepted files: image PNG,
+                         JPEG, WebP, GIF (≤15MB) · video MP4, MOV, WebM (≤200MB)
+                         · audio MP3, M4A, WAV, OGG (≤50MB) · document PDF, TXT,
+                         MD, DOC, DOCX (≤25MB).
+  --fill <name>          (run) Launch from a saved fill — a named set of inputs
+                         saved on THIS brand's copy of the workflow. Its values
+                         become the run's inputs; any --input you also pass wins
+                         for that one key, so a fill is a starting point, not a
+                         lock. Names are exact (case-sensitive); an unknown one
+                         is rejected before the run starts. Fills are created and
+                         named in the dashboard's run dialog.
   --terminal <nodeId>    (run) Repeatable. Scope the run to the upstream closure
                          of these end node(s) — only nodes feeding a picked
                          terminal execute; the rest are recorded out-of-scope.
                          Omit to run the whole graph.
-  --wait                 Poll until the workflow run reaches a terminal status
+  --wait                 Poll until the workflow run reaches a terminal status.
+                         (checkpoint retry) Waits until the step's fresh output
+                         is ready and the run parks again — that IS its finish
+                         line; a redo never runs the workflow to completion.
   --id <runId>           Workflow run id for status detail
   --out <file>           Write the export to a file instead of stdout
+  --out <dir>            (run --wait / status --id) Save every delivered output
+                         of the finished run into this directory (created if
+                         missing) and print the paths — text as .md, storyboards
+                         and frame sets as .json, images/video/audio downloaded.
+                         Unfulfilled slots are reported, never written.
   --version <n>          (export) Export a saved historical version instead of the
                          current head. <n> is the real 1-based version id from
                          "workflow versions" (a positive integer). A version
@@ -77,9 +112,17 @@ Flags:
                          use validate as the standalone front door.
   --text "..."           (triggers fire) The input an EVENT trigger's run carries.
                          Required for event triggers; rejected for cron triggers.
-                         (gate edit) The replacement copy for one candidate.
-  --file <path>          (gate edit) Load the replacement copy from a file.
-  --reason "..."         (gate reject) Optional reason recorded on the cancel.
+                         (checkpoint edit) The replacement copy for one output.
+  --file <path>          (checkpoint edit) Load the replacement copy from a file.
+  --reason "..."         (checkpoint cancel) Optional reason recorded on the
+                         cancel.
+  --reject <n[,n..]>     (checkpoint approve) Only for a checkpoint that is
+                         reviewing a Splitter fan-out item by item. Drops those
+                         ITEM numbers (the "Item N of M" headings in the show
+                         listing, 1-based) and approves the rest. Rejecting is
+                         filtering, not failing — the run carries on with the
+                         survivors. Rejecting every item is refused: cancel
+                         instead.
   --slot key=value       (answer) Repeatable. One answer per pending slot.
   --kind <kind>          (schema) Print just one node kind's ports + config rules
   --face <face>          (schema) Print just one transform face's spec
@@ -93,11 +136,18 @@ Examples:
   exodus workflow templates export complete-ad-set --out my.yaml
   exodus workflow schema
   exodus workflow schema --kind transform
-  exodus workflow schema --face splitter
+  exodus workflow schema --kind splitter
+  exodus workflow schema --kind collector
+  exodus workflow schema --face collector
   exodus workflow run "Launch Flow" --input brief="new offer" --wait
   exodus workflow run "Launch Flow" --input brief=@brief.txt
+  exodus workflow run "Product Shots" --input hero=./photos/hero.png --wait
+  exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
+  exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
   exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
+  exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status --id wr_123
+  exodus workflow status --id wr_123 --out ./deliverables
   exodus workflow versions "Launch Flow"
   exodus workflow export "Launch Flow" --out workflow.yaml
   exodus workflow export "Launch Flow" --version 3 --out v3.yaml
@@ -109,12 +159,12 @@ Examples:
   exodus workflow triggers "Winner Flywheel" enable 1
   exodus workflow triggers "Winner Flywheel" fire 1 --text "new offer" --wait
   exodus workflow inbox
-  exodus workflow gate wr_123
-  exodus workflow gate wr_123 pick 1,3
-  exodus workflow gate wr_123 edit 2 --text "punchier hook"
-  exodus workflow gate wr_123 push "make it shorter"
-  exodus workflow gate wr_123 approve --wait
-  exodus workflow gate wr_123 reject --reason "off-brand"
+  exodus workflow checkpoint wr_123
+  exodus workflow checkpoint wr_123 edit 1 --text "tighter opener"
+  exodus workflow checkpoint wr_123 approve --wait
+  exodus workflow checkpoint wr_123 approve --reject 2,5 --wait
+  exodus workflow checkpoint wr_123 retry --wait
+  exodus workflow checkpoint wr_123 cancel --reason "wrong direction"
   exodus workflow repair wr_123 retry --wait
   exodus workflow answer wr_123 --slot tone=casual --slot length=short
 
@@ -124,11 +174,19 @@ Examples:
   exodus workflow export X --version 3 --out v3.yaml && exodus workflow import v3.yaml --update <id>
 
 Notes:
+  workflow describe prints the ENTRY CONTRACT — every input the workflow asks
+  for, whether it's required or optional, the shape it accepts (a dropdown and
+  its choices, a number, a true/false toggle; a plain text box shows no tag),
+  and the author's help text. Supply those keys with --input; a value the
+  contract can't accept is rejected before the run starts, naming the field.
+  "workflow run --fill <name>" launches from a saved fill instead of typing the
+  inputs again — the fill's values fill the contract, and any --input you pass
+  alongside it overrides just that key.
   Cold-start is a template, not a blank file: "workflow templates" lists the
   starters (incl. Winner Flywheel), "workflow templates export <key> --out f.yaml"
   writes the server-rendered YAML verbatim — edit it, then "workflow import f.yaml".
   "workflow schema" prints the LIVE graph vocabulary (node kinds, ports, config
-  rules, transform faces, gate policies, wiring rules) from the backend you're
+  rules, transform faces, collector policy, wiring rules) from the backend you're
   deployed against, so what you author matches what will validate; --kind/--face
   narrow it, --json is the machine payload. "workflow validate <file>" checks a
   file against the live backend (it IS import --dry-run under its own door).
@@ -149,15 +207,15 @@ Notes:
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
   workflow inbox lists every run parked waiting on you, badged by park kind
-  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A gate park
-  is resolved with the "gate" verbs: pick candidates by their 1-based number
-  (pick 1,3), edit one candidate's copy in place (edit 2 --text ...), push a
-  steering message into the gate's live chat session to bank a fresh candidate
-  (push "..."), then approve (resume) or reject (cancel). A require-all
-  collector that stalled on a dead input is a "repair" park — retry it, skip the
-  dead input, or kill the run. A nested sub-workflow waiting on inputs is a
-  "slots" park — answer it with repeatable --slot key=value flags (run "answer"
-  with no --slot to list the slot ids it wants).
+  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A run parked
+  at a checkpoint is resolved with the "checkpoint" verbs: show what the step
+  produced, edit one output in place (edit 1 --text ...), approve (resume),
+  retry (re-run just that step), or cancel. A require-all collector that stalled
+  on a dead input is a "repair" park — retry it, skip the dead input, or kill the
+  run. A nested sub-workflow waiting on inputs is a "slots" park — answer it with
+  repeatable --slot key=value flags (run "answer" with no --slot to list the slot
+  ids it wants). The "gate" verbs retired in 2.0 along with the Gate node — the
+  command now prints a pointer at "checkpoint" and exits 1.
 `.trim();
 
 // ── Contract shapes (mirror convex/lib/workflow/importExport.ts) ─────────
@@ -170,9 +228,15 @@ Notes:
 // contract.
 export type WorkflowNodeKind =
   | "brief"
+  // The Asset Input node — mirror of convex NODE_KINDS. A source node whose
+  // run-launch value is ONE uploaded file.
+  | "asset"
   | "bot"
   | "primer"
   | "image"
+  // #1004: the Image Rig — mirror of convex NODE_KINDS. The batch image door
+  // (a firing plan of engine lines); distinct from the video/CASTS "rig" below.
+  | "image-rig"
   | "rig"
   | "storyboard"
   | "reference"
@@ -180,10 +244,9 @@ export type WorkflowNodeKind =
   | "video"
   | "voiceover"
   | "output"
-  // #855 (MS-1): the Push node — mirror of convex NODE_KINDS.
-  | "push"
-  // #856 (MS-2): the Gate node — mirror of convex NODE_KINDS.
-  | "gate"
+  // #1012: "push" and "gate" RETIRED in 2.0 — mirror of the same removal in
+  // convex NODE_KINDS. Loops (bot config.loops) replaced Push; the checkpoint
+  // switch (config.checkpoint) replaced Gate.
   // #861 (MS-7): the Call node — mirror of convex NODE_KINDS.
   | "call"
   // #603 Video-module member-gate kinds (module templates only — the CLI
@@ -193,7 +256,15 @@ export type WorkflowNodeKind =
   | "show-voices"
   | "product-truth"
   // #857 (MS-3): the Transform node — mirror of convex NODE_KINDS.
-  | "transform";
+  | "transform"
+  // #1001: the Formatter node — mirror of convex NODE_KINDS.
+  | "formatter"
+  // #1014: the Splitter node — mirror of convex NODE_KINDS.
+  | "splitter"
+  // #1020: the Collector node — mirror of convex NODE_KINDS. Closes a
+  // Splitter's open fan back into one artifact. Name-collides on purpose with
+  // the retired `collector` TRANSFORM FACE (the node replaces it).
+  | "collector";
 
 /**
  * #861 (MS-7): a workflow's exposed input slot — mirror of convex/lib/workflow/
@@ -289,14 +360,27 @@ export type GraphIssueCode =
   | "unknown-port"
   | "type-mismatch"
   | "duplicate-input"
-  | "session-fan-out"
+  // #1000: two launch inputs claim the same field name and at least one is an
+  // Asset Input — the run-start binding rewrites that field into the frozen
+  // upload payload, so a second reader of it would get JSON, not an asset id.
+  | "duplicate-input-key"
+  // (#1012 removed "session-fan-out" — no node kind consumes a session wire.)
   | "cycle"
   | "missing-required-input"
   | "bad-config"
   // #861 (MS-7): a defect in a workflow's exposed slot sheet.
   | "bad-slot"
   // #862 (MS-8): a malformed workflow trigger (unknown event / invalid cron).
-  | "bad-trigger";
+  | "bad-trigger"
+  // #1014: a Splitter with another Splitter upstream (no nested splits in v1).
+  | "nested-split"
+  | "fan-overlap"
+  // #1014: a node downstream of a Splitter whose kind can't run once per item.
+  | "lane-ineligible"
+  // #1020: a Collector whose inputs don't all come from inside one Splitter's
+  // open fan — it has nothing to close, or a stray wire arrived from outside
+  // the fan (merging unrelated branches is a Formatter's job, not this one).
+  | "collector-unpaired";
 
 export interface GraphIssue {
   code: GraphIssueCode;
@@ -337,8 +421,11 @@ export type WorkflowPortType =
   | "frames"
   | "video"
   | "audio"
+  // An uploaded document (Asset Input node) — its own wire type.
+  | "document"
   | "show"
-  // #855 (MS-1): the session handle wire (session-mode Bot → Push node).
+  // #855 (MS-1): the session handle wire (a session-mode Bot's output; no node
+  // kind consumes it since #1012 retired Gate and Push).
   | "session";
 export type WorkflowPrimerKind = "body" | "hook" | "headline" | "summary";
 
@@ -436,13 +523,33 @@ export type WorkflowBriefSource =
   | "organic-url"
   | "ad-url";
 
+/** Mirror of convex graph.ts MEDIA_TYPES — an Asset Input node's file family. */
+export type WorkflowMediaType = "image" | "video" | "audio" | "document";
+
+/**
+ * #1013: the widget/value shape a Brief declares — mirror of convex/lib/workflow/
+ * graph.ts EntryFieldType. A literal union (not string) so the mutual-assignment
+ * pin in __tests__/workflow.test.ts holds.
+ */
+export type WorkflowEntryFieldType = "text" | "select" | "number" | "toggle";
+
 export interface WorkflowInputDescriptor {
   fieldName: string;
   nodeId: string;
-  source: WorkflowBriefSource;
+  /** "asset" = an uploaded file (an Asset Input node), not typed copy. */
+  source: WorkflowBriefSource | "asset";
   required: boolean;
   description?: string;
+  /**
+   * #1013: the widget/value shape the launch doors enforce. Set only when it
+   * isn't the plain "text" box, so a pre-#1013 describe payload is unchanged.
+   */
+  type?: WorkflowEntryFieldType;
+  /** For type === "select": the values the caller may pick. */
+  options?: string[];
   bundleSize?: number;
+  /** For source === "asset": which file family the upload must be. */
+  assetType?: WorkflowMediaType;
 }
 
 export interface WorkflowPrerequisiteDescriptor {
@@ -455,11 +562,11 @@ export interface WorkflowOutputDescriptor {
   // produce (a `rig` output is plumbing and never collected). Mirror of
   // convex/lib/workflow/describe.ts WorkflowOutputDescriptor (pinned by
   // exodus/commands/__tests__/workflow.test.ts).
-  type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
+  type: "text" | "image" | "video" | "audio" | "document" | "frames" | "storyboard";
   label: string;
   nodeId: string;
   botSlug?: string;
-  /** #855: the producing output port ("last"/"all" on a Push node) — lets a
+  /** #855: the producing output port (e.g. "loop" on a Bot running Loops) — lets a
    *  consumer keep a multi-port node's deliverables apart. */
   port?: string;
 }
@@ -532,31 +639,55 @@ export interface WorkflowVersionsResponse {
   versions: WorkflowVersion[];
 }
 
-// #539 video pipeline adds two run states: "awaiting-review" (paused at the
-// storyboard cost gate, waiting on a web approve/cancel — NONterminal) and
-// "canceled" (an operator canceled a paused run — terminal).
+// A workflow run's status, in EITHER vocabulary. #994 renamed the stored
+// values (awaiting-review→awaiting-approval, completed→succeeded,
+// partial→succeeded-with-warnings, canceled→cancelled), but a published CLI
+// meets both old and new backends, so both forms stay assignable — and EVERY
+// comparison in this file goes through normalizeRunStatus rather than testing a
+// literal. #539's two extra states survive the rename: "awaiting-approval"
+// (parked, waiting on a human — NONterminal) and "cancelled" (terminal).
 export type WorkflowRunStatus =
-  | "queued"
-  | "running"
-  | "awaiting-review"
-  | "completed"
-  | "partial"
-  | "failed"
-  | "canceled";
+  | RunStatus
+  | (typeof LEGACY_WORKFLOW_RUN_STATUS_VALUES)[number];
 export type WorkflowNodeRunStatus = "idle" | "running" | "done" | "failed" | "skipped";
 
+/**
+ * #1014: an artifact's LANE IDENTITY — which item of a Splitter's fan-out it
+ * belongs to. `index` is 0-based; `total` is the item count stamped when the
+ * item was emitted, so "Item 3 of 7" needs no second lookup. Absent on every
+ * artifact from an ordinary (un-fanned) node — that absence is exactly how the
+ * runner knows to execute a node once instead of once per item.
+ */
+export interface ArtifactItemIdentity {
+  index: number;
+  total: number;
+}
+
 export type WorkflowArtifact =
-  // #891 (gate cluster): a Gate node's selection-port candidates are text
+  // #891: a retired Gate node's selection-port candidates were text
   // artifacts carrying `port: "selection"`; `humanEdited` flips once a reviewer
   // hand-edits one. Both optional so non-gate text artifacts stay shape-compatible.
-  | { type: "text"; text: string; label?: string; port?: string; humanEdited?: boolean }
-  | { type: "primer"; text: string; primerKind: string }
-  | { type: "image"; storageId: string; imageUrl?: string }
-  // #855 (MS-1) / #926: a session handle recorded on a node's outputs. A
-  // session-mode Bot wires its `session` output into the gate's `session` input;
-  // the parked gate node carries this artifact (port "session"), which is how
-  // `gate push` resolves the gate's live session (mirror of convex graph.ts).
-  | { type: "session"; sessionId: string; label?: string; port?: string };
+  | {
+      type: "text";
+      text: string;
+      label?: string;
+      port?: string;
+      humanEdited?: boolean;
+      item?: ArtifactItemIdentity;
+    }
+  | { type: "primer"; text: string; primerKind: string; item?: ArtifactItemIdentity }
+  | { type: "image"; storageId: string; imageUrl?: string; item?: ArtifactItemIdentity }
+  // #855 (MS-1) / #926: a session handle recorded on a session-mode Bot's
+  // outputs (port "session"). Read-only since #1012 retired the two node kinds
+  // that consumed session wires — it deep-links the chat surface (mirror of
+  // convex graph.ts).
+  | {
+      type: "session";
+      sessionId: string;
+      label?: string;
+      port?: string;
+      item?: ArtifactItemIdentity;
+    };
 
 /**
  * A FINAL deliverable (#508): a producing node's artifact wired into the Output
@@ -566,7 +697,7 @@ export type WorkflowArtifact =
 export interface WorkflowRunOutput {
   nodeId: string;
   botSlug?: string;
-  type: "text" | "image" | "video" | "audio" | "frames" | "storyboard";
+  type: "text" | "image" | "video" | "audio" | "document" | "frames" | "storyboard";
   label: string;
   text?: string;
   imageUrl?: string;
@@ -582,11 +713,47 @@ export interface WorkflowRunOutput {
   final?: boolean;
   frames?: Array<{ sceneIndex: number; imageUrl?: string }>;
   storyboardJson?: string;
+  // An uploaded document passed straight through from an Asset Input node.
+  documentUrl?: string;
+  filename?: string;
+  mimeType?: string;
+}
+
+/**
+ * #1002: the delivery type of one Output slot — what KIND of result it promises.
+ * Mirror of convex/lib/workflow/graph.ts OutputSlotType.
+ */
+export type WorkflowOutputSlotType = "text" | "structured" | "asset" | "collection";
+
+/**
+ * #1002 (Exit Contract): ONE promised result of a run — an Output node's named,
+ * typed delivery slot, plus whether it actually arrived.
+ *
+ * `outputs` above is a flat bag of everything that reached any Output collector;
+ * this is the workflow's exit CONTRACT answered slot by slot, so the CLI can say
+ * what is missing (`unfulfilled`, with the producing node's error) and not just
+ * what showed up. Kept in lockstep with the canonical convex/workflows.ts
+ * WorkflowRunDelivery (see the assignability guards in
+ * exodus/commands/__tests__/workflow.test.ts).
+ */
+export interface WorkflowRunDelivery {
+  key: string;
+  label: string;
+  type: WorkflowOutputSlotType;
+  description?: string;
+  order: number;
+  /** The Output node that owns this slot (not the producing node). */
+  nodeId: string;
+  status: "delivered" | "unfulfilled";
+  error?: string;
+  artifacts: WorkflowRunOutput[];
 }
 
 export interface WorkflowRunNode {
   nodeId: string;
   kind: string;
+  /** The Genesis bot a Bot node ran (server-provided); absent on other kinds. */
+  botSlug?: string;
   status: WorkflowNodeRunStatus;
   error?: string;
   startedAt?: number;
@@ -614,16 +781,25 @@ export interface WorkflowRunSession {
 }
 
 /**
- * #891 (gate cluster): WHY a run parked. "taste" = a Gate-node review park (the
- * text-gate cluster acts on these); "repair" = a require-all collector stalled
+ * #891: WHY a run parked. "taste" = a LEGACY park at the retired Gate node
+ * (#1012 — nothing emits it now, but frozen runs carry it and the CLI still has
+ * to say something honest about them); "repair" = a require-all collector stalled
  * on a dead input; "slots" = a nested child awaiting the member's slot answers;
  * "call" = a parent parked on a child (never actionable, filtered out of the
  * inbox). Absent on legacy video cost-gate parks.
+ * #998 adds "checkpoint": ANY node can carry the "pause for approval" switch
+ * (`config.checkpoint`), and when that step finishes the run parks here for the
+ * member's approve / edit / retry / cancel — the `workflow checkpoint` cluster.
  */
-export type WorkflowPauseReason = "taste" | "repair" | "slots" | "call";
+export type WorkflowPauseReason =
+  | "taste"
+  | "repair"
+  | "slots"
+  | "call"
+  | "checkpoint";
 
 /**
- * #891 (gate cluster): a slot a "slots"-parked run awaits — mirror of convex
+ * #891: a slot a "slots"-parked run awaits — mirror of convex
  * workflows.ts PendingSlot. Only `id` is load-bearing for the CLI answer verb.
  */
 export interface WorkflowPendingSlot {
@@ -652,10 +828,15 @@ export interface WorkflowRun {
   nodes: WorkflowRunNode[];
   /** Flattened final deliverables (#508) — present on the run-detail response. */
   outputs?: WorkflowRunOutput[];
+  /**
+   * #1002: the run's named, typed delivery slots. Optional — an older backend
+   * omits the field entirely, so every render must tolerate its absence.
+   */
+  deliveries?: WorkflowRunDelivery[];
   /** #893: chat sessions this run opened (session-mode bots). */
   sessions?: WorkflowRunSession[];
-  // #891 (gate cluster): the park surface. Present on a parked run-detail; the
-  // gate/repair/answer verbs preflight against these.
+  // #891: the park surface. Present on a parked run-detail; the
+  // checkpoint/repair/answer verbs preflight against these.
   pauseReason?: WorkflowPauseReason;
   pausedNodeId?: string;
   pendingSlots?: WorkflowPendingSlot[];
@@ -677,8 +858,16 @@ export interface WorkflowRunDeps {
   readFile: (path: string) => string;
   writeFile: (path: string, text: string) => void;
   poll: (opts: PollOptions) => Promise<PollResult>;
-  // #891 (gate cluster): the gate "push" step-1 hits the Next.js dashboard chat
-  // route (like `session chat`); optional so existing test deps stay valid.
+  // #1002 (`--out <dir>`): the two seams delivery-file saving needs beyond
+  // writeFile — creating the target directory, and pulling an asset off its
+  // storage URL onto disk. Optional so existing test deps stay valid; the real
+  // fs/fetch implementations below are the fallback when a caller omits them.
+  mkdirp?: (dir: string) => void;
+  downloadToFile?: (url: string, path: string) => Promise<void>;
+  // The Next.js dashboard chat route seam (like `session chat`). Optional, and
+  // currently unused by the workflow verbs — its one consumer was the retired
+  // Gate node's "push" step-1 (#1012). Kept so `session`-shaped deps stay
+  // interchangeable and existing test deps stay valid.
   postDashboard?: (
     path: string,
     body: unknown,
@@ -687,6 +876,21 @@ export interface WorkflowRunDeps {
   // The dashboard base URL for the "resolve in the app" pause pointer + reject
   // fallbacks. Optional: waitForRun falls back to resolving it from the API URL.
   dashboardUrl?: string;
+  // ── Asset Input file uploads (Stage 3B) ────────────────────────────────
+  // Three optional seams so `--input hero=./photo.png` can push real bytes and
+  // still be testable with plain fakes. Optional so existing deps stay valid;
+  // when they're absent the CLI degrades to passing the value through (an
+  // asset id) rather than pretending it uploaded something.
+  /** Stat a local file. Returns null when there is no such FILE (dir included). */
+  statFile?: (filePath: string) => { size: number } | null;
+  /** Read a local file's RAW bytes — asset uploads are binary, never utf-8. */
+  readFileBytes?: (filePath: string) => Uint8Array;
+  /** POST raw bytes to a minted Convex upload URL; resolves the storage id. */
+  uploadBytes?: (
+    uploadUrl: string,
+    contentType: string,
+    bytes: Uint8Array,
+  ) => Promise<{ ok: boolean; status: number; storageId?: string; body?: string }>;
 }
 
 export interface FlowResult {
@@ -699,8 +903,16 @@ interface RunFlowOptions {
   // #860: scope the run to the upstream closure of these terminal node ids.
   // Empty / undefined runs the whole graph (unchanged behavior).
   terminalNodeIds?: string[];
+  /**
+   * #1013: the NAME of a saved fill on this brand's copy of the workflow. The
+   * server loads its stored values as the launch payload; anything in `inputs`
+   * still wins key-by-key. Blank/undefined sends no fill (unchanged behavior).
+   */
+  fill?: string;
   wait: boolean;
   json: boolean;
+  // #1002: with --wait, save the terminal run's delivered outputs into this dir.
+  out?: string;
   onProgressLine?: (line: string) => void;
 }
 
@@ -710,6 +922,11 @@ const STATUS_PATH = "/api/v2/workflow";
 const EXPORT_PATH = "/api/v2/workflows/export";
 const IMPORT_PATH = "/api/v2/workflows/import";
 const DESCRIBE_PATH = "/api/v2/workflows/describe";
+// Asset Input uploads (Stage 3B): mint an upload URL, then register the stored
+// blob. The register call answers with the assetId a run's `inputs` carries for
+// that field — the CLI never sends a raw storage id to the run route.
+const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
+const ASSETS_PATH = "/api/v2/workflows/assets";
 const CATALOG_PATH = "/api/v2/workflows/catalog";
 // #893 (MS-8 triggers): set-enabled + fire. LIST reads the export contract's
 // `.triggers` (describe doesn't carry them) — so no separate list path here.
@@ -721,20 +938,24 @@ const SCHEMA_PATH = "/api/v2/workflows/schema";
 // #894: version history (up to 50, newest-first) + versioned export.
 const VERSIONS_PATH = "/api/v2/workflows/versions";
 const VERSIONS_CAP = 50;
-// #891 (gate cluster): the review inbox + gate/repair/answer action routes.
+// #891: the review inbox + approve/repair/answer action routes. (#1012: the
+// three /workflow/gate/* routes retired with the Gate node — the server answers
+// them 410 with a pointer at the checkpoint verbs.)
 const INBOX_PATH = "/api/v2/workflow/inbox";
 const APPROVE_PATH = "/api/v2/workflow/approve";
-const GATE_PICK_PATH = "/api/v2/workflow/gate/pick";
-const GATE_EDIT_PATH = "/api/v2/workflow/gate/edit";
-const GATE_APPEND_PATH = "/api/v2/workflow/gate/append-from-session";
 const CANCEL_PATH = "/api/v2/workflow/cancel";
 const ANSWER_PATH = "/api/v2/workflow/answer";
 const REPAIR_RETRY_PATH = "/api/v2/workflow/repair/retry";
 const REPAIR_SKIP_PATH = "/api/v2/workflow/repair/skip";
-// The gate "push" step-1 hits the Next.js dashboard chat route (mirror of
-// session chat). Bound the client a touch above the route's 300s maxDuration.
-const CHAT_PATH = "/api/sessions/chat";
-const CHAT_TIMEOUT_MS = 320_000;
+// #998 (checkpoint cluster): the two NEW routes. Approve and cancel reuse
+// APPROVE_PATH / CANCEL_PATH unchanged — a checkpoint park resolves through the
+// same doors every other park does.
+const CHECKPOINT_RETRY_PATH = "/api/v2/workflow/checkpoint/retry";
+const CHECKPOINT_EDIT_PATH = "/api/v2/workflow/checkpoint/edit";
+// #1014: per-item resolution of a checkpoint that is reviewing a Splitter
+// fan-out. Only `approve --reject` uses it; a plain approve still goes through
+// APPROVE_PATH, so nothing changes for a checkpoint with no items.
+const CHECKPOINT_RESOLVE_ITEMS_PATH = "/api/v2/workflow/checkpoint/resolve-items";
 // The run page in the web app — the "resolve in the app" pointer target.
 const RUN_PAGE_PREFIX = "/runs/";
 
@@ -746,18 +967,39 @@ const VALUE_FLAGS = new Set([
   "slug",
   "update",
   "terminal",
+  // #1013: `workflow run <ref> --fill <name>` takes a saved fill's name.
+  "fill",
   // #893: `workflow triggers <ref> fire --text "..."` takes a value.
   "text",
   // #892: schema section filters.
   "kind",
   "face",
   "version",
-  // #891 (gate cluster): value-taking flags on the gate/repair/answer verbs, so
+  // #891: value-taking flags on the checkpoint/repair/answer verbs, so
   // parsePositional skips their values when extracting positionals.
   "file",
   "reason",
   "slot",
+  // #1014: `workflow checkpoint <runId> approve --reject 2,5` takes a value.
+  "reject",
 ]);
+
+/** #1002: `mkdir -p` for the `--out <dir>` target. */
+function defaultMkdirp(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+/**
+ * #1002: pull one asset (image/video/audio) off its resolved storage URL onto
+ * disk. Buffered rather than streamed — deliverables are ad-sized, and a whole
+ * buffer keeps a failed fetch from leaving a half-written file behind.
+ */
+async function defaultDownloadToFile(url: string, path: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed with HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(path, buf);
+}
 
 const defaultDeps: WorkflowRunDeps = {
   get: (path) => apiGet<unknown>(path),
@@ -766,10 +1008,36 @@ const defaultDeps: WorkflowRunDeps = {
   readFile: (path) => fs.readFileSync(path, "utf-8"),
   writeFile: (path, text) => fs.writeFileSync(path, text, "utf-8"),
   poll: (opts) => pollUntilDone(opts),
+  mkdirp: defaultMkdirp,
+  downloadToFile: defaultDownloadToFile,
   postDashboard: (path, body, opts) => apiPostDashboard<unknown>(path, body, opts),
   // getDashboardUrl honors an explicit EXODUS_DASHBOARD_URL override before the
   // API-URL auto-derive — the same target apiPostDashboard actually hits.
   dashboardUrl: getDashboardUrl(),
+  statFile: (filePath) => {
+    try {
+      const stat = fs.statSync(filePath);
+      return stat.isFile() ? { size: stat.size } : null;
+    } catch {
+      return null;
+    }
+  },
+  readFileBytes: (filePath) => fs.readFileSync(filePath),
+  // Same shape as the winners import upload (commands/winners.ts): a plain POST
+  // of the bytes to the minted URL, which answers `{ storageId }`.
+  uploadBytes: async (uploadUrl, contentType, bytes) => {
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: new Blob([bytes as BlobPart]),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { ok: false, status: res.status, body };
+    }
+    const parsed = (await res.json().catch(() => ({}))) as { storageId?: string };
+    return { ok: true, status: res.status, storageId: parsed.storageId };
+  },
 };
 
 // ── Pure helpers ─────────────────────────────────────────────────────────
@@ -833,6 +1101,11 @@ function table(headers: string[], rows: string[][]): string {
   return [fmt(headers), fmt(headers.map((h) => "-".repeat(h.length))), ...rows.map(fmt)].join("\n");
 }
 
+/**
+ * Icon for a NODE status (idle/running/done/failed/skipped) — a separate,
+ * unrenamed vocabulary from the run statuses #994 governs. Never call this with
+ * a run status; run statuses render via runStatusLabel.
+ */
 function statusIcon(status: string | undefined): string {
   if (status === "completed" || status === "done") return "✓";
   if (status === "failed") return "✗";
@@ -868,44 +1141,65 @@ function outputLines(output: WorkflowArtifact): string[] {
 }
 
 /**
- * One node status line. #923/#929: while the run is parked (`awaiting-review`)
- * on THIS node, the node row itself already reads `done` (the gate records its
- * candidates before the human resolves) — but the pausedNodeId is the truth, so
- * render it as `⏸ … awaiting review` rather than a misleading `✓ … done`.
+ * One node status line. #923/#929: while the run is parked (awaiting approval)
+ * on THIS node, the node row itself already reads `done` (the step finishes
+ * before the human resolves) — but the pausedNodeId is the truth, so
+ * render it as `⏸ … awaiting approval` rather than a misleading `✓ … done`.
+ * The node's own status word (idle/running/done/failed/skipped) is a separate
+ * vocabulary from the run statuses #994 governs and prints as-is.
  */
 function progressLine(node: WorkflowRunNode, parked = false): string {
   const err = node.error ? ` — error: ${node.error}` : "";
   if (parked) {
-    return `  ⏸ ${node.nodeId} (${node.kind}) awaiting review`;
+    return `  ⏸ ${node.nodeId} (${node.kind}) awaiting approval`;
   }
   return `  ${statusIcon(node.status)} ${node.nodeId} (${node.kind}) ${node.status}${err}`;
 }
 
 /**
- * #931: which node (if any) should render as `⏸ awaiting review` — and get the
- * `— awaiting review, not yet approved` outputs suffix. ONLY a copy-review gate
- * qualifies: a "taste" park, or a legacy video cost-gate park (absent pauseReason).
- * "repair", "slots", and "call" parks are ALSO `awaiting-review` but their paused
- * node is not a gate (a repair collector is deliberately idle), so those node rows
+ * #931: which node (if any) should render as `⏸ awaiting approval` — and get the
+ * `— awaiting approval, not yet approved` outputs suffix. ONLY a review park
+ * qualifies: a "checkpoint" park, a legacy video cost-gate park (absent
+ * pauseReason), or a legacy "taste" park at the retired Gate node (#1012).
+ * "repair", "slots", and "call" parks are ALSO parked but their paused node holds
+ * nothing to review (a repair collector is deliberately idle), so those node rows
  * stay as-is — the pause banner above already names the reason. Returns the
  * paused node id when the override applies, else undefined.
+ * #998: a "checkpoint" park qualifies too — the flagged step's row settles `done`
+ * while the run waits on the member, so it must read `⏸ awaiting approval` and its
+ * outputs must NOT read as approved until the member says so.
+ *
+ * #994: the status test normalizes, so a pre-rename backend's "awaiting-review"
+ * and a renamed backend's "awaiting-approval" behave identically.
  */
 function gateParkedNodeId(
   status: string | undefined,
   pauseReason: WorkflowPauseReason | undefined,
   pausedNodeId: string | undefined,
 ): string | undefined {
-  if (status !== "awaiting-review") return undefined;
-  if (pauseReason === "taste" || pauseReason === undefined) return pausedNodeId;
+  if (!status || normalizeRunStatus(status) !== "awaiting-approval") return undefined;
+  if (pauseReason === "taste" || pauseReason === "checkpoint" || pauseReason === undefined) {
+    return pausedNodeId;
+  }
   return undefined;
 }
 
 /**
- * #891 (gate cluster): the pause banner a --wait loop prints once when a run
- * parks. The verb-specific "Resolve here" line is dispatched on `pauseReason`:
- *   - "taste" → the gate cluster
+ * The one-line pointer every retired-Gate surface prints (#1012). Kept as a
+ * single constant so the CLI verb, the pause banner, and the docs never drift.
+ */
+const RETIRED_GATE_VERB_POINTER =
+  "The Gate node retired in 2.0 — runs now pause with the checkpoint switch on a node. " +
+  "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
+
+/**
+ * #891: the pause banner a --wait loop prints once when a run parks. The
+ * verb-specific "Resolve here" line is dispatched on `pauseReason`:
  *   - "repair" → the repair verb
  *   - "slots" → the answer verb
+ *   - "checkpoint" (#998) → the checkpoint cluster
+ *   - "taste" → a LEGACY park at the retired Gate node (#1012): there is no verb
+ *     that can resume it, so say so and point at cancel-and-re-run.
  *   - absent (legacy video cost-gate park) → keep the original storyboard copy.
  * `runId` + `dashboardUrl` build the "resolve in the app" pointer.
  */
@@ -926,13 +1220,30 @@ export function formatPauseNotice(
   if (pauseReason === "call") {
     return ["  ⏸ waiting on a child workflow run — it resumes on its own."];
   }
+  // #998: a checkpoint park is a step someone flagged "pause for approval" — say
+  // exactly that, then point at the checkpoint verb (same 3-line shape).
+  if (pauseReason === "checkpoint") {
+    return [
+      "  ⏸ paused at a checkpoint — a step's output is waiting on your approval.",
+      `     Resolve here:  exodus workflow checkpoint ${runId}`,
+      `     Or in the app: ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
+    ];
+  }
+  // #1012: a LEGACY "taste" park sits at a Gate node that no longer exists, so
+  // the run can never be resumed — only cancelled. Say that plainly rather than
+  // pointing at a verb that would refuse it.
+  if (pauseReason === "taste") {
+    return [
+      "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen with the checkpoint switch.",
+      `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
+      `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
+      "     Then run the workflow again.",
+    ];
+  }
   const resolveVerb =
     pauseReason === "repair"
       ? `exodus workflow repair ${runId} retry|skip|kill`
-      : pauseReason === "slots"
-        ? `exodus workflow answer ${runId} --slot key=value`
-        : // "taste" → the gate cluster.
-          `exodus workflow gate ${runId}`;
+      : `exodus workflow answer ${runId} --slot key=value`;
   return [
     "  ⏸ paused for review — waiting on you.",
     `     Resolve here:  ${resolveVerb}`,
@@ -973,10 +1284,13 @@ function expandInputValue(
   return value;
 }
 
-export function parseInputFlags(
-  args: string[],
-  readFile?: (path: string) => string,
-): Record<string, string> {
+/**
+ * Split the repeatable `--input key=value` flags into a map, WITHOUT expanding
+ * `@path` values (Stage 3B). The run verb parses raw and expands later, once
+ * `describe` has said which fields are Asset Inputs — for those, a bare path is
+ * the argument itself and must never be slurped in as utf-8 text.
+ */
+export function parseRawInputFlags(args: string[]): Record<string, string> {
   const inputs: Record<string, string> = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -995,9 +1309,416 @@ export function parseInputFlags(
     if (eq <= 0) throw new Error(`--input must be key=value (got "${raw}")`);
     const key = raw.slice(0, eq).trim();
     if (!key) throw new Error(`--input must include a key (got "${raw}")`);
-    inputs[key] = expandInputValue(key, raw.slice(eq + 1), readFile);
+    inputs[key] = raw.slice(eq + 1);
   }
   return inputs;
+}
+
+export function parseInputFlags(
+  args: string[],
+  readFile?: (path: string) => string,
+): Record<string, string> {
+  const inputs = parseRawInputFlags(args);
+  for (const [key, value] of Object.entries(inputs)) {
+    inputs[key] = expandInputValue(key, value, readFile);
+  }
+  return inputs;
+}
+
+// ── Asset Input file uploads (Stage 3B) ───────────────────────────────────
+
+/** Bytes per megabyte, spelled out so the caps below read as MB. */
+const MB = 1024 * 1024;
+
+/**
+ * Mirror of convex/lib/workflow/assetPolicy.ts ASSET_MEDIA_POLICY, plus the
+ * extension→MIME map only the CLI needs: a browser file picker hands the server
+ * a content type, but a shell path carries nothing but a suffix, so the CLI
+ * derives the type from the extension and the server re-derives the truth from
+ * the stored bytes. exodus builds standalone, so this is a copy — the lockstep
+ * test in exodus/__tests__/workflow.test.ts pins every MIME + cap here to the
+ * convex original so the two can never drift.
+ */
+export const ASSET_UPLOAD_POLICY: Record<
+  WorkflowMediaType,
+  { mimeByExtension: Record<string, string>; maxBytes: number; accepts: string }
+> = {
+  image: {
+    mimeByExtension: {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+    },
+    maxBytes: 15 * MB,
+    accepts: "PNG, JPEG, WebP, GIF",
+  },
+  video: {
+    mimeByExtension: {
+      ".mp4": "video/mp4",
+      ".m4v": "video/mp4",
+      ".mov": "video/quicktime",
+      ".webm": "video/webm",
+    },
+    maxBytes: 200 * MB,
+    accepts: "MP4, MOV, WebM",
+  },
+  audio: {
+    mimeByExtension: {
+      ".mp3": "audio/mpeg",
+      ".m4a": "audio/mp4",
+      ".wav": "audio/wav",
+      ".ogg": "audio/ogg",
+    },
+    maxBytes: 50 * MB,
+    accepts: "MP3, M4A, WAV, OGG",
+  },
+  document: {
+    mimeByExtension: {
+      ".pdf": "application/pdf",
+      ".txt": "text/plain",
+      ".md": "text/markdown",
+      ".doc": "application/msword",
+      ".docx":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+    maxBytes: 25 * MB,
+    accepts: "PDF, TXT, Markdown, DOC, DOCX",
+  },
+};
+
+/** Mirror of convex graph.ts MEDIA_TYPES, in the same order. */
+const MEDIA_FAMILIES: WorkflowMediaType[] = ["image", "video", "audio", "document"];
+
+/** Bytes rendered the way a person reads them ("1.4MB"). */
+function sizeLabel(bytes: number): string {
+  return `${(bytes / MB).toFixed(1)}MB`;
+}
+
+/** A family's cap as human copy ("15MB"). */
+function capLabel(bytes: number): string {
+  return `${Math.round(bytes / MB)}MB`;
+}
+
+/**
+ * The content type to declare for a local file, honoring the field's declared
+ * family when it has one (so a .mp4 handed to an audio port is caught here, not
+ * three minutes into an upload). Null = an extension we don't accept.
+ */
+function assetMimeFor(
+  filePath: string,
+  assetType: WorkflowMediaType | undefined,
+): { mime: string; family: WorkflowMediaType } | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!ext) return null;
+  for (const family of assetType ? [assetType] : MEDIA_FAMILIES) {
+    const mime = ASSET_UPLOAD_POLICY[family].mimeByExtension[ext];
+    if (mime) return { mime, family };
+  }
+  return null;
+}
+
+/** "image files (PNG, JPEG, WebP, GIF)" — what this field will actually take. */
+function acceptedLabel(assetType: WorkflowMediaType | undefined): string {
+  if (assetType) {
+    const policy = ASSET_UPLOAD_POLICY[assetType];
+    return `${assetType} files (${policy.accepts}, up to ${capLabel(policy.maxBytes)})`;
+  }
+  return MEDIA_FAMILIES.map(
+    (family) => `${family} (${ASSET_UPLOAD_POLICY[family].accepts})`,
+  ).join(", ");
+}
+
+/**
+ * True when a value READS like a filesystem path — it has a directory
+ * separator, a leading "~", or a short extension-like suffix. A stored asset id
+ * has none of those, so a path-shaped value that isn't on disk is a typo worth
+ * failing on rather than an opaque id worth relaying to the server.
+ */
+function looksLikePath(value: string): boolean {
+  if (value.includes("/") || value.includes("\\")) return true;
+  if (value.startsWith("~")) return true;
+  return /\.[A-Za-z0-9]{1,8}$/.test(value);
+}
+
+/** One local file that PASSED every client-side check and is cleared to upload. */
+interface PlannedAssetUpload {
+  field: string;
+  filePath: string;
+  /** The basename, i.e. what the member sees quoted in messages. */
+  name: string;
+  size: number;
+  mime: string;
+  family: WorkflowMediaType;
+}
+
+/**
+ * Every client-side check for ONE local file, with no network in it.
+ *
+ * Split out from the upload itself so the run flow can check EVERY file before
+ * the first byte moves: a bad third file used to strand two already-registered
+ * assets (orphan rows the member had no way to reuse). Throws a line written
+ * for the person who picked the file.
+ */
+function planAssetUpload(
+  field: string,
+  filePath: string,
+  size: number,
+  assetType: WorkflowMediaType | undefined,
+  deps: WorkflowRunDeps,
+): PlannedAssetUpload {
+  const name = path.basename(filePath);
+  const picked = assetMimeFor(filePath, assetType);
+  if (!picked) {
+    throw new Error(
+      `--input ${field}: can't tell what kind of file "${name}" is — ${field} takes ${acceptedLabel(assetType)}`,
+    );
+  }
+  const { maxBytes } = ASSET_UPLOAD_POLICY[picked.family];
+  if (size > maxBytes) {
+    throw new Error(
+      `--input ${field}: "${name}" is ${sizeLabel(size)} — over the ${capLabel(maxBytes)} limit for ${picked.family} uploads`,
+    );
+  }
+  if (!deps.readFileBytes || !deps.uploadBytes) {
+    throw new Error(`--input ${field}: cannot upload files here (no file access)`);
+  }
+  return { field, filePath, name, size, mime: picked.mime, family: picked.family };
+}
+
+/**
+ * Push ONE already-checked file up as a workflow asset: mint an upload URL →
+ * POST the bytes → register the stored blob. Returns the assetId the run body
+ * carries.
+ *
+ * The mint hands back a `receiptId` alongside the URL and the register call
+ * MUST echo it — that's how the server binds the blob it stored to the mint it
+ * issued, so a stray storage id can't be claimed by someone else's register.
+ */
+async function pushAssetFile(
+  plan: PlannedAssetUpload,
+  deps: WorkflowRunDeps,
+): Promise<{ assetId: string; mediaType: WorkflowMediaType }> {
+  const { field, name } = plan;
+  const mint = await deps.post(ASSET_UPLOAD_URL_PATH, {});
+  if (!mint.ok) {
+    throw new Error(missingRouteLine(mint, "workflow file inputs") ?? formatApiError(mint));
+  }
+  const minted = mint.data as { uploadUrl?: string; receiptId?: string };
+  if (!minted.uploadUrl) {
+    throw new Error(`--input ${field}: the server did not return an upload URL for "${name}"`);
+  }
+  if (!minted.receiptId) {
+    throw new Error(`--input ${field}: the server did not return an upload receipt for "${name}"`);
+  }
+
+  let bytes: Uint8Array;
+  try {
+    bytes = deps.readFileBytes!(plan.filePath);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`--input ${field}: could not read file "${plan.filePath}": ${msg}`);
+  }
+  const put = await deps.uploadBytes!(minted.uploadUrl, plan.mime, bytes);
+  if (!put.ok || !put.storageId) {
+    const detail = put.body ? `: ${put.body.slice(0, 200)}` : "";
+    throw new Error(`--input ${field}: upload of "${name}" failed (HTTP ${put.status})${detail}`);
+  }
+
+  const registered = await deps.post(ASSETS_PATH, {
+    storageId: put.storageId,
+    receiptId: minted.receiptId,
+    filename: name,
+  });
+  if (!registered.ok) {
+    throw new Error(
+      missingRouteLine(registered, "workflow file inputs") ?? formatApiError(registered),
+    );
+  }
+  const data = registered.data as { assetId?: string; mediaType?: WorkflowMediaType };
+  if (!data.assetId) {
+    throw new Error(`--input ${field}: the server did not return an asset id for "${name}"`);
+  }
+  return { assetId: data.assetId, mediaType: data.mediaType ?? plan.family };
+}
+
+/**
+ * One error line per bad `--input`, or a short list when several are bad — the
+ * member fixes them all in one edit instead of discovering them one run at a
+ * time. Each line already starts with `--input <field>:`, so the list needs no
+ * extra labeling.
+ */
+function formatInputProblems(problems: string[]): string {
+  if (problems.length === 1) return problems[0];
+  return [
+    `${problems.length} of the --input values can't be used:`,
+    ...problems.map((line) => `  ${line}`),
+  ].join("\n");
+}
+
+/**
+ * When an upload dies partway, the files that already registered are real and
+ * reusable — name their ids so the next attempt skips them instead of leaving
+ * orphaned rows nobody can point at.
+ */
+function withReusableAssetIds(
+  message: string,
+  done: Array<{ field: string; assetId: string }>,
+): string {
+  if (done.length === 0) return message;
+  const flags = done.map((d) => `--input ${d.field}=${d.assetId}`).join(" ");
+  return (
+    `${message}\n` +
+    `These files did upload — pass their ids to skip re-uploading them: ${flags}`
+  );
+}
+
+/**
+ * True when an `--input` value reads like it points at a LOCAL FILE rather than
+ * being the value itself. Used only on the describe-failed path, where nothing
+ * tells us which fields are Asset Inputs, so it has to be conservative in both
+ * directions:
+ *   - `@@literal` is the documented "keep the @" escape — never a path.
+ *   - a leading `@`, or a file that actually exists on disk, is decisive.
+ *   - a URL is never a local path, and neither is anything with whitespace in
+ *     it (that's prose — a brief, not a filename).
+ */
+function looksLikeFileArgument(value: string, deps: WorkflowRunDeps): boolean {
+  if (value.startsWith("@@")) return false;
+  if (value.startsWith("@")) return true;
+  if ((deps.statFile?.(value) ?? null) !== null) return true;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+  if (/\s/.test(value)) return false;
+  return looksLikePath(value);
+}
+
+/**
+ * Turn the RAW `--input` values into the values the run route wants (Stage 3B).
+ *
+ * Asset Input fields (`source: "asset"` in describe) take a LOCAL FILE PATH:
+ * the CLI uploads it and substitutes the returned assetId. Every other field
+ * keeps the historical `@path` text-expansion. A required asset field with no
+ * `--input` fails here, before a run is spent, naming the flag to pass — the
+ * CLI has no interactive prompts by design.
+ *
+ * The describe fetch is a COURTESY preflight, but only for TEXT: if it fails we
+ * fall through to the pre-3B behavior (expand `@path`, relay values verbatim)
+ * — unless a value looks like a local file, in which case there is no honest
+ * fallback (a path would ride as literal text, and `@./photo.png` would slurp
+ * binary into the JSON body) and we stop instead of spending a doomed run.
+ *
+ * Uploads run in TWO passes: every local file is checked first, then — and only
+ * then — the bytes move. That way a bad third file can't leave the first two
+ * registered with nothing pointing at them.
+ *
+ * `scoped` is true when the caller passed `--terminal`: the run may legitimately
+ * exclude the Asset Input node, so the client-side "you didn't pass the required
+ * file" check is left to the server's scope-aware preflight.
+ */
+async function prepareRunInputs(
+  workflowId: string,
+  raw: Record<string, string>,
+  deps: WorkflowRunDeps,
+  note: (line: string) => void,
+  scoped: boolean,
+): Promise<Record<string, string>> {
+  const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
+  if (!described.ok) {
+    const fileish = Object.keys(raw).filter((key) => looksLikeFileArgument(raw[key], deps));
+    if (fileish.length > 0) {
+      const reason = formatApiError(described).split("\n")[0];
+      throw new Error(
+        `--input ${fileish.join(", ")}: couldn't confirm this workflow's inputs ` +
+          `(describe failed: ${reason}) — retry, or pass an already-uploaded asset id ` +
+          `instead of a file path.`,
+      );
+    }
+    const text: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      text[key] = expandInputValue(key, value, deps.readFile);
+    }
+    return text;
+  }
+
+  const descriptors = (described.data as Partial<WorkflowDescribeResponse>).inputs ?? [];
+  const assetFields = new Map<string, WorkflowInputDescriptor>();
+  for (const descriptor of descriptors) {
+    if (descriptor?.source === "asset") assetFields.set(descriptor.fieldName, descriptor);
+  }
+
+  // A `--terminal` run only executes the picked end nodes' upstream closure, so
+  // an unfilled Asset Input may simply not be in it. Only the server knows the
+  // closure, so scoped runs skip this check and let its preflight rule.
+  if (!scoped) {
+    const missing = [...assetFields.values()].filter(
+      (d) => d.required && (raw[d.fieldName] ?? "").trim() === "",
+    );
+    if (missing.length > 0) {
+      const names = missing.map((d) => d.fieldName).join(", ");
+      const first = missing[0];
+      throw new Error(
+        `Missing required file input(s): ${names}. Pass each one as a local file — ` +
+          `e.g. --input ${first.fieldName}=./path/to/file` +
+          (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""),
+      );
+    }
+  }
+
+  // ── Pass 1: settle every value locally, collecting EVERY problem ─────────
+  const prepared: Record<string, string> = {};
+  const planned: PlannedAssetUpload[] = [];
+  const problems: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    const descriptor = assetFields.get(key);
+    if (!descriptor) {
+      try {
+        prepared[key] = expandInputValue(key, value, deps.readFile);
+      } catch (e) {
+        problems.push(e instanceof Error ? e.message : String(e));
+      }
+      continue;
+    }
+    // A bare path is the natural argument for a file field, but someone in the
+    // `@file` habit will type one anyway — strip a single leading "@" and treat
+    // it as an explicit "this is a path" signal.
+    const hinted = value.startsWith("@");
+    const candidate = hinted ? value.slice(1) : value;
+    const stat = deps.statFile?.(candidate) ?? null;
+    if (!stat) {
+      // Path-shaped but not on disk = a typo. Failing here beats letting the
+      // server reject it as an unreadable asset id.
+      if (hinted || looksLikePath(candidate)) {
+        problems.push(`--input ${key}: file not found: ${candidate}`);
+        continue;
+      }
+      // Otherwise it's an asset id from an earlier upload — relay it untouched.
+      prepared[key] = value;
+      continue;
+    }
+    try {
+      planned.push(planAssetUpload(key, candidate, stat.size, descriptor.assetType, deps));
+    } catch (e) {
+      problems.push(e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (problems.length > 0) throw new Error(formatInputProblems(problems));
+
+  // ── Pass 2: nothing can fail locally now, so move the bytes ──────────────
+  const done: Array<{ field: string; assetId: string }> = [];
+  for (const plan of planned) {
+    let uploaded: { assetId: string; mediaType: WorkflowMediaType };
+    try {
+      uploaded = await pushAssetFile(plan, deps);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      throw new Error(withReusableAssetIds(message, done));
+    }
+    note(`  uploaded ${plan.name} → ${plan.field} (${uploaded.mediaType}, ${sizeLabel(plan.size)})`);
+    prepared[plan.field] = uploaded.assetId;
+    done.push({ field: plan.field, assetId: uploaded.assetId });
+  }
+  return prepared;
 }
 
 /**
@@ -1027,6 +1748,38 @@ export function parseTerminalFlags(args: string[]): string[] {
   return ids;
 }
 
+/**
+ * Read the `--fill <name>` flag (#1013) off the raw argv — the saved fill a run
+ * launches from. Accepts both `--fill name` and `--fill=name`, mirroring the
+ * `--input`/`--terminal` parse convention; the shared flags map splits neither
+ * form reliably, and a fill silently dropped would launch the WRONG run. Returns
+ * undefined when the flag was never passed; throws when it was passed empty.
+ */
+export function parseFillFlag(args: string[]): string | undefined {
+  let name: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    let raw: string | undefined;
+    if (arg === "--fill") {
+      raw = args[i + 1];
+      i++;
+    } else if (arg.startsWith("--fill=")) {
+      raw = arg.slice("--fill=".length);
+    } else {
+      continue;
+    }
+    // A bare trailing `--fill`, or one followed by another flag, names nothing.
+    if (raw === undefined || raw.startsWith("--")) {
+      throw new Error("--fill requires a saved fill's name");
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error("--fill requires a saved fill's name");
+    // Last one wins, matching how the shared flags map treats a repeated flag.
+    name = trimmed;
+  }
+  return name;
+}
+
 export function formatWorkflowList(workflows: WorkflowListItem[]): string {
   if (workflows.length === 0) return "No workflows found for the active brand.";
   return table(
@@ -1046,7 +1799,8 @@ export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
   if (runs.length === 0) return "No workflow runs found for the active brand.";
   return table(
     ["workflow", "status", "created", "id"],
-    runs.map((r) => [r.workflowName, r.status, dateOnly(r.createdAt), r._id]),
+    // #994: the ruled display word, never the raw stored value.
+    runs.map((r) => [r.workflowName, runStatusLabel(r.status), dateOnly(r.createdAt), r._id]),
   );
 }
 
@@ -1143,7 +1897,9 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   lines.push(`runId:        ${run._id}`);
   lines.push(`workflowId:   ${run.workflowId}`);
   if (run.triggerRunId) lines.push(`triggerRunId: ${run.triggerRunId}`);
-  lines.push(`verdict:      ${run.status}${counts ? ` (${counts})` : ""}`);
+  // #994: the ruled display word (Succeeded / Succeeded with warnings / …),
+  // never the raw stored value in either vocabulary.
+  lines.push(`verdict:      ${runStatusLabel(run.status)}${counts ? ` (${counts})` : ""}`);
   if (run.isTerminal) lines.push("terminal:     yes");
   if (run.error) lines.push(`error:        ${run.error}`);
   if (Object.keys(run.inputs ?? {}).length > 0) {
@@ -1151,11 +1907,13 @@ export function formatWorkflowRun(run: WorkflowRun): string {
     lines.push(`inputs:       ${inputs}`);
   }
 
-  // #923/#929: while the run is parked at a copy-review GATE, the pausedNodeId is
-  // the truth even though its node row already reads `done` — flag it (and its
-  // outputs) so nothing reads as finished/approved before the human resolves.
-  // #931: gate on the park KIND — repair/slots/call parks are also awaiting-review
-  // but their paused node is not a gate, so they must NOT be relabeled.
+  // #923/#929: while the run is parked at a REVIEW stop (a checkpoint, or a
+  // legacy park), the pausedNodeId is the truth even though its node row already
+  // reads `done` — flag it (and its outputs) so nothing reads as
+  // finished/approved before the human resolves.
+  // #931: branch on the park KIND — repair/slots/call parks are also parked
+  // awaiting approval, but their paused node holds nothing to review, so they
+  // must NOT be relabeled.
   const parkedNodeId = gateParkedNodeId(
     run.status,
     run.pauseReason,
@@ -1169,6 +1927,16 @@ export function formatWorkflowRun(run: WorkflowRun): string {
       lines.push(progressLine(node, parkedNodeId !== undefined && node.nodeId === parkedNodeId));
       for (const output of node.outputs) lines.push(...outputLines(output));
     }
+  }
+
+  // #1002 (Exit Contract): the workflow's PROMISED results, answered slot by
+  // slot — named, typed, and explicit about what did NOT arrive. Rendered above
+  // the flat `Outputs:` bag, which stays exactly as it was for back-compat.
+  // Optional on the wire: an older backend omits `deliveries` entirely.
+  if (run.deliveries && run.deliveries.length > 0) {
+    lines.push("");
+    lines.push(`Deliveries (${run.deliveries.length}):`);
+    for (const delivery of run.deliveries) lines.push(...deliveryLines(delivery));
   }
 
   if (run.outputs && run.outputs.length > 0) {
@@ -1200,13 +1968,13 @@ export function formatWorkflowRun(run: WorkflowRun): string {
 
 /**
  * Render one flattened final deliverable — the chaining surface (#508).
- * #929: when the run is parked and this deliverable belongs to the parked gate,
- * `awaitingReview` flags it so an agent harvesting outputs on `awaiting-review`
- * can't mistake the un-gated candidate for approved copy.
+ * #929: when the run is parked and this deliverable belongs to the parked node,
+ * `awaitingReview` flags it so an agent harvesting outputs from a run that is
+ * awaiting approval can't mistake unreviewed output for approved copy.
  */
 function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): string[] {
   const slug = output.botSlug ? ` (${output.botSlug})` : "";
-  const review = awaitingReview ? " — awaiting review, not yet approved" : "";
+  const review = awaitingReview ? " — awaiting approval, not yet approved" : "";
   if (output.type === "image") {
     return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
   }
@@ -1217,6 +1985,12 @@ function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): stri
   }
   if (output.type === "audio") {
     return [`  ${output.label} [audio]${slug}: ${output.audioUrl ?? "(no url)"}${review}`];
+  }
+  if (output.type === "document") {
+    const name = output.filename ? ` ${output.filename}` : "";
+    return [
+      `  ${output.label} [document]${slug}:${name} ${output.documentUrl ?? "(no url)"}${review}`,
+    ];
   }
   if (output.type === "frames") {
     const n = output.frames?.length ?? 0;
@@ -1233,7 +2007,221 @@ function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): stri
   return [`  ${output.label} [text]${slug}${review}:`, `    ${body}${note}`];
 }
 
+/**
+ * #1002: render ONE delivery slot — the header line names the slot the way the
+ * workflow's author named it (`label (key) · type · status`), and the artifacts
+ * that filled it follow indented beneath, reusing the same one-line-per-artifact
+ * rendering the flat Outputs block uses. An unfulfilled slot has no artifacts,
+ * so its header carries the producer's error instead — that missing-result
+ * report is the whole point of the contract.
+ */
+function deliveryLines(delivery: WorkflowRunDelivery): string[] {
+  const status =
+    delivery.status === "unfulfilled" && delivery.error
+      ? `unfulfilled — ${delivery.error}`
+      : delivery.status;
+  const lines = [`  ${delivery.label} (${delivery.key}) · ${delivery.type} · ${status}`];
+  for (const artifact of delivery.artifacts) {
+    // runOutputLines already indents by 2; nest one level under the slot header.
+    for (const line of runOutputLines(artifact)) lines.push(`  ${line}`);
+  }
+  return lines;
+}
+
+// ── delivery file saving — `--out <dir>` (#1002) ──────────────────────────
+
+/**
+ * #1002: what a `--out <dir>` save did. `lines` is the human report (one line
+ * per file written or slot skipped); `paths` is just the files that landed, so
+ * --json callers get the machine list.
+ */
+export interface DeliverySaveResult {
+  lines: string[];
+  paths: string[];
+}
+
+/** Extension to fall back on when an asset URL carries none. */
+const ASSET_FALLBACK_EXT: Record<string, string> = {
+  image: "png",
+  video: "mp4",
+  audio: "mp3",
+};
+
+/**
+ * Slugify a workflow name for the filename stem. Always yields something
+ * filesystem-safe — an all-punctuation name degrades to "workflow".
+ */
+export function workflowFilenameSlug(name: string): string {
+  const slug = (name ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "workflow";
+}
+
+/** The extension an asset URL declares, if it declares one (query string aside). */
+function extensionFromUrl(url: string): string | undefined {
+  const withoutQuery = url.split(/[?#]/)[0];
+  const m = withoutQuery.match(/\.([a-z0-9]{1,5})$/i);
+  return m ? m[1].toLowerCase() : undefined;
+}
+
+type ArtifactPlan =
+  | { kind: "text"; ext: string; body: string }
+  | { kind: "download"; ext: string; url: string }
+  | { kind: "none"; reason: string };
+
+/**
+ * Decide how ONE artifact becomes a file. Driven by the artifact's own media
+ * type rather than the slot's declared type, because the artifact is what
+ * actually has to be serialized: text → .md, storyboard/frames → .json
+ * (the scene plan / frame index verbatim), image|video|audio → download the
+ * resolved storage URL, extension taken from the URL when it has one.
+ */
+function planArtifactFile(artifact: WorkflowRunOutput): ArtifactPlan {
+  if (artifact.type === "text") {
+    return { kind: "text", ext: "md", body: artifact.text ?? "" };
+  }
+  if (artifact.type === "storyboard") {
+    const json = artifact.storyboardJson;
+    if (!json) return { kind: "none", reason: "no storyboard JSON on this artifact" };
+    return { kind: "text", ext: "json", body: json.endsWith("\n") ? json : `${json}\n` };
+  }
+  if (artifact.type === "frames") {
+    // A frame set is a list of per-scene image URLs. Saving the INDEX keeps one
+    // slot to one file (the -2/-3 suffix scheme stays per-artifact); the URLs in
+    // it are the door to the images themselves.
+    return {
+      kind: "text",
+      ext: "json",
+      body: `${JSON.stringify(artifact.frames ?? [], null, 2)}\n`,
+    };
+  }
+  const url =
+    artifact.type === "image"
+      ? (artifact.imageUrl ?? undefined)
+      : artifact.type === "video"
+        ? artifact.videoUrl
+        : artifact.type === "document"
+          ? // #1000: an uploaded document delivered through a slot downloads
+            // like any other asset; its own filename supplies the extension.
+            artifact.documentUrl
+          : artifact.audioUrl;
+  if (!url) return { kind: "none", reason: "no downloadable URL on this artifact" };
+  const filenameExt =
+    artifact.type === "document" && artifact.filename
+      ? extensionFromUrl(artifact.filename)
+      : undefined;
+  return {
+    kind: "download",
+    ext:
+      filenameExt ??
+      extensionFromUrl(url) ??
+      ASSET_FALLBACK_EXT[artifact.type] ??
+      "bin",
+    url,
+  };
+}
+
+/**
+ * #1002 (`--out <dir>`): write every DELIVERED output of a terminal run to
+ * files under `dir`, named `<workflow-slug>-<runId tail>-<key>[-n].<ext>`. The
+ * slot `key` is unique within the run, so the name is stable and collision-free
+ * across slots; a slot carrying several artifacts suffixes -2, -3, … .
+ *
+ * Nothing here throws: a run that isn't finished, a backend with no
+ * `deliveries`, an unfulfilled slot, and a failed download all come back as a
+ * reported line so the operator learns exactly what did and didn't land.
+ */
+export async function saveDeliveries(
+  run: WorkflowRun,
+  dir: string,
+  deps: WorkflowRunDeps,
+): Promise<DeliverySaveResult> {
+  const paths: string[] = [];
+
+  if (!run.isTerminal) {
+    return {
+      paths,
+      lines: [
+        `Nothing saved — this run isn't finished yet (${run.status}). Try again once it is: exodus workflow status --id ${run._id} --out ${dir}`,
+      ],
+    };
+  }
+
+  const deliveries = run.deliveries ?? [];
+  if (deliveries.length === 0) {
+    return {
+      paths,
+      lines: [
+        "Nothing saved — this run has no named delivery slots. Either the workflow has no Output nodes, or the backend it ran on predates named outputs.",
+      ],
+    };
+  }
+
+  const mkdirp = deps.mkdirp ?? defaultMkdirp;
+  const downloadToFile = deps.downloadToFile ?? defaultDownloadToFile;
+  mkdirp(dir);
+
+  const stem = `${workflowFilenameSlug(run.workflowName)}-${run._id.slice(-8)}`;
+  const lines: string[] = [`Saved deliveries to ${dir}:`];
+
+  for (const delivery of deliveries) {
+    if (delivery.status !== "delivered" || delivery.artifacts.length === 0) {
+      const why =
+        delivery.error !== undefined
+          ? `unfulfilled: ${delivery.error}`
+          : delivery.status === "delivered"
+            ? "delivered but empty"
+            : "unfulfilled";
+      lines.push(`  skipped  ${delivery.label} (${delivery.key}) — ${why}`);
+      continue;
+    }
+    for (let i = 0; i < delivery.artifacts.length; i++) {
+      const plan = planArtifactFile(delivery.artifacts[i]);
+      const suffix = i === 0 ? "" : `-${i + 1}`;
+      if (plan.kind === "none") {
+        lines.push(`  skipped  ${delivery.label} (${delivery.key})${suffix} — ${plan.reason}`);
+        continue;
+      }
+      // The backend guarantees kebab keys, but a filename must never trust the
+      // wire: re-slug locally so a malformed key can't escape the target dir.
+      const file = nodePath.join(
+        dir,
+        `${stem}-${workflowFilenameSlug(delivery.key)}${suffix}.${plan.ext}`,
+      );
+      try {
+        if (plan.kind === "text") deps.writeFile(file, plan.body);
+        else await downloadToFile(plan.url, file);
+        lines.push(`  wrote    ${file}`);
+        paths.push(file);
+      } catch (e) {
+        lines.push(`  failed   ${file} — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  lines.push(`${paths.length} file${paths.length === 1 ? "" : "s"} written.`);
+  return { lines, paths };
+}
+
 // ── describe rendering (#506) ────────────────────────────────────────────
+
+/**
+ * #1013: the accepted-value hint for one typed input, worded exactly like the
+ * server's launch rejection ("expected one of: a, b", "expected true or false")
+ * so what describe promises and what a rejected run says line up. Undefined for
+ * a plain text box and for a number (the type tag on the header line says it
+ * all).
+ */
+function inputValueHint(input: WorkflowInputDescriptor): string | undefined {
+  if (input.type === "select") {
+    const options = input.options ?? [];
+    return options.length > 0 ? `one of: ${options.join(", ")}` : undefined;
+  }
+  if (input.type === "toggle") return "true or false";
+  return undefined;
+}
 
 export function formatDescribe(res: WorkflowDescribeResponse): string {
   const lines: string[] = [];
@@ -1249,9 +2237,18 @@ export function formatDescribe(res: WorkflowDescribeResponse): string {
   } else {
     for (const input of res.inputs) {
       const req = input.required ? "required" : "optional";
+      // #1013: a Brief that declares a widget (select/number/toggle) is always a
+      // TEXT-sourced field, so the tag refines the source rather than replacing
+      // it. Omitted for a plain text box — that line renders exactly as pre-#1013.
+      const type = input.type && input.type !== "text" ? ` (${input.type})` : "";
       const bundle =
         input.bundleSize !== undefined ? `, bundle=${input.bundleSize}` : "";
-      lines.push(`  ${input.fieldName} — ${input.source}, ${req}${bundle}`);
+      // An asset field takes a FILE, so name the family it accepts — that's the
+      // difference between "--input hero=text" and "--input hero=./hero.png".
+      const family = input.source === "asset" && input.assetType ? ` (${input.assetType})` : "";
+      lines.push(`  ${input.fieldName} — ${input.source}${family}${type}, ${req}${bundle}`);
+      const hint = inputValueHint(input);
+      if (hint) lines.push(`      ${hint}`);
       if (input.description) lines.push(`      ${input.description}`);
     }
   }
@@ -1448,9 +2445,14 @@ function schemaValueLines(value: unknown, indent: string): string[] {
       if (isRecord(el)) {
         const label = schemaEntryLabel(el);
         if (label) {
-          lines.push(`${indent}- ${label.value}`);
+          // #1012: a PARKED node kind still ships in the schema (old graphs must
+          // stay readable) — it just isn't offered as a new card. Flag it on the
+          // header line instead of burying `parked: true` in the detail block.
+          const parked = el["parked"] === true;
+          lines.push(`${indent}- ${label.value}${parked ? " (parked)" : ""}`);
           const rest = { ...el };
           delete rest[label.key];
+          if (parked) delete rest["parked"];
           lines.push(...schemaValueLines(rest, `${indent}    `));
         } else {
           lines.push(`${indent}-`);
@@ -1485,7 +2487,6 @@ const SCHEMA_SECTIONS: Array<{ title: string; keys: string[] }> = [
   { title: "Port types", keys: ["portTypes"] },
   { title: "Node kinds", keys: ["nodeKinds"] },
   { title: "Transform faces", keys: ["transformFaces"] },
-  { title: "Gate policies", keys: ["gatePolicies"] },
   { title: "Collector policy", keys: ["collectorPolicy"] },
   { title: "Deposits", keys: ["deposits"] },
   { title: "Slots", keys: ["slots"] },
@@ -1728,9 +2729,45 @@ export async function runFlow(
     return resolveIdErrorResult(e, opts.json ?? false);
   }
 
+  // Stage 3B: `opts.inputs` arrives RAW. Asset fields upload their local file
+  // and become an assetId here; every other field gets the `@path` expansion.
+  // Upload notes stream immediately when the caller streams (they happen before
+  // the run exists); otherwise they ride ahead of the returned lines.
+  const preface: string[] = [];
+  const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
+  let inputs: Record<string, string>;
+  try {
+    inputs = await prepareRunInputs(
+      workflowId,
+      opts.inputs,
+      deps,
+      (line) => {
+        if (opts.json) return;
+        if (opts.onProgressLine) opts.onProgressLine(line);
+        else preface.push(line);
+      },
+      scoped,
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      code: 1,
+      lines: opts.json
+        ? // Same envelope asErrorResult renders, so --json stays parseable for a
+          // client-side refusal too (#931's rule).
+          [JSON.stringify({ ok: false, status: 400, data: { error: { code: "BAD_REQUEST", message } } })]
+        : [...preface, message],
+    };
+  }
+
   const body = {
     workflowId,
-    ...(Object.keys(opts.inputs).length > 0 ? { inputs: opts.inputs } : {}),
+    ...(Object.keys(inputs).length > 0 ? { inputs } : {}),
+    // #1013: reuse a saved fill by name. Sent alongside `inputs` — the server
+    // merges the fill first and lets each explicit input override its key — and
+    // omitted entirely when no --fill was passed, so an ordinary run's body is
+    // byte-identical to pre-#1013.
+    ...(opts.fill && opts.fill.trim() !== "" ? { fill: opts.fill.trim() } : {}),
     // #860: scope the run to the upstream closure of these terminals. Omitted
     // when no --terminal was passed, so an unscoped run's body is byte-identical.
     ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
@@ -1747,13 +2784,23 @@ export async function runFlow(
   const lines = opts.json
     ? []
     : [
+        ...preface,
         "Workflow run started.",
         `runId:        ${data.runId}`,
         `triggerRunId: ${data.triggerRunId}`,
         `Poll: exodus workflow status --id ${data.runId}`,
       ];
 
-  if (!opts.wait) return { code: 0, lines };
+  if (!opts.wait) {
+    // #1002: nothing to save yet — files only exist once the run finishes, so
+    // say so rather than leaving an empty directory and a silent flag.
+    if (opts.out !== undefined && !opts.json) {
+      lines.push(
+        `Nothing saved to ${opts.out} yet — the run is still going. Add --wait, or save later: exodus workflow status --id ${data.runId} --out ${opts.out}`,
+      );
+    }
+    return { code: 0, lines };
+  }
 
   if (!opts.json && opts.onProgressLine) {
     for (const line of lines) opts.onProgressLine(line);
@@ -1762,7 +2809,7 @@ export async function runFlow(
 
   const waited = await waitForRun(
     data.runId,
-    { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base },
+    { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base, out: opts.out },
     deps,
   );
   // In --json mode waitForRun's single line is complete on its own. In human
@@ -1778,13 +2825,41 @@ export async function runFlow(
  * `onProgressLine` in human mode. Returns the terminal render:
  *   - --json: one line, `{ ...jsonBase, result, timedOut }`.
  *   - human:  a timeout pointer, or ["", formatWorkflowRun(run)].
+ *
+ * #998 `landOnPark`: some waits are DESIGNED to end on a park rather than on a
+ * finished run — `checkpoint retry` re-runs one step and the run parks straight
+ * back at the same checkpoint with fresh output. For those, that park IS the
+ * success, so it must stop the loop (opt-in only: without this option every
+ * `awaiting-review` stays non-terminal exactly as before).
  */
+/**
+ * The statuses `--wait` treats as the end of the run, spelled in BOTH
+ * vocabularies (#994): the canonical four plus their pre-rename stored twins
+ * (completed / partial / canceled). poll.ts normalizes anyway; passing the full
+ * set keeps the wire contract visible and pins it in the tests — one published
+ * CLI binary has to work against a pre-migration backend and a renamed one.
+ */
+const WAIT_TERMINAL_STATUSES: string[] = TERMINAL_RUN_STATUSES.flatMap((s) =>
+  storedWorkflowStatusForms(s),
+);
+
 async function waitForRun(
   runId: string,
   opts: {
     json: boolean;
     onProgressLine?: (line: string) => void;
     jsonBase: Record<string, unknown>;
+    /**
+     * When set, a run sitting at `awaiting-review` with THIS pauseReason is the
+     * successful terminal state: the loop stops there, exits 0, and the human
+     * render closes with `headline` + the park's resolve pointer instead of the
+     * mid-poll pause banner. Every other status behaves exactly as it does
+     * without the option — `queued`/`running` keep polling, and a park for some
+     * OTHER reason keeps polling too (it isn't the landing this verb promised).
+     */
+    landOnPark?: { pauseReason: WorkflowPauseReason; headline: string };
+    // #1002: `--out <dir>` — save the terminal run's delivered outputs to files.
+    out?: string;
   },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
@@ -1792,18 +2867,48 @@ async function waitForRun(
   // see the dedup note in the poll loop below.
   const seen = new Map<string, string>();
   let pausedNotified = false;
+  const landOnPark = opts.landOnPark;
   const pollResult = await deps.poll({
     path: `${STATUS_PATH}?runId=${encodeURIComponent(runId)}`,
     intervalMs: 3_000,
     timeoutMs: 60 * 60 * 1000,
-    // "canceled" is terminal (#539) so a web-canceled run stops the wait instead
-    // of polling to timeout. "awaiting-review" stays NONterminal — the run
-    // resumes after a web approval — but we surface it once (below) so the
-    // operator knows to go approve the cost gate.
-    terminalStatuses: ["completed", "partial", "failed", "canceled"],
+    // A cancelled run is terminal (#539) so a web-cancelled run stops the wait
+    // instead of polling to timeout. A run awaiting approval stays NONterminal —
+    // it resumes after a web approval — but we surface it once (below) so the
+    // operator knows to go approve.
+    // #994: spell the terminal set in BOTH vocabularies. A published CLI polls
+    // pre-rename backends (completed/partial/canceled) and renamed ones
+    // (succeeded/succeeded-with-warnings/cancelled) alike; poll.ts already
+    // normalizes, and passing them explicitly keeps the wire contract visible.
+    // #998: with landOnPark, the awaiting-approval forms join the terminal set
+    // and the isDone guard below narrows the stop to the ONE park kind this
+    // verb lands on. (pollUntilDone requires BOTH the status check and isDone
+    // to agree, so the guard must pass every non-park terminal status straight
+    // through.)
+    terminalStatuses: landOnPark
+      ? [...WAIT_TERMINAL_STATUSES, ...storedWorkflowStatusForms("awaiting-approval")]
+      : WAIT_TERMINAL_STATUSES,
+    ...(landOnPark
+      ? {
+          isDone: (raw: Record<string, unknown>) =>
+            !(
+              typeof raw["status"] === "string" &&
+              normalizeRunStatus(raw["status"]) === "awaiting-approval"
+            ) || raw["pauseReason"] === landOnPark.pauseReason,
+        }
+      : {}),
     onProgress: (raw) => {
       if (opts.json || !opts.onProgressLine) return;
-      if (raw["status"] === "awaiting-review" && !pausedNotified) {
+      const rawStatus = raw["status"];
+      const parked =
+        typeof rawStatus === "string" &&
+        normalizeRunStatus(rawStatus) === "awaiting-approval";
+      // #998: when THIS park is the landing this verb promised, the closing
+      // render below announces it — don't also fire the "you've been
+      // interrupted" banner mid-poll.
+      const isLanding =
+        landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason;
+      if (parked && !pausedNotified && !isLanding) {
         pausedNotified = true;
         // #891: dispatch the pause banner on WHY the run parked. The dashboard
         // URL comes from the injected deps (override → dev.xo → xo, same
@@ -1815,10 +2920,10 @@ async function waitForRun(
           opts.onProgressLine(line);
         }
       }
-      // #923/#929: while parked at a copy-review gate, the paused node streams as
-      // `⏸ awaiting review` rather than a misleading `✓ done` (matches the final
-      // formatWorkflowRun). #931: gate on the park KIND, same as the final render —
-      // repair/slots/call parks leave their paused node as-is.
+      // #923/#929: while parked at a review stop, the paused node streams as
+      // `⏸ awaiting approval` rather than a misleading `✓ done` (matches the final
+      // formatWorkflowRun). #931: branch on the park KIND, same as the final
+      // render — repair/slots/call parks leave their paused node as-is.
       const parkedNodeId = gateParkedNodeId(
         raw["status"] as string | undefined,
         raw["pauseReason"] as WorkflowPauseReason | undefined,
@@ -1826,9 +2931,9 @@ async function waitForRun(
       );
       const nodes = Array.isArray(raw["nodes"]) ? (raw["nodes"] as WorkflowRunNode[]) : [];
       for (const node of nodes) {
-        // #931: dedup on the RENDERED state, not status alone. A gate node can
+        // #931: dedup on the RENDERED state, not status alone. A parked node can
         // reach `done` while the run is still `running`, then the run flips to
-        // `awaiting-review` with the node STILL `done` — keying on status alone
+        // awaiting-approval with the node STILL `done` — keying on status alone
         // suppressed the ⏸ transition. Fold the parked flag into the key so the
         // transition to parked always emits.
         const isParked = parkedNodeId !== undefined && node.nodeId === parkedNodeId;
@@ -1840,11 +2945,30 @@ async function waitForRun(
     },
   });
 
+  // #1002: `--out <dir>` — the terminal run's delivered outputs land on disk
+  // before we render, so both modes can report exactly which files were written.
+  const terminalRun =
+    !pollResult.timedOut &&
+    isRecord(pollResult.data) &&
+    typeof pollResult.data["_id"] === "string"
+      ? (pollResult.data as unknown as WorkflowRun)
+      : undefined;
+  const saved =
+    opts.out !== undefined && terminalRun
+      ? await saveDeliveries(terminalRun, opts.out, deps)
+      : undefined;
+
   if (opts.json) {
     return {
       code: pollResult.ok ? 0 : 1,
       lines: [
-        JSON.stringify({ ...opts.jsonBase, result: pollResult.data, timedOut: pollResult.timedOut }),
+        JSON.stringify({
+          ...opts.jsonBase,
+          result: pollResult.data,
+          timedOut: pollResult.timedOut,
+          // Additive, and only when --out was passed: the paths that landed.
+          ...(saved ? { saved: saved.paths } : {}),
+        }),
       ],
     };
   }
@@ -1857,25 +2981,69 @@ async function waitForRun(
   }
 
   const lines = [""];
-  if (isRecord(pollResult.data) && typeof pollResult.data["_id"] === "string") {
-    lines.push(formatWorkflowRun(pollResult.data as unknown as WorkflowRun));
+  if (terminalRun) {
+    lines.push(formatWorkflowRun(terminalRun));
   } else {
     lines.push(`Polling failed: ${JSON.stringify(pollResult.data)}`);
+  }
+  if (saved) lines.push("", ...saved.lines);
+
+  // #998: landed on the park this verb was waiting for — say so plainly and
+  // point at the verb that resolves it (reusing the pause notice's pointer
+  // lines, minus its generic "you've been interrupted" headline).
+  if (
+    landOnPark &&
+    isRecord(pollResult.data) &&
+    typeof pollResult.data["status"] === "string" &&
+    normalizeRunStatus(pollResult.data["status"]) === "awaiting-approval" &&
+    pollResult.data["pauseReason"] === landOnPark.pauseReason
+  ) {
+    const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
+    lines.push(
+      "",
+      landOnPark.headline,
+      ...formatPauseNotice(landOnPark.pauseReason, runId, dashboardUrl).slice(1),
+    );
   }
 
   return { code: pollResult.ok ? 0 : 1, lines };
 }
 
 export async function statusFlow(
-  opts: { id?: string; json: boolean },
+  // #1002: --out <dir> saves the run's delivered outputs to files. It needs a
+  // specific run, so it only pairs with --id.
+  opts: { id?: string; json: boolean; out?: string },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
+  if (opts.out !== undefined && !opts.id) {
+    return {
+      code: 1,
+      lines: [
+        "--out saves ONE run's outputs, so it needs the run: exodus workflow status --id <runId> --out <dir>",
+      ],
+    };
+  }
+
   const path = opts.id ? `${STATUS_PATH}?runId=${encodeURIComponent(opts.id)}` : STATUS_PATH;
   const res = await deps.get(path);
   if (!res.ok) return asErrorResult(res, opts.json);
-  if (opts.json) return { code: 0, lines: [JSON.stringify(res.data)] };
 
-  if (opts.id) return { code: 0, lines: [formatWorkflowRun(res.data as WorkflowRun)] };
+  const saved =
+    opts.out !== undefined && opts.id
+      ? await saveDeliveries(res.data as WorkflowRun, opts.out, deps)
+      : undefined;
+
+  if (opts.json) {
+    // Additive, and only when --out was passed: the paths that landed.
+    const payload = saved ? { ...(res.data as object), saved: saved.paths } : res.data;
+    return { code: 0, lines: [JSON.stringify(payload)] };
+  }
+
+  if (opts.id) {
+    const lines = [formatWorkflowRun(res.data as WorkflowRun)];
+    if (saved) lines.push("", ...saved.lines);
+    return { code: 0, lines };
+  }
   const runs = ((res.data as { runs?: WorkflowRunProjection[] }).runs ?? []);
   return { code: 0, lines: [formatRecentRuns(runs)] };
 }
@@ -2462,13 +3630,15 @@ export async function schemaFlow(
   return { code: 0, lines: [formatSchema(payload)] };
 }
 
-// ── Gate cluster (#891) ──────────────────────────────────────────────────
-// The member's review surface over parked workflow runs: the inbox, the Gate
-// node decision verbs (show / pick / edit / push / approve / reject), the
-// require-all repair verbs (retry / skip / kill), and the nested-slot answer
-// verb. Every ACTION verb maps a missing-route 404 to the honest #896 line via
-// triggerErrorResult (the shared missing-route helper). The "push" step-1 hits
-// the Next.js dashboard chat route, so its error handling mirrors session chat.
+// ── Park cluster (#891) ──────────────────────────────────────────────────
+// The member's review surface over parked workflow runs: the inbox, the
+// checkpoint verbs (show / edit / approve / retry / cancel), the require-all
+// repair verbs (retry / skip / kill), and the nested-slot answer verb. Every
+// ACTION verb maps a missing-route 404 to the honest #896 line via
+// triggerErrorResult (the shared missing-route helper).
+// (#1012: the Gate-node decision verbs that lived here — show / pick / edit /
+// push / approve / reject — retired with the node kind. `workflow gate` now
+// prints a pointer at the checkpoint verbs and exits 1.)
 
 /** GET /api/v2/workflow/inbox → one actionable-park row per run. */
 export interface WorkflowInboxRow {
@@ -2478,7 +3648,7 @@ export interface WorkflowInboxRow {
   pausedNodeId?: string;
   pausedNodeKind?: string;
   // Present as-is on new parks; absent = a legacy video cost-gate park.
-  pauseReason?: "taste" | "repair" | "slots";
+  pauseReason?: "taste" | "repair" | "slots" | "checkpoint";
   counts?: WorkflowCounts;
   createdAt: number | string;
   queuedAt?: number | string;
@@ -2510,14 +3680,17 @@ export function formatAge(value: number | string | undefined, now = Date.now()):
 }
 
 /**
- * The park-kind badge. Ruling (#891): "taste" → `gate`, "repair"/"slots"
- * as-is, and an ABSENT pauseReason → `legacy` (a video cost-gate park, not a
- * text gate). Never badge an absent reason as `gate`.
+ * The park-kind badge. Ruling (#891): "taste" → `gate` (now a LEGACY park at the
+ * retired Gate node, #1012), "repair"/"slots" as-is, and an ABSENT pauseReason →
+ * `legacy` (a video cost-gate park). Never badge an absent reason as `gate`.
+ * #998: "checkpoint" as-is —
+ * a step flagged "pause for approval", resolved by its own verb cluster.
  */
 export function parkBadge(pauseReason: string | undefined): string {
   if (pauseReason === "taste") return "gate";
   if (pauseReason === "repair") return "repair";
   if (pauseReason === "slots") return "slots";
+  if (pauseReason === "checkpoint") return "checkpoint";
   return "legacy";
 }
 
@@ -2574,17 +3747,6 @@ function okLine(message: string, payload: Record<string, unknown>, json: boolean
   return { code: 0, lines: [json ? JSON.stringify(payload) : message] };
 }
 
-/** Pull a route's error text out of an error body, verbatim where possible. */
-function routeErrorText(data: unknown, status: number): string {
-  if (isRecord(data)) {
-    const err = data.error;
-    if (typeof err === "string" && err) return err;
-    if (isRecord(err) && typeof err.message === "string") return err.message;
-    if (typeof data.message === "string" && data.message) return data.message;
-  }
-  return `HTTP ${status}`;
-}
-
 function asWorkflowRun(data: unknown): WorkflowRun | undefined {
   return isRecord(data) && typeof data["_id"] === "string"
     ? (data as unknown as WorkflowRun)
@@ -2593,37 +3755,46 @@ function asWorkflowRun(data: unknown): WorkflowRun | undefined {
 
 /** Human phrase for a run's ACTUAL park state — used when a preflight fails. */
 function describePark(run: WorkflowRun): string {
-  if (run.status !== "awaiting-review") return `status: ${run.status}`;
+  // #994: normalize before testing, and name a non-parked state with the ruled
+  // display word rather than the raw stored value.
+  if (normalizeRunStatus(run.status) !== "awaiting-approval") {
+    return `status: ${runStatusLabel(run.status)}`;
+  }
   switch (run.pauseReason) {
+    // #1012: a LEGACY park at the retired Gate node — unresumable, cancel only.
     case "taste":
-      return "parked at a gate (taste review)";
+      return "parked at a Gate box, which retired in 2.0 (cancel and re-run)";
     case "repair":
       return "parked for repair";
     case "slots":
       return "parked for slot answers";
     case "call":
       return "parked on a child workflow";
+    case "checkpoint":
+      return `parked at a checkpoint (use: exodus workflow checkpoint ${run._id})`;
     default:
-      return "parked at the cost gate (legacy — no text gate)";
+      return "parked at the cost gate (legacy)";
   }
 }
 
 const PARK_LABEL: Record<WorkflowPauseReason, string> = {
-  taste: "a gate review",
+  // #1012: legacy only — the runner never emits "taste" any more.
+  taste: "a retired Gate review",
   repair: "a repair",
   slots: "slot answers",
   call: "a child workflow",
+  checkpoint: "a checkpoint approval",
 };
 
 /**
- * Preflight a gate/repair/answer verb: GET the run detail and confirm it is
+ * Preflight a checkpoint/repair/answer verb: GET the run detail and confirm it is
  * parked for the EXPECTED reason. A mismatch names the run's actual state so the
  * error is self-explaining. The GET hits the pre-existing run route, so a
  * missing-route 404 here means the whole backend is behind — still #896-mapped.
  */
 async function preflightPark(
   runId: string,
-  expected: WorkflowPauseReason,
+  expected: WorkflowPauseReason | readonly WorkflowPauseReason[],
   verb: string,
   json: boolean,
   deps: WorkflowRunDeps,
@@ -2634,11 +3805,21 @@ async function preflightPark(
   if (!run) {
     return { ok: false, result: errLine(`Could not read run ${runId}.`, json) };
   }
-  if (run.status !== "awaiting-review" || run.pauseReason !== expected) {
+  // A verb normally expects exactly one park reason; cancel also accepts the
+  // legacy "taste" park (#1012) — the mismatch message names the primary one.
+  const allowed = Array.isArray(expected)
+    ? (expected as readonly WorkflowPauseReason[])
+    : [expected as WorkflowPauseReason];
+  // #994: normalize so the preflight passes against pre- and post-rename backends.
+  if (
+    normalizeRunStatus(run.status) !== "awaiting-approval" ||
+    run.pauseReason === undefined ||
+    !allowed.includes(run.pauseReason)
+  ) {
     return {
       ok: false,
       result: errLine(
-        `Run ${runId} is not parked for ${PARK_LABEL[expected]} — it is ${describePark(run)}.`,
+        `Run ${runId} is not parked for ${PARK_LABEL[allowed[0]]} — it is ${describePark(run)}.`,
         json,
       ),
     };
@@ -2646,56 +3827,135 @@ async function preflightPark(
   return { ok: true, run };
 }
 
-/** A gate node's selection-port candidates, numbered 1-based, each carrying its
- *  index into the node's FULL outputs array (what /gate/edit's outputIndex wants). */
-interface GateCandidate {
+// ── Checkpoint verbs (#998) ───────────────────────────────────────────────
+//
+// A checkpoint park is ANY node whose author flipped the "pause for approval"
+// switch (`config.checkpoint`). When that step finishes, the run parks with
+// pauseReason "checkpoint" and waits — indefinitely — for the member to approve
+// the step's output, hand-edit it first, re-run the step, or cancel the run.
+//
+// It is NOT a Gate node: there are no selection-port candidates and nothing to
+// "pick". What the member reviews is the step's plain text output(s), so the
+// numbering below covers EVERY text artifact the step produced.
+
+/**
+ * One reviewable output on the checkpoint-parked step, numbered 1-based for the
+ * member, each carrying its index into the node's FULL outputs array — which is
+ * what /checkpoint/edit's `outputIndex` means. Non-text artifacts (images,
+ * session handles, …) are skipped in the NUMBERING but still occupy their real
+ * index, so `n` and `outputIndex` diverge exactly as they should.
+ */
+interface CheckpointOutput {
   n: number;
   outputIndex: number;
   text: string;
+  label?: string;
   humanEdited: boolean;
+  /**
+   * #1014: present when this output came out of a Splitter lane. Grouping the
+   * listing by it is PRESENTATION ONLY — `n` keeps counting straight through
+   * every text output so `edit <n>` means the same thing it always did.
+   */
+  item?: ArtifactItemIdentity;
 }
 
-function gateCandidates(run: WorkflowRun): GateCandidate[] {
+function checkpointOutputs(run: WorkflowRun): CheckpointOutput[] {
   const node = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
   if (!node) return [];
-  const out: GateCandidate[] = [];
+  const out: CheckpointOutput[] = [];
   let n = 0;
   (node.outputs ?? []).forEach((a, idx) => {
-    if (a.type === "text" && a.port === "selection") {
-      n += 1;
-      out.push({ n, outputIndex: idx, text: a.text, humanEdited: !!a.humanEdited });
-    }
+    // Only a text artifact is editable (the server's editNodeTextArtifact
+    // refuses anything else), so only text artifacts get a number.
+    if (a.type !== "text") return;
+    n += 1;
+    out.push({
+      n,
+      outputIndex: idx,
+      text: a.text,
+      label: a.label,
+      humanEdited: !!a.humanEdited,
+      ...(a.item ? { item: a.item } : {}),
+    });
   });
   return out;
 }
 
-/** Human list of candidates (truncated); full text lives in --json payloads. */
-function formatCandidates(cands: GateCandidate[]): string {
-  if (cands.length === 0) return "  (this gate has no selection candidates)";
-  return cands
-    .map((c) => `  ${c.n}. ${truncateText(c.text, 200)}${c.humanEdited ? "  (edited)" : ""}`)
-    .join("\n");
+/**
+ * #1014: the DISTINCT lane items on a checkpoint's outputs, ascending by index.
+ * Empty for an ordinary checkpoint — which is the switch between the flat
+ * listing and the item-grouped one, and between plain approve and `--reject`.
+ */
+function checkpointItemIndexes(outputs: CheckpointOutput[]): number[] {
+  const seen = new Set<number>();
+  for (const o of outputs) if (o.item) seen.add(o.item.index);
+  return [...seen].sort((a, b) => a - b);
 }
 
-/** Shared out-of-range error naming the real 1..count range. */
-function rangeError(num: number, count: number, json: boolean): FlowResult {
+/** The parked step's node row, for the "which step is this?" header. */
+function checkpointNode(run: WorkflowRun): WorkflowRunNode | undefined {
+  return (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
+}
+
+/** One numbered output row — the same shape flat or grouped, so `n` never moves. */
+function checkpointOutputRow(o: CheckpointOutput, indent: string): string {
+  const label = o.label ? ` [${o.label}]` : "";
+  const edited = o.humanEdited ? "  (edited)" : "";
+  return `${indent}${o.n}.${label} ${truncateText(o.text, 200)}${edited}`;
+}
+
+/**
+ * Human list of the step's outputs (truncated); full text lives in --json.
+ *
+ * #1014: when the outputs carry lane identity, the SAME numbered rows are
+ * grouped under "Item N of M" headings so the member can see which lane each
+ * one came from. The numbering is untouched — row 4 is still `edit 4` — because
+ * the grouping is a view over one flat, index-addressed list, not a renumbering.
+ * Outputs with no item (a shared artifact the node emitted once) are listed last
+ * under their own heading rather than being silently folded into item 1.
+ */
+function formatCheckpointOutputs(outputs: CheckpointOutput[]): string {
+  if (outputs.length === 0) return "  (this step produced no text to review)";
+  const indexes = checkpointItemIndexes(outputs);
+  if (indexes.length === 0) {
+    return outputs.map((o) => checkpointOutputRow(o, "  ")).join("\n");
+  }
+  const lines: string[] = [];
+  for (const index of indexes) {
+    const rows = outputs.filter((o) => o.item?.index === index);
+    // `total` is stamped on the artifact at emit time — read it off the row
+    // rather than counting what survived, so a culled batch still reads honestly.
+    const total = rows[0]?.item?.total ?? indexes.length;
+    lines.push(`  Item ${index + 1} of ${total}`);
+    for (const row of rows) lines.push(checkpointOutputRow(row, "    "));
+  }
+  const shared = outputs.filter((o) => !o.item);
+  if (shared.length > 0) {
+    lines.push("  Not tied to an item");
+    for (const row of shared) lines.push(checkpointOutputRow(row, "    "));
+  }
+  return lines.join("\n");
+}
+
+/** Out-of-range error for a checkpoint output number, naming the real range. */
+function checkpointRangeError(num: number, count: number, json: boolean): FlowResult {
   const range = count > 0 ? ` (valid: 1–${count})` : "";
   return errLine(
-    `Candidate ${num} is out of range — this gate has ${count} candidate${count === 1 ? "" : "s"}${range}.`,
+    `Output ${num} is out of range — this step has ${count} text output${count === 1 ? "" : "s"}${range}.`,
     json,
   );
 }
 
-// ── Gate verbs ────────────────────────────────────────────────────────────
-
-export async function gateShowFlow(
+export async function checkpointShowFlow(
   runId: string,
   opts: { json: boolean },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  const pf = await preflightPark(runId, "taste", "workflow gate", opts.json, deps);
+  const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint", opts.json, deps);
   if (!pf.ok) return pf.result;
-  const cands = gateCandidates(pf.run);
+  const outputs = checkpointOutputs(pf.run);
+  const node = checkpointNode(pf.run);
+  const itemIndexes = checkpointItemIndexes(outputs);
   if (opts.json) {
     return {
       code: 0,
@@ -2703,64 +3963,161 @@ export async function gateShowFlow(
         JSON.stringify({
           runId,
           pausedNodeId: pf.run.pausedNodeId,
-          candidates: cands.map((c) => ({ n: c.n, text: c.text, humanEdited: c.humanEdited })),
+          pausedNodeKind: node?.kind,
+          ...(node?.botSlug ? { botSlug: node.botSlug } : {}),
+          // #1014: 0-based item indexes present on this step's outputs, so an
+          // agent can build `--reject` (1-based) without re-deriving them.
+          ...(itemIndexes.length > 0 ? { itemIndexes } : {}),
+          outputs: outputs.map((o) => ({
+            n: o.n,
+            text: o.text,
+            ...(o.label ? { label: o.label } : {}),
+            humanEdited: o.humanEdited,
+            ...(o.item ? { item: o.item } : {}),
+          })),
         }),
       ],
     };
   }
+  const stepLabel = node
+    ? `${node.nodeId} (${node.botSlug ? `${node.kind}: ${node.botSlug}` : node.kind})`
+    : (pf.run.pausedNodeId ?? "-");
+  const itemsNote =
+    itemIndexes.length > 0
+      ? [
+          `This step ran once per item (${itemIndexes.length} of them). Approve keeps every item;`,
+          "reject drops the ones you name and the run carries on with the rest.",
+          "",
+        ]
+      : [];
+  const rejectLine =
+    itemIndexes.length > 0
+      ? [`Reject:  exodus workflow checkpoint ${runId} approve --reject 2 --wait`]
+      : [];
   return {
     code: 0,
     lines: [
-      `Gate — ${pf.run.workflowName}`,
+      `Checkpoint — ${pf.run.workflowName}`,
       `runId:      ${runId}`,
-      `gate node:  ${pf.run.pausedNodeId ?? "-"}`,
+      `step:       ${stepLabel}`,
       "",
-      `Candidates (${cands.length}):`,
-      formatCandidates(cands),
+      "This step is done and the run is holding here until you say go.",
       "",
-      `Pick:    exodus workflow gate ${runId} pick 1,2`,
-      `Edit:    exodus workflow gate ${runId} edit 1 --text "..."`,
-      `Approve: exodus workflow gate ${runId} approve --wait`,
-      `Reject:  exodus workflow gate ${runId} reject --reason "..."`,
+      ...itemsNote,
+      `Its output (${outputs.length}):`,
+      formatCheckpointOutputs(outputs),
+      "",
+      `Approve: exodus workflow checkpoint ${runId} approve --wait`,
+      ...rejectLine,
+      `Edit:    exodus workflow checkpoint ${runId} edit 1 --text "..."`,
+      `Redo:    exodus workflow checkpoint ${runId} retry --wait`,
+      `Cancel:  exodus workflow checkpoint ${runId} cancel --reason "..."`,
     ],
   };
 }
 
-export async function gatePickFlow(
+/**
+ * #1014: parse `--reject 2,5` into the ITEM NUMBERS the member sees ("Item 2 of
+ * 7" → 2), 1-based, deduped and ascending. Syntax only — whether an item exists
+ * on this checkpoint, and whether rejecting them all is allowed, is the server's
+ * ruling (duplicating it here would drift). Returns a friendly message instead
+ * of a number list when the flag is unusable.
+ */
+export function parseRejectItems(
+  raw: string | undefined,
+): { ok: true; items: number[] } | { ok: false; message: string } {
+  const bad = (why: string) => ({
+    ok: false as const,
+    message: `${why} --reject takes the item numbers you see in "checkpoint show", like --reject 2 or --reject 2,5.`,
+  });
+  if (raw === undefined || raw.trim() === "") return bad("--reject needs at least one item number.");
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (parts.length === 0) return bad("--reject needs at least one item number.");
+  const items: number[] = [];
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return bad(`"${part}" isn't an item number.`);
+    const n = Number(part);
+    // Items are counted from 1 for the member, exactly like `edit <n>`.
+    if (n < 1) return bad("Items are numbered from 1.");
+    if (!items.includes(n)) items.push(n);
+  }
+  return { ok: true, items: items.sort((a, b) => a - b) };
+}
+
+export async function checkpointApproveFlow(
   runId: string,
-  numbers: number[],
-  opts: { json: boolean },
+  opts: {
+    wait: boolean;
+    json: boolean;
+    onProgressLine?: (line: string) => void;
+    /** #1014: the raw `--reject` flag value, unparsed (e.g. "2,5"). */
+    reject?: string;
+  },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  const pf = await preflightPark(runId, "taste", "workflow gate pick", opts.json, deps);
-  if (!pf.ok) return pf.result;
-  const cands = gateCandidates(pf.run);
-
-  const seen = new Set<number>();
-  for (const num of numbers) {
-    if (!Number.isInteger(num) || num < 1 || num > cands.length) {
-      return rangeError(num, cands.length, opts.json);
-    }
-    if (seen.has(num)) return errLine(`Candidate ${num} is listed twice.`, opts.json);
-    seen.add(num);
+  // Parse BEFORE the network: a typo'd flag should cost nothing and say so.
+  let rejectItems: number[] | undefined;
+  if (opts.reject !== undefined) {
+    const parsed = parseRejectItems(opts.reject);
+    if (!parsed.ok) return errLine(parsed.message, opts.json);
+    rejectItems = parsed.items;
   }
 
-  // 1-based candidate numbers → 0-based indices into the SELECTION subset.
-  const selectedIndices = numbers.map((num) => num - 1);
-  const res = await deps.post(GATE_PICK_PATH, {
+  const pf = await preflightPark(
     runId,
-    nodeId: pf.run.pausedNodeId,
-    selectedIndices,
-  });
-  if (!res.ok) return triggerErrorResult(res, "workflow gate pick", opts.json);
-  return okLine(
-    `Picked candidate${numbers.length === 1 ? "" : "s"} ${numbers.join(", ")} at ${pf.run.pausedNodeId}. Approve to resume: exodus workflow gate ${runId} approve --wait`,
-    { ok: true, runId, nodeId: pf.run.pausedNodeId, selectedIndices },
+    "checkpoint",
+    "workflow checkpoint approve",
     opts.json,
+    deps,
+  );
+  if (!pf.ok) return pf.result;
+
+  // Without --reject this is the plain approve, byte-for-byte as it always was:
+  // a checkpoint park approves through the SAME route every other park uses.
+  if (rejectItems === undefined) {
+    const res = await deps.post(APPROVE_PATH, { runId });
+    if (!res.ok) return triggerErrorResult(res, "workflow checkpoint approve", opts.json);
+    const triggerRunId = (res.data as { triggerRunId?: string }).triggerRunId;
+    return resumeAndMaybeWait(
+      runId,
+      triggerRunId,
+      ["Checkpoint approved — the run resumes."],
+      opts,
+      deps,
+    );
+  }
+
+  // With --reject it is the per-item door. The member counts items from 1; the
+  // route speaks the artifact's own 0-based `item.index`, so convert here — the
+  // one place the two numberings meet.
+  const rejections = rejectItems.map((n) => n - 1);
+  const res = await deps.post(CHECKPOINT_RESOLVE_ITEMS_PATH, { runId, rejections });
+  if (!res.ok) return triggerErrorResult(res, "workflow checkpoint approve", opts.json);
+  const data = (res.data ?? {}) as {
+    triggerRunId?: string;
+    rejected?: number[];
+    remaining?: number;
+  };
+  // Echo the SERVER's accounting (it deduped and culled), re-based to 1 for the
+  // member. Falling back to what we sent keeps the line honest on an old backend.
+  const rejected = (data.rejected ?? rejections).map((i) => i + 1).sort((a, b) => a - b);
+  const kept = data.remaining ?? 0;
+  const total = kept + rejected.length;
+  return resumeAndMaybeWait(
+    runId,
+    data.triggerRunId,
+    [`Approved — kept ${kept} of ${total} items (rejected: ${rejected.join(", ")}).`],
+    opts,
+    deps,
+    undefined,
+    { rejected, remaining: kept },
   );
 }
 
-export async function gateEditFlow(
+export async function checkpointEditFlow(
   runId: string,
   n: number,
   sources: { text?: string; file?: string; stdin?: string },
@@ -2795,156 +4152,79 @@ export async function gateEditFlow(
     text = sources.stdin as string;
   }
 
-  const pf = await preflightPark(runId, "taste", "workflow gate edit", opts.json, deps);
+  const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint edit", opts.json, deps);
   if (!pf.ok) return pf.result;
-  const cands = gateCandidates(pf.run);
-  const cand = cands.find((c) => c.n === n);
-  if (!cand) return rangeError(n, cands.length, opts.json);
+  const outputs = checkpointOutputs(pf.run);
+  const target = outputs.find((o) => o.n === n);
+  if (!target) return checkpointRangeError(n, outputs.length, opts.json);
 
-  // The mutation's outputIndex indexes the node's FULL outputs array, not the
-  // selection subset — hand it the candidate's resolved outputIndex.
-  const res = await deps.post(GATE_EDIT_PATH, {
+  // The route's outputIndex indexes the node's FULL outputs array (non-text
+  // artifacts included), never the numbered text subset.
+  const res = await deps.post(CHECKPOINT_EDIT_PATH, {
     runId,
     nodeId: pf.run.pausedNodeId,
-    outputIndex: cand.outputIndex,
+    outputIndex: target.outputIndex,
     text,
   });
-  if (!res.ok) return triggerErrorResult(res, "workflow gate edit", opts.json);
+  if (!res.ok) return triggerErrorResult(res, "workflow checkpoint edit", opts.json);
   return okLine(
-    `Edited candidate ${n} at ${pf.run.pausedNodeId}.`,
-    { ok: true, runId, nodeId: pf.run.pausedNodeId, outputIndex: cand.outputIndex },
+    `Edited output ${n} at ${pf.run.pausedNodeId}. Approve to continue: exodus workflow checkpoint ${runId} approve --wait`,
+    { ok: true, runId, nodeId: pf.run.pausedNodeId, outputIndex: target.outputIndex },
     opts.json,
   );
 }
 
-/**
- * #926: the id of the gate's wired live session. Preference order:
- *   1. the session artifact on the PAUSED GATE NODE's outputs (type "session",
- *      port "session") — how the server resolves it (edge-aware, the documented
- *      bot.session → gate.session wiring);
- *   2. the legacy sessions[]-by-pausedNodeId find (never matched the documented
- *      wiring, but harmless as a fallback).
- * #931: NO single-live-session heuristic. If the gate has no wired session but
- * the run opened one UNRELATED bot session, pushing into it would mutate the
- * wrong conversation (and the server's append-from-session rejects it anyway) —
- * so a miss returns undefined and the caller errors cleanly.
- */
-function resolveGateSessionId(run: WorkflowRun): string | undefined {
-  const gateNode = (run.nodes ?? []).find((x) => x.nodeId === run.pausedNodeId);
-  const artifact = (gateNode?.outputs ?? []).find(
-    (a): a is Extract<WorkflowArtifact, { type: "session" }> =>
-      a.type === "session" && a.port === "session" && !!a.sessionId,
-  );
-  if (artifact) return artifact.sessionId;
-
-  const sessions = run.sessions ?? [];
-  const byNode = sessions.find((s) => s.nodeId === run.pausedNodeId);
-  if (byNode) return byNode.sessionId;
-
-  return undefined;
-}
-
-export async function gatePushFlow(
-  runId: string,
-  message: string,
-  opts: { json: boolean },
-  deps: WorkflowRunDeps,
-): Promise<FlowResult> {
-  const pf = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
-  if (!pf.ok) return pf.result;
-
-  // #926: resolve the gate's WIRED session. The session reaches the gate through
-  // a graph edge (bot.session → gate.session), so the server records it as a
-  // session artifact on the PAUSED GATE NODE's outputs (type "session", port
-  // "session") — exactly how the server itself resolves it
-  // (appendGateCandidateFromSession). The old `sessions[].find(s.nodeId ===
-  // pausedNodeId)` never matched, because sessions[] carries the session-
-  // CREATING bot's nodeId, not the gate's — so push was dead for the documented
-  // wiring. Fall back to that legacy find only; #931 removed the single-live-
-  // session heuristic (it could push into an UNRELATED conversation).
-  const sessionId = resolveGateSessionId(pf.run);
-  if (!sessionId) return errLine("This gate has no live session — nothing to push to.", opts.json);
-  if (!deps.postDashboard) {
-    return errLine("gate push is unavailable here (no dashboard client).", opts.json);
-  }
-
-  // Step 1: extend the session on the Next.js dashboard chat route (mirror of
-  // `session chat` — errors surface verbatim, not #896-mapped).
-  const chat = await deps.postDashboard(
-    CHAT_PATH,
-    { sessionId, text: message },
-    { timeoutMs: CHAT_TIMEOUT_MS },
-  );
-  if (!chat.ok) {
-    const err = routeErrorText(chat.data, chat.status);
-    return {
-      code: 1,
-      lines: opts.json
-        ? [JSON.stringify({ ok: false, status: chat.status, error: err })]
-        : [`exodus workflow gate push: ${err} (HTTP ${chat.status})`],
-    };
-  }
-
-  // Step 2: bank the assistant's latest reply as a NEW selection candidate.
-  const res = await deps.post(GATE_APPEND_PATH, { runId, nodeId: pf.run.pausedNodeId });
-  if (!res.ok) return triggerErrorResult(res, "workflow gate push", opts.json);
-
-  // Re-GET the run so the caller sees the fresh candidate with its 1-based number.
-  const after = await preflightPark(runId, "taste", "workflow gate push", opts.json, deps);
-  const cands = after.ok ? gateCandidates(after.run) : [];
-  const newest = cands[cands.length - 1];
-  if (opts.json) {
-    return {
-      code: 0,
-      lines: [
-        JSON.stringify({
-          ok: true,
-          runId,
-          nodeId: pf.run.pausedNodeId,
-          candidate: newest ? { n: newest.n, text: newest.text } : null,
-        }),
-      ],
-    };
-  }
-  const lines = [`Pushed to the gate — banked a new candidate at ${pf.run.pausedNodeId}.`];
-  if (newest) {
-    lines.push("", `New candidate:`, `  ${newest.n}. ${truncateText(newest.text, 200)}`);
-  }
-  return { code: 0, lines };
-}
-
-export async function gateApproveFlow(
+export async function checkpointRetryFlow(
   runId: string,
   opts: { wait: boolean; json: boolean; onProgressLine?: (line: string) => void },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  const pf = await preflightPark(runId, "taste", "workflow gate approve", opts.json, deps);
+  const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint retry", opts.json, deps);
   if (!pf.ok) return pf.result;
-  const res = await deps.post(APPROVE_PATH, { runId });
-  if (!res.ok) return triggerErrorResult(res, "workflow gate approve", opts.json);
+  // Throws away what the step produced and runs it again; the run parks right
+  // back here with the fresh output.
+  const res = await deps.post(CHECKPOINT_RETRY_PATH, { runId });
+  if (!res.ok) return triggerErrorResult(res, "workflow checkpoint retry", opts.json);
   const triggerRunId = (res.data as { triggerRunId?: string }).triggerRunId;
+  // --wait therefore LANDS ON THE FRESH PARK — a successful redo never reaches a
+  // finished run, so waiting for one would poll for an hour and then report a
+  // false timeout. The retry route only returns once the run has been reset to
+  // queued, so the first checkpoint park we see while polling is the new one.
   return resumeAndMaybeWait(
     runId,
     triggerRunId,
-    ["Gate approved — the run resumes."],
+    ["Redoing the step — its old output is discarded."],
     opts,
     deps,
+    {
+      pauseReason: "checkpoint",
+      headline: "  ⏸ The step re-ran — its fresh output is waiting on your approval.",
+    },
   );
 }
 
-export async function gateRejectFlow(
+export async function checkpointCancelFlow(
   runId: string,
   opts: { reason?: string; json: boolean },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  const pf = await preflightPark(runId, "taste", "workflow gate reject", opts.json, deps);
+  // #1012: cancel ALSO accepts a legacy "taste" park — a run frozen at a
+  // retired Gate box can't be approved anymore (the pointer notice sends
+  // members here to cancel it), and the cancel endpoint is reason-agnostic.
+  const pf = await preflightPark(
+    runId,
+    ["checkpoint", "taste"],
+    "workflow checkpoint cancel",
+    opts.json,
+    deps,
+  );
   if (!pf.ok) return pf.result;
   const res = await deps.post(CANCEL_PATH, {
     runId,
     ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
   });
-  if (!res.ok) return triggerErrorResult(res, "workflow gate reject", opts.json);
-  return okLine(`Gate rejected — run ${runId} canceled.`, { ok: true, runId }, opts.json);
+  if (!res.ok) return triggerErrorResult(res, "workflow checkpoint cancel", opts.json);
+  return okLine(`Checkpoint canceled — run ${runId} stopped.`, { ok: true, runId }, opts.json);
 }
 
 // ── Repair verbs ──────────────────────────────────────────────────────────
@@ -2983,6 +4263,13 @@ export async function repairFlow(
  * Shared tail for the resume verbs (approve / repair retry|skip): print the new
  * triggerRunId, and if --wait re-enter the existing poll loop with the resumed
  * run. The resume returns a NEW triggerRunId; waitForRun polls the same runId.
+ *
+ * `landOnPark` (#998, optional) is passed straight through to waitForRun for the
+ * one verb whose resume is EXPECTED to re-park — `checkpoint retry`. Every other
+ * caller omits it and keeps today's "poll until the run finishes" behavior.
+ *
+ * `extraJson` (#1014, optional) folds verb-specific receipt fields into the JSON
+ * base — the per-item approve reports what it culled. Human output is unaffected.
  */
 async function resumeAndMaybeWait(
   runId: string,
@@ -2990,8 +4277,10 @@ async function resumeAndMaybeWait(
   headline: string[],
   opts: { wait: boolean; json: boolean; onProgressLine?: (line: string) => void },
   deps: WorkflowRunDeps,
+  landOnPark?: { pauseReason: WorkflowPauseReason; headline: string },
+  extraJson?: Record<string, unknown>,
 ): Promise<FlowResult> {
-  const base = { runId, triggerRunId };
+  const base = { runId, triggerRunId, ...(extraJson ?? {}) };
   const startLines = [
     ...headline,
     `runId:        ${runId}`,
@@ -3009,7 +4298,12 @@ async function resumeAndMaybeWait(
   }
   const waited = await waitForRun(
     runId,
-    { json: opts.json, onProgressLine: opts.onProgressLine, jsonBase: base },
+    {
+      json: opts.json,
+      onProgressLine: opts.onProgressLine,
+      jsonBase: base,
+      ...(landOnPark ? { landOnPark } : {}),
+    },
     deps,
   );
   if (opts.json) return waited;
@@ -3104,20 +4398,6 @@ function parsePositional(args = process.argv.slice(3)): string[] {
 async function printResult(result: FlowResult): Promise<void> {
   for (const line of result.lines) console.log(line);
   if (result.code !== 0) process.exit(result.code);
-}
-
-/** Parse a comma-separated 1-based pick list ("3,7") → [3,7]; undefined if any
- *  token isn't a positive integer or the list is empty. */
-function parsePickNumbers(raw: string | undefined): number[] | undefined {
-  if (raw === undefined) return undefined;
-  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-  if (parts.length === 0) return undefined;
-  const nums: number[] = [];
-  for (const p of parts) {
-    if (!/^\d+$/.test(p)) return undefined;
-    nums.push(Number(p));
-  }
-  return nums;
 }
 
 /** Read all of stdin to a string. */
@@ -3221,16 +4501,24 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     const workflowRef = rest[0];
     if (!workflowRef) {
       console.error("Error: workflow run requires <workflowId|name>.");
-      console.log("Usage: exodus workflow run <workflowId|name> [--input key=value ...] [--wait] [--json]");
+      console.log(
+        "Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--wait] [--json]",
+      );
       process.exit(1);
     }
     let inputs: Record<string, string>;
     let terminalNodeIds: string[];
+    let fill: string | undefined;
     try {
-      inputs = parseInputFlags(process.argv.slice(3), defaultDeps.readFile);
+      // Stage 3B: parse RAW. runFlow expands `@path` text inputs and uploads
+      // file inputs once describe has said which fields are which.
+      inputs = parseRawInputFlags(process.argv.slice(3));
       // #860: --terminal repeats like --input, so read the raw argv (the shared
       // flags map only keeps the last value of a repeated flag).
       terminalNodeIds = parseTerminalFlags(process.argv.slice(3));
+      // #1013: --fill reads the raw argv too, so `--fill=<name>` can't be
+      // swallowed and an empty one fails loud instead of launching fill-less.
+      fill = parseFillFlag(process.argv.slice(3));
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -3241,8 +4529,12 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         {
           inputs,
           terminalNodeIds,
+          // #1013: reuse a saved fill by name; --input still wins per key.
+          fill,
           wait: flags["wait"] === true,
           json,
+          // #1002: --out saves the finished run's deliverables (needs --wait).
+          out: flagString(flags, "out"),
           onProgressLine: (line) => console.log(line),
         },
         defaultDeps,
@@ -3251,7 +4543,12 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   }
 
   if (sub === "status") {
-    return printResult(await statusFlow({ id: flagString(flags, "id"), json }, defaultDeps));
+    return printResult(
+      await statusFlow(
+        { id: flagString(flags, "id"), json, out: flagString(flags, "out") },
+        defaultDeps,
+      ),
+    );
   }
 
   if (sub === "versions") {
@@ -3299,43 +4596,47 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     );
   }
 
-  // ── Gate cluster (#891) ────────────────────────────────────────────────
+  // ── Park cluster (#891) ────────────────────────────────────────────────
 
   if (sub === "inbox") {
     return printResult(await inboxFlow(json, defaultDeps));
   }
 
+  // #1012: the Gate node retired in 2.0, and with it every `workflow gate`
+  // subverb. The command stays mounted so an old script (or muscle memory) gets
+  // a pointer instead of "unknown subcommand", and exits non-zero so an
+  // automation that still calls it FAILS rather than quietly doing nothing.
   if (sub === "gate") {
+    console.error(RETIRED_GATE_VERB_POINTER);
+    process.exit(1);
+  }
+
+  // ── Checkpoint cluster (#998) ──────────────────────────────────────────
+
+  if (sub === "checkpoint") {
     const runId = rest[0];
     if (!runId) {
-      console.error("Error: workflow gate requires <runId>.");
-      console.log("Usage: exodus workflow gate <runId> [pick <n,..> | edit <n> | push \"msg\" | approve | reject]");
+      console.error("Error: workflow checkpoint requires <runId>.");
+      console.log('Usage: exodus workflow checkpoint <runId> [show | edit <n> | approve [--reject <n,..>] | retry | cancel]');
       process.exit(1);
     }
     const action = rest[1];
 
-    // No action → show the gate's candidates.
-    if (!action) return printResult(await gateShowFlow(runId, { json }, defaultDeps));
-
-    if (action === "pick") {
-      const numbers = parsePickNumbers(rest[2]);
-      if (!numbers) {
-        console.error(`Error: gate pick needs comma-separated 1-based numbers (e.g. \`pick 3,7\`).`);
-        process.exit(1);
-      }
-      return printResult(await gatePickFlow(runId, numbers, { json }, defaultDeps));
+    // No action (or an explicit `show`) → print the paused step and its output.
+    if (!action || action === "show") {
+      return printResult(await checkpointShowFlow(runId, { json }, defaultDeps));
     }
 
     if (action === "edit") {
       const n = parseTriggerIndex(rest[2]);
       if (n === undefined) {
-        console.error("Error: gate edit needs a 1-based candidate number <n>.");
-        console.log(`Usage: exodus workflow gate <runId> edit <n> [--text "..." | --file <path> | (stdin)]`);
+        console.error("Error: checkpoint edit needs a 1-based output number <n>.");
+        console.log(`Usage: exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)]`);
         process.exit(1);
       }
       const stdin = await maybeReadStdin(flags);
       return printResult(
-        await gateEditFlow(
+        await checkpointEditFlow(
           runId,
           n,
           { text: flagString(flags, "text"), file: flagString(flags, "file"), stdin },
@@ -3345,18 +4646,28 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       );
     }
 
-    if (action === "push") {
-      const message = rest[2];
-      if (!message) {
-        console.error('Error: gate push needs a message (e.g. `push "make it punchier"`).');
-        process.exit(1);
-      }
-      return printResult(await gatePushFlow(runId, message, { json }, defaultDeps));
-    }
-
     if (action === "approve") {
       return printResult(
-        await gateApproveFlow(
+        await checkpointApproveFlow(
+          runId,
+          {
+            wait: flags["wait"] === true,
+            json,
+            onProgressLine: (line) => console.log(line),
+            // #1014: passed raw — the flow parses it, so a bad value comes back
+            // as a normal (--json-shaped) error instead of a bare exit.
+            ...(flags["reject"] !== undefined
+              ? { reject: flagString(flags, "reject") ?? "" }
+              : {}),
+          },
+          defaultDeps,
+        ),
+      );
+    }
+
+    if (action === "retry") {
+      return printResult(
+        await checkpointRetryFlow(
           runId,
           { wait: flags["wait"] === true, json, onProgressLine: (line) => console.log(line) },
           defaultDeps,
@@ -3364,13 +4675,13 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       );
     }
 
-    if (action === "reject") {
+    if (action === "cancel") {
       return printResult(
-        await gateRejectFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps),
+        await checkpointCancelFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps),
       );
     }
 
-    console.error(`Error: unknown gate action "${action}" (expected pick, edit, push, approve, or reject).`);
+    console.error(`Error: unknown checkpoint action "${action}" (expected show, edit, approve, retry, or cancel).`);
     process.exit(1);
   }
 
