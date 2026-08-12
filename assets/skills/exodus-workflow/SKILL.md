@@ -1,6 +1,6 @@
 ---
 name: exodus-workflow
-description: Run, chain, build, edit, and automate saved Exodus Workflows — the multi-node automations that wire Genesis bots, primers, briefs, transforms, and image nodes together on the dashboard canvas — from the CLI. Use it to list a brand's workflows, describe what a workflow needs before running it (inputs, per-workspace primer prerequisites, outputs), run one and collect its outputs, chain one workflow's output into another's input, browse the bot catalog, author or update a workflow contract via templates → edit → validate → import, resolve runs that park (approve a step paused at a checkpoint, check the workflow inbox, repair a stalled run, answer a nested workflow's slots), continue a bot session in chat, enable/disable/fire triggers, read the brand's copy banks or promote a winner, and list versions or roll one back. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("exodus, run my launch workflow", "exodus, what does this workflow need", "exodus, build a workflow that turns a swipe into hooks then ads", "list my exodus workflows", "exodus, edit that workflow", "exodus, approve that checkpoint", "exodus, check my workflow inbox", "exodus, resolve that parked run", "exodus, continue that session", "exodus, enable/fire the trigger", "exodus, read my hooks bank", "exodus, promote this winner", "exodus, list the versions / roll it back"), named this skill or /exodus-workflow, ran an `npx @aicopycoders/exodus workflow` / `session` / `bank` command, or the `exodus` hub skill routed here. Never claim generic "workflow"/"automation"/"inbox"/"promote a winner"/"continue the session" requests ("automate this", "build me a workflow", "check my inbox") without Exodus context — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus.
+description: Run, chain, build, edit, and automate saved Exodus Workflows — the multi-node automations that wire Genesis bots, primers, briefs, transforms, and image nodes together on the dashboard canvas — from the CLI. Use it to list a brand's workflows, describe what a workflow needs before running it (inputs, per-workspace primer prerequisites, outputs), run one and collect its outputs, chain one workflow's output into another's input, browse the bot catalog, author or update a workflow contract via templates → edit → validate → import, resolve runs that park (approve a run paused at a checkpoint, check the workflow inbox, repair a stalled run, answer a nested workflow's slots), continue a bot session in chat, enable/disable/fire triggers, read the brand's copy banks or promote a winner, and list versions or roll one back. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("exodus, run my launch workflow", "exodus, what does this workflow need", "exodus, build a workflow that turns a swipe into hooks then ads", "list my exodus workflows", "exodus, edit that workflow", "exodus, approve that checkpoint", "exodus, check my workflow inbox", "exodus, resolve that parked run", "exodus, continue that session", "exodus, enable/fire the trigger", "exodus, read my hooks bank", "exodus, promote this winner", "exodus, list the versions / roll it back"), named this skill or /exodus-workflow, ran an `npx @aicopycoders/exodus workflow` / `session` / `bank` command, or the `exodus` hub skill routed here. Never claim generic "workflow"/"automation"/"inbox"/"promote a winner"/"continue the session" requests ("automate this", "build me a workflow", "check my inbox") without Exodus context — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus.
 ---
 
 ```operator-guide
@@ -8,7 +8,7 @@ Core — discover & run:
   exodus workflow list [--json]                              List the brand's saved workflows
   exodus workflow describe <workflowId|name> [--json]        Inputs, prerequisites, outputs
   exodus workflow bots [--category <cat>] [--slug <slug>] [--json]   Bot catalog / one bot's spec
-  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--terminal <nodeId> ...] [--wait] [--out <dir>] [--json]   Run it
+  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--terminal <nodeId> ...] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
   exodus workflow status [--id <runId>] [--out <dir>] [--json]   Poll a run / read its outputs
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]   Dump the contract (YAML)
 
@@ -44,20 +44,28 @@ Flag notes that add agent-level guidance (everything else is in --help):
   --input key=<path>   (run) A FILE input — one `describe` reports with source
                        "asset" — takes a local file path instead of text: the CLI
                        uploads the file and sends the stored asset in its place
-                       (--input hero=./photos/hero.png). An asset id from an
+                       (--input hero=./photos/hero.png). An http(s) URL works too
+                       (--input hero=https://example.com/hero.png) — the server
+                       fetches and registers it at launch. An asset id from an
                        earlier upload is relayed as-is. Accepted: image PNG/JPEG/
                        WebP/GIF ≤15MB, video MP4/MOV/WebM ≤200MB, audio MP3/M4A/
                        WAV/OGG ≤50MB, document PDF/TXT/MD/DOC/DOCX ≤25MB.
   --terminal <nodeId>  (run) Repeatable. Scope the run to the upstream closure of
                        these end node(s); omit to run the whole graph.
+  --auto-approve       (run) Send this ONE run off unattended: every Checkpoint it
+                       reaches is approved for you, exactly as it stands, and the
+                       run records that nobody looked. Without it a Checkpoint
+                       parks and waits for a person. Never a workflow setting —
+                       you choose it per launch, so ask before using it.
   --out <dir>          (run --wait / status --id) Save the finished run's delivered
                        outputs into this directory and print the paths: text as
                        .md, storyboards/frame sets as .json, images/video/audio
                        downloaded. Unfulfilled slots are reported, not written.
   --version <n>        (export) A real 1-based id from `workflow versions`; a
                        version export carries NO triggers/description.
-  --reject <n,..>      (checkpoint approve) Only when the paused step ran once
-                       per item (a Splitter fan-out). Drops those item numbers —
+  --reject <n,..>      (checkpoint approve) Only when the checkpoint is holding
+                       one arrival per item (a Splitter fan-out). Drops those
+                       item numbers —
                        the "Item N of M" headings in `checkpoint show` — and
                        approves the rest. Rejecting every item is refused.
 
@@ -69,7 +77,7 @@ Auth: Bearer (EXODUS_API_KEY). The canvas lives on the dashboard at /workflows.
 
 # Workflow — Run, Resolve, Build, and Automate Saved Workflows
 
-An Exodus **Workflow** is a saved graph the member builds on the dashboard canvas (`/workflows`): brief and primer sources feed Genesis bots, bots feed transforms, formatters, other bots, or an image node, deposits land copy in banks, and an Output node collects the deliverables. This skill is the CLI operator for those graphs — a **peer door** to the same artifact the web canvas edits. Anything you can do to a run in the browser (approve a checkpoint, repair a stall, continue a session, promote a winner), you can do here.
+An Exodus **Workflow** is a saved graph the member builds on the dashboard canvas (`/workflows`): brief and primer sources feed Genesis bots, bots feed transforms, formatters, other bots, or an image node, deposits land copy in banks, a Checkpoint box on a wire stops the run for a human's approval, and an Output node collects the deliverables. This skill is the CLI operator for those graphs — a **peer door** to the same artifact the web canvas edits. Anything you can do to a run in the browser (approve a checkpoint, repair a stall, continue a session, promote a winner), you can do here.
 
 **The `--json` contract (read this once).** Every `workflow`, `session`, and `bank` verb takes `--json`, and that structured output **is** the machine API — there is no separate agent command set and no MCP server. Read for humans without it; parse `--json` when you need to chain or branch on the result.
 
@@ -83,9 +91,9 @@ The end-to-end narrative, every step naming its verb. You rarely walk all of it 
 2. **Validate** — `workflow validate <file>` until it comes back clean (it's `import --dry-run` under its own door).
 3. **Import** — `workflow import <file>` to create, or `import <file> --update <id>` to edit in place.
 4. **Describe** — `workflow describe` to confirm inputs, prerequisites (✓/✗ primers), and outputs before spending a run.
-5. **Run** — `workflow run … --wait` (streams progress, prints outputs) or omit `--wait` and poll `workflow status --id <runId>`. Inputs come from `--input key=value` flags, from `--fill <name>` (a saved fill — a named, reusable set of launch answers saved from the app's Run dialog; flags win per key when you pass both), or a mix. Launches that don't satisfy the workflow's entry contract are rejected at the door with the gap named — `describe` shows each input's type, required/optional, and accepted values.
+5. **Run** — `workflow run … --wait` (streams progress, prints outputs) or omit `--wait` and poll `workflow status --id <runId>`. Inputs come from `--input key=value` flags, from `--fill <name>` (a saved fill — a named, reusable set of launch answers saved from the app's Run dialog; flags win per key when you pass both), or a mix. Launches that don't satisfy the workflow's entry contract are rejected at the door with the gap named — `describe` shows each input's type, required/optional, and accepted values. Add `--auto-approve` only when the run is meant to go start-to-finish with nobody watching: it approves every Checkpoint the run hits, unchanged, instead of stopping for a verdict. It's a per-launch choice, not a setting on the workflow, and the run keeps a record of each stop it waved through — so confirm with the user before you pass it.
 6. **Notice the park** — a run can stop and wait on you. There are no webhooks in v1; you notice a park one of three ways: `run --wait` prints a pause notice naming the verb to use (the command keeps waiting — resolve from another shell, or Ctrl-C and pick it up via `inbox`), `workflow inbox` lists it, or `workflow status` shows `awaiting-review`.
-7. **Resolve** — `workflow checkpoint <runId> …` (a step flagged "pause for approval"), `workflow repair <runId> …` (a stalled collector), or `workflow answer <runId> …` (a nested workflow's slots).
+7. **Resolve** — `workflow checkpoint <runId> …` (the run reached a Checkpoint box), `workflow repair <runId> …` (a stalled collector), or `workflow answer <runId> …` (a nested workflow's slots).
 8. **Harvest** — read deliverables with `workflow status --id <runId> --json`; read banked deposits with `bank show <key>`; keep thinking with a bot via `session chat`.
 9. **Promote** — `bank promote <key>` lands the winner **and** fires the Winner Flywheel; then check `workflow inbox` for any background run it kicked off.
 
@@ -160,7 +168,7 @@ Report the outputs plus a short take. Don't call a run "done" off the kickoff li
 
 A run doesn't always finish on its own — it can **park** and wait for a human decision. There are three actionable park kinds:
 
-- **checkpoint** — any step whose author flipped the "pause for approval" switch has finished, and the run is holding until you approve what it wrote.
+- **checkpoint** — the run reached a **Checkpoint** box on the canvas and is holding there until you approve what's flowing through it.
 - **repair** — a require-all collector stalled on a dead input and needs a decision.
 - **slots** — a nested sub-workflow is waiting on inputs (slot answers).
 
@@ -185,25 +193,38 @@ npx @aicopycoders/exodus workflow checkpoint <runId> cancel --reason "legacy gat
 
 ### Checkpoint parks — show / edit / approve / retry / cancel
 
-A **checkpoint** is the "pause for approval" switch on an ordinary step (any node kind can carry it). The step runs, finishes, and then the whole run stops there until a human signs off — it waits **indefinitely**, so a `run --wait` left unattended simply keeps polling; nothing times out and nothing is lost.
+A **Checkpoint** is its own box on the canvas, sitting on a wire between two steps: the step before it finishes, the work reaches the Checkpoint, and the whole run stops there until a human signs off. Because it's a box you can see, the diagram tells you exactly where a run will stop. It waits **indefinitely**, so a `run --wait` left unattended simply keeps polling; nothing times out and nothing is lost. A Checkpoint is never approved automatically — not in a background run, not in a triggered one. The single exception is a run someone launched with `run --auto-approve`, which is an explicit "nobody is watching this one" choice made at launch time; those runs approve each Checkpoint as they reach it and mark the stop as auto-approved.
 
-There are **no candidates to pick** — there's one step's output to read and either bless, fix, or redo. Outputs are numbered **1-based**:
+The box itself does no work: whatever arrives goes straight back out, unchanged, the moment you approve.
+
+There are **no candidates to pick** — there's held work to read and either bless, fix, or redo. Outputs are numbered **1-based**:
 
 ```bash
-npx @aicopycoders/exodus workflow checkpoint <runId>                  # show the paused step + its output
+npx @aicopycoders/exodus workflow checkpoint <runId>                  # show what's waiting at the checkpoint
 npx @aicopycoders/exodus workflow checkpoint <runId> edit 1 --text "tighter opener"   # rewrite an output in place
 npx @aicopycoders/exodus workflow checkpoint <runId> approve --wait   # sign off, the run continues
-npx @aicopycoders/exodus workflow checkpoint <runId> retry --wait     # redo the step, wait for its fresh output
+npx @aicopycoders/exodus workflow checkpoint <runId> retry --wait     # redo the step feeding it, wait for fresh output
 npx @aicopycoders/exodus workflow checkpoint <runId> cancel --reason "wrong direction"   # stop the run here
 ```
 
 - **`edit`** takes `--text`, `--file <path>`, or piped stdin. It does **not** resume the run — edit first, then `approve`.
-- **`retry`** discards what the step produced and runs that one step again. The run parks right back at the *same* checkpoint with the fresh output — that re-park **is** the success. So `retry --wait` finishes as soon as the new output is ready, prints it, and hands you back the same four choices; it does **not** wait for the run to complete (it never would). Review the fresh output and `approve` when you're happy.
+- **`retry`** discards what's waiting and re-runs the step **feeding** the checkpoint (re-running the checkpoint itself would hand back the identical text, since it only passes things through). The run parks right back at the *same* checkpoint with the fresh output — that re-park **is** the success. So `retry --wait` finishes as soon as the new output is ready, prints it, and hands you back the same four choices; it does **not** wait for the run to complete (it never would). Review the fresh output and `approve` when you're happy.
 - **`cancel`** stops the run for good, recording your reason — the same audit trail the web uses.
 
-#### When the step ran once per item (a Splitter fan-out)
+**Authoring one** (when you're building or editing a graph from the CLI): add a `checkpoint` node and put it **on the wire** — producer → checkpoint `in`, checkpoint `out` → whoever used to receive it. `in` accepts any wire type so the box drops onto any wire; `out` is typed by `config.passType`, which must name the **same type as the wire feeding it** (`text` is the default and by far the common case). Get that wrong and `validate` returns `bad-config` naming the wire's real type.
 
-If a Splitter (below) sits upstream, the flagged step ran **once per item**, and `show` groups its output under **`Item 1 of 7`**-style headings. The run still parks **once**, after every lane has finished — you review the whole batch in one sitting.
+```yaml
+- id: approve-hooks
+  kind: checkpoint
+  config:
+    passType: text
+```
+
+**Older workflows convert themselves.** Before this, a pause-for-approval was a hidden switch inside a step's settings. Any graph that still carries one is rewritten automatically — the switched step becomes that step followed by a Checkpoint box — the moment it's opened, saved, imported, or restored. Never author the old `checkpoint` config key; it's dropped on sight. Runs that finished (or parked) under the old shape are left exactly as they are, and a run parked the old way still resolves through these same verbs.
+
+#### When the work arrived once per item (a Splitter fan-out)
+
+If a Splitter (below) sits upstream, the checkpoint saw **one arrival per item**, and `show` groups what's waiting under **`Item 1 of 7`**-style headings. The run still parks **once**, after every lane has finished — you review the whole batch in one sitting.
 
 The numbering does **not** restart per item: rows are numbered straight through, so `edit 4` still means row 4 wherever it sits. What's new is that you can drop whole items:
 
@@ -316,6 +337,7 @@ npx @aicopycoders/exodus workflow schema                   # LIVE node kinds, po
 npx @aicopycoders/exodus workflow schema --kind transform  # one node kind
 npx @aicopycoders/exodus workflow schema --kind formatter  # the Formatter's two modes, bounds, and notes
 npx @aicopycoders/exodus workflow schema --kind splitter   # the Splitter's three modes, the item cap, and the lane rules
+npx @aicopycoders/exodus workflow schema --kind checkpoint # the Checkpoint box: its two ports and config.passType
 npx @aicopycoders/exodus workflow schema --face splitter   # one transform face's ports + spec
 ```
 
@@ -404,7 +426,7 @@ It has the same ports in every mode: one required input `source` (it accepts sev
 
 - **`structural`** — no model call. Whatever artifacts arrive on `source` **are** the items. This is the natural partner of a Formatter `list` field, which already emits one artifact per element. (A single artifact whose text is a JSON list of strings gets exploded too.)
 - **`rule`** — no model call. Joins the incoming text and cuts it on a `delimiter`: `newline`, `blank-line`, `numbered` (1. 2. 3. list markers), or `custom` plus a `customPattern` (a **literal** separator, not a regular expression).
-- **`semantic`** — the only mode that calls a model. Your `instruction` says what counts as one item ("separate this into ad concepts"); the reply must be a clean list, and a bad one is re-asked before the node gives up.
+- **`semantic`** — the only mode that calls a model. Your `instruction` says what counts as one item ("separate this into ad concepts"); the reply must be a clean list, and a bad one is re-asked before the node gives up. Set `model` to pick which writing model does the cutting; leave it out for the default one.
 
 ```yaml
 - id: split-modules
@@ -415,15 +437,28 @@ It has the same ports in every mode: one required input `source` (it accepts sev
     maxItems: 25
 ```
 
+**Aiming a `structural` Splitter at one field.** A bot that answers in JSON usually hands you a whole payload — `{"hooks": ["…", "…"], "notes": "…"}` — and splitting *that* gives you one item: the blob. Set `sourceField: hooks` and the Splitter reaches inside and splits **just that list** instead, ignoring everything else. If several payloads arrive on the wire, their lists are pooled in the order they landed.
+
+```yaml
+- id: split-hooks
+  kind: splitter
+  config:
+    mode: structural
+    sourceField: hooks
+    maxItems: 25
+```
+
+Two things to know. First, an aimed Splitter is **strict**: every payload arriving has to be a JSON object that actually has that field, and the field has to hold a list of text. Anything else stops the step with a plain sentence naming the field — it never quietly falls back to splitting the raw payload, because a one-item fan that "worked" is the worst possible answer. Second, don't aim a Splitter that's fed **from a Formatter field**: that wire already carries the values one by one, so there's nothing left to reach inside, and the run is blocked (`splitter-field-conflict`) with a note telling you to clear the field name. Leave `sourceField` out entirely for the original behaviour — whatever arrives *is* the list. The field name is one word, up to 60 characters, not a path.
+
 **`maxItems` is a hard cap and it is required in every mode** (default 25, raise it to at most 100 deliberately — you cannot remove it). Going over the cap **fails the node loudly** with the real count ("Splitter produced 61 items; cap is 25"). It never quietly trims the list: silent data loss is worse than a visible failure. Producing **zero** items fails too, for the same reason.
 
-**Reviewing a fan item by item.** If a step inside the fan has the "pause for approval" switch on, the run parks once, after all the lanes finish, and you approve or reject **each item**. Rejecting is filtering, not failing — see "When the step ran once per item" above.
+**Reviewing a fan item by item.** Put a **Checkpoint node inside the fan** and the run parks once, after all the lanes finish, and you approve or reject **each item**. Rejecting is filtering, not failing — the lanes below a rejected item simply never run. See "When the work arrived once per item" above.
 
 **Three rules the validator enforces — all three scoped to a Splitter's OPEN fan** (the chain running once per item, which ends at the Collector that closes it):
 
 - **No split inside an open fan** (`nested-split`) — a Splitter can't sit inside another Splitter's open fan. An artifact carries exactly one item number, so items-of-items has nowhere to live. The way through is **sequential**: close the first fan with a Collector, then split the combined result again. That is fully legal.
 - **One open fan per node** (`fan-overlap`) — no node may sit inside two different Splitters' open fans at once. Their item numbering is unrelated, so the lanes can't merge mid-fan. Two fans that have **each closed through their own Collector** may merge downstream freely.
-- **Lane eligibility** (`lane-ineligible`) — every node inside the open fan must be a `bot`, `formatter`, `transform`, or `output` node. Video nodes, Call nodes, and the video member-gate kinds are blocked, because running them once per item would corrupt state they keep per node. The `collector` kind is **exempt** (it ends the lane rather than running in it), and **after** a Collector any kind at all is allowed again — video, Call, all of it.
+- **Lane eligibility** (`lane-ineligible`) — every node inside the open fan must be a `bot`, `formatter`, `transform`, `checkpoint`, or `output` node. Video nodes, Call nodes, and the video member-gate kinds are blocked, because running them once per item would corrupt state they keep per node. The `collector` kind is **exempt** (it ends the lane rather than running in it), and **after** a Collector any kind at all is allowed again — video, Call, all of it.
 
 **One lane failing doesn't sink the batch.** If a lane exhausts its retries, that item drops out and the others carry on; the step ends `done` with a warning naming the casualties. Only *every* item failing fails the step. (A Collector downstream can be told to be stricter than that — see the next section.)
 
@@ -439,7 +474,7 @@ Its ports are fixed in every mode: one required input `items` (a whole fan lands
 
 - **`assemble`** — no model call. Stitches the surviving items into one block, in order, joined by `separator` (`newline`, `blank-line`, or `custom` plus a literal `customSeparator`; newline if you say nothing). An optional `itemTemplate` wraps each item, with the slots `{{item.value}}`, `{{item.index}}` (1-based), and `{{item.total}}`.
 - **`list`** — no model call. Emits one artifact whose text is JSON: the items with their numbers, a count, and what dropped out. Use it when the next step wants structure, not prose. It is the only mode that puts the dropped detail *in* the artifact.
-- **`synthesize`** — the only mode that calls a model. Your `instruction` says what the merge should produce; the model writes one new piece out of every item. The model itself is sealed (you get `temperature` and `maxRetries`, not a model pick).
+- **`synthesize`** — the only mode that calls a model. Your `instruction` says what the merge should produce; the model writes one new piece out of every item. Set `model` to pick which writing model does the merging, or leave it out for the default one; `temperature` and `maxRetries` work here too.
 
 ```yaml
 - id: fold-modules
@@ -472,8 +507,10 @@ A hand-picked list of the traps that bite first. `workflow schema` is authoritat
 - **Required inputs hard-block** — a run refuses to start until every required input is supplied; there's no "run anyway".
 - **Transform faces are sealed** — each face has fixed, per-face **output port ids** you must wire from by name; `workflow schema --face <face>` prints them, along with whether the face is `retired`.
 - **Don't author a retired face** — `parser`, `edit-shorten`, the old `formatter` face, `splitter` / `decomposer`, and now `collector` are no longer offered; author a `formatter` node (parser/formatter), a `splitter` node (splitter/decomposer), or a `collector` node instead. Existing graphs that use them keep running, so leave those alone.
-- **The fan rules are scoped to the OPEN fan** — inside a Splitter's open fan (the chain up to the Collector that closes it) you may not place another Splitter (`nested-split`), every node must be a `bot`, `formatter`, `transform`, or `output` (`lane-ineligible`), and no node may sit in two Splitters' open fans at once (`fan-overlap`). Close the fan with a Collector and all three restrictions lift: split again, run any kind, merge two collected fans.
+- **The fan rules are scoped to the OPEN fan** — inside a Splitter's open fan (the chain up to the Collector that closes it) you may not place another Splitter (`nested-split`), every node must be a `bot`, `formatter`, `transform`, `checkpoint`, or `output` (`lane-ineligible`), and no node may sit in two Splitters' open fans at once (`fan-overlap`). Close the fan with a Collector and all three restrictions lift: split again, run any kind, merge two collected fans.
 - **A Collector must be paired** — every wire into a `collector` node has to come from inside one Splitter's open fan, or it's `collector-unpaired` and the run is blocked. To merge branches that were never split, use a Formatter in template mode.
+- **Don't aim a Splitter at a Formatter field** — a `structural` Splitter with `sourceField` set, fed from a Formatter field, is `splitter-field-conflict` and the run is blocked. That wire already hands over the values one at a time, so there's no payload left to reach into. Clear the field name, or feed the Splitter one whole JSON payload instead.
+- **A Checkpoint's declared type must match the wire feeding it** — a `checkpoint` node's `config.passType` (default `text`) has to be the type arriving on `in`, or it's `bad-config` and the run is blocked. And never author the old per-node `checkpoint` switch key: it's retired, and any graph still carrying it is auto-converted into Checkpoint nodes on the way in.
 - **A Formatter's handles come from its own config** — template slots name its inputs, field keys name its outputs. Change the config and old edges go `unknown-port`.
 - **`session` outputs have nowhere to wire** — a session-typed output exists so you can re-open the chat from the run page; no node kind accepts a session wire.
 - **Deposit shapes are strict** — a deposit's config must match the target bank's expected shape exactly, or import rejects it.

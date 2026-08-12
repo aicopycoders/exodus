@@ -3,7 +3,7 @@ import { type PollOptions, type PollResult } from "../lib/poll.js";
 import { LEGACY_WORKFLOW_RUN_STATUS_VALUES, type RunStatus } from "../lib/runStatus.js";
 import { type Channel } from "../lib/channel.js";
 export declare const helpText: string;
-export type WorkflowNodeKind = "brief" | "asset" | "bot" | "primer" | "image" | "image-rig" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform" | "formatter" | "splitter" | "collector";
+export type WorkflowNodeKind = "brief" | "brief-form" | "asset" | "bot" | "primer" | "image" | "image-rig" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform" | "formatter" | "splitter" | "collector" | "checkpoint" | "prompt";
 export type WorkflowSlotState = "locked" | "auto" | "ask" | "inferred";
 export interface WorkflowSlot {
     id: string;
@@ -68,7 +68,7 @@ export interface WorkflowImportResult {
     unresolved: UnresolvedWorkflowRef[];
     warnings: string[];
 }
-export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "duplicate-input-key" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger" | "nested-split" | "fan-overlap" | "lane-ineligible" | "collector-unpaired";
+export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "duplicate-input-key" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger" | "nested-split" | "fan-overlap" | "lane-ineligible" | "fan-image-budget" | "collector-unpaired" | "splitter-field-conflict";
 export interface GraphIssue {
     code: GraphIssueCode;
     message: string;
@@ -165,15 +165,18 @@ export interface WorkflowCatalog {
 }
 export type WorkflowBriefSource = "text" | "swipe-ad" | "swipe-bundle" | "organic-url" | "ad-url";
 export type WorkflowMediaType = "image" | "video" | "audio" | "document";
-export type WorkflowEntryFieldType = "text" | "select" | "number" | "toggle";
+export type WorkflowEntryFieldType = "text" | "select" | "number" | "toggle" | "multi-select";
 export interface WorkflowInputDescriptor {
     fieldName: string;
     nodeId: string;
+    label?: string;
     source: WorkflowBriefSource | "asset";
     required: boolean;
     description?: string;
     type?: WorkflowEntryFieldType;
     options?: string[];
+    allowOther?: boolean;
+    optionsSource?: string;
     bundleSize?: number;
     assetType?: WorkflowMediaType;
 }
@@ -188,6 +191,13 @@ export interface WorkflowOutputDescriptor {
     botSlug?: string;
     port?: string;
 }
+export interface WorkflowDeliveryDescriptor {
+    key: string;
+    label: string;
+    type: WorkflowOutputSlotType;
+    description?: string;
+    order: number;
+}
 export interface WorkflowDescribeResponse {
     workflowId: string;
     name: string;
@@ -198,6 +208,7 @@ export interface WorkflowDescribeResponse {
         stored: boolean;
     }>;
     outputs: WorkflowOutputDescriptor[];
+    deliveries?: WorkflowDeliveryDescriptor[];
 }
 export interface WorkflowTemplateListItem {
     key: string;
@@ -282,6 +293,10 @@ export interface WorkflowRunOutput {
     documentUrl?: string;
     filename?: string;
     mimeType?: string;
+    humanEdited?: boolean;
+    originalText?: string;
+    originalImageUrl?: string;
+    originalVideoUrl?: string;
 }
 export type WorkflowOutputSlotType = "text" | "structured" | "asset" | "collection";
 export interface WorkflowRunDelivery {
@@ -347,6 +362,10 @@ export interface WorkflowRun {
     pauseReason?: WorkflowPauseReason;
     pausedNodeId?: string;
     pendingSlots?: WorkflowPendingSlot[];
+    autoApprovals?: {
+        nodeId: string;
+        approvedAt: number;
+    }[];
 }
 export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & {
     nodes?: never;
@@ -383,10 +402,13 @@ interface RunFlowOptions {
     inputs: Record<string, string>;
     terminalNodeIds?: string[];
     fill?: string;
+    autoApprove?: boolean;
+    imageRigOverrides?: Record<string, unknown>;
     wait: boolean;
     json: boolean;
     out?: string;
     onProgressLine?: (line: string) => void;
+    onWarningLine?: (line: string) => void;
 }
 export declare function formatPauseNotice(pauseReason: WorkflowPauseReason | undefined, runId: string, dashboardUrl: string): string[];
 export declare function parseRawInputFlags(args: string[]): Record<string, string>;
@@ -396,7 +418,12 @@ export declare const ASSET_UPLOAD_POLICY: Record<WorkflowMediaType, {
     maxBytes: number;
     accepts: string;
 }>;
+export declare const NO_DELIVERIES_WARNING: string;
+export declare function noDeliveriesWarning(described: unknown): string | undefined;
+export declare function serverWarningsToPrint(serverWarnings: unknown, alreadyPrinted: string[]): string[];
 export declare function parseTerminalFlags(args: string[]): string[];
+export declare function parseAutoApproveFlag(args: string[]): boolean;
+export declare function parseRigOverridesFlag(args: string[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
 export declare function parseFillFlag(args: string[]): string | undefined;
 export declare function formatWorkflowList(workflows: WorkflowListItem[]): string;
 export declare function formatRecentRuns(runs: WorkflowRunProjection[]): string;
@@ -413,6 +440,8 @@ export interface DeliverySaveResult {
 }
 export declare function workflowFilenameSlug(name: string): string;
 export declare function saveDeliveries(run: WorkflowRun, dir: string, deps: WorkflowRunDeps): Promise<DeliverySaveResult>;
+export declare function deliveryTypeWord(type: string): string;
+export declare function deliveryContractLines(deliveries: WorkflowDeliveryDescriptor[] | undefined): string[];
 export declare function formatDescribe(res: WorkflowDescribeResponse): string;
 export declare function formatBotsList(catalog: WorkflowCatalog, category?: string): string;
 export declare function formatBotDetail(bot: CatalogBot): string;
@@ -458,6 +487,7 @@ export declare function triggersSetEnabledFlow(workflowRef: string, n: number, e
 export declare function triggersFireFlow(workflowRef: string, opts: {
     n?: number;
     text?: string;
+    imageRigOverrides?: Record<string, unknown>;
     wait: boolean;
     json: boolean;
     onProgressLine?: (line: string) => void;
@@ -533,6 +563,7 @@ export declare function checkpointEditFlow(runId: string, n: number, sources: {
 export declare function checkpointRetryFlow(runId: string, opts: {
     wait: boolean;
     json: boolean;
+    note?: string;
     onProgressLine?: (line: string) => void;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
 export declare function checkpointCancelFlow(runId: string, opts: {

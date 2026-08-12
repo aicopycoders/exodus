@@ -17,9 +17,21 @@ Google Doc). Write from a typed brief.
 
 Usage:
   exodus genesis run --brief <file|"text">   Write from a typed brief
+  exodus genesis hook-pref [manual|auto]     Read (no arg) or save your default
+                                             hook-gate choice
+  exodus genesis hooks --id <runId>          Show the hook pool of a run paused
+                                             at the hook gate
+  exodus genesis continue --id <runId> --hooks 1,3,5   Pick hooks and resume
+  exodus genesis regenerate --id <runId> [--steering "…"]   Re-roll the hook pool
+
+Every run must know whether you review hooks: pass --stop-at-hooks or
+--auto-hooks, or save a default once with hook-pref. A flagless run with no
+saved preference is refused.
 
 Options:
   --brief <file|"text">       Typed brief (file path or inline string)
+  --stop-at-hooks             Pause at the hook gate to review/pick hooks
+  --auto-hooks                Auto-pick hooks and write straight through
   --seeds <file|"text">       Per-run creative seeds. File: one per line OR a
                               JSON array. Inline: a single seed.
   --steering "<text>"         With regenerate: re-roll guidance for the hook pool.

@@ -8,8 +8,30 @@
 // V1.1 moved orchestration server-side: the browser/CLI no longer drives
 // caption/generate/imgflip per meme (those routes are gone — closing the
 // session used to kill the batch). `run` enqueues everything; progress is
-// polled with `exodus status --id <runId> --type creative` (meme runs ride
-// creativeSuiteRuns) or watched in the dashboard.
+// polled or watched in the dashboard.
+//
+// #1142 — WHICH id `run` hands back changed, and with it the poll verb.
+//
+// `/api/meme/run` is now an adapter onto the Image Rig: it fires a hidden
+// per-workspace single-rig WORKFLOW, so its `runId` names a `workflowRuns` row,
+// not a `creativeSuiteRuns` one. The request body and the two response fields
+// this file reads (`runId`, `triggerRunId`) are unchanged, so `run` itself needs
+// no change — but the follow-ups do:
+//
+//   • Poll with `exodus workflow status --id <runId>` (GET /api/v2/workflow) —
+//     the honest surface for a workflow run. `exodus status --type creative`
+//     ALSO answers for the new id (its poll route accepts both id spaces for
+//     Bearer callers since #1142, which is what keeps ALREADY-PUBLISHED CLI
+//     builds working), but it speaks the flattened legacy body; prefer the
+//     workflow verb going forward.
+//   • The dashboard link is the canonical `/runs/<id>` forwarder (the same one
+//     `exodus workflow` mints), which resolves either id space.
+//   • `regenerate --id <runId>` still takes a CREATIVE-SUITE run id — the id
+//     `run` prints is no longer one. Regenerate without `--id`; the fresh meme
+//     comes back as a URL either way.
+//
+// Old installed CLI builds still print the pre-#1142 hint against the new
+// backend. Accepted: this is the source fix, and `update` carries it.
 import { apiPostDashboard, getDashboardUrl } from "../lib/client.js";
 import { formatError } from "../lib/format.js";
 import { pkgRef } from "../lib/channel.js";
@@ -32,11 +54,14 @@ Flow:
   2. run        → pass the picked recommendation objects straight into --formats
                   (a JSON array; both recommendation-shape and run-shape entries
                   are accepted, 1–50). Returns { runId } — the whole batch renders
-                  server-side via Trigger.dev; closing your session won't kill it.
-  3. poll       → exodus status --id <runId> --type creative
-                  (terminal: complete | partial-error | error)
+                  server-side; closing your session won't kill it.
+  3. poll       → exodus workflow status --id <runId>
+                  Memes render through the Image Rig now, so a meme run IS a
+                  workflow run — the workflow verb is the one that can read it.
   4. regenerate → re-render a single miss using the format fields from the
                   recommend output. Synchronous; returns the new image URL.
+                  Its optional --id takes a CREATIVE-SUITE run id, which the id
+                  from step 2 is not — omit --id and use the returned URL.
 
 Keys (strict BYOK — checked server-side before anything starts):
   classic (layer 1) memes need your Imgflip login; AI (layer 2/3) memes need
@@ -45,7 +70,7 @@ Keys (strict BYOK — checked server-side before anything starts):
 Examples:
   exodus meme recommend --brief "grounding sheets reduce inflammation"
   exodus meme run --brief "grounding sheets reduce inflammation" --formats '[{"layer":2,"name":"Group Chat","format_id":"group-chat"}]'
-  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product" --id <runId>
+  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product"
 `.trim();
 
 interface RecommendResponse {
@@ -73,8 +98,14 @@ export interface RunFormat {
   format_id?: string;
 }
 
+// #1142: `/runs/<id>` is the canonical run link — the forwarder asks the server
+// which family the id belongs to and replaces the URL with that family's real
+// detail page. It therefore covers BOTH ids this file hands out: `run`'s
+// workflow run and `regenerate --id`'s creative-suite run. Hard-coding
+// /creative-suite/runs/ 404'd the first of those. Same prefix `exodus workflow`
+// mints (RUN_PAGE_PREFIX in commands/workflow.ts).
 function dashboardUrlForRun(runId: string): string {
-  return `${getDashboardUrl()}/creative-suite/runs/${runId}`;
+  return `${getDashboardUrl()}/runs/${runId}`;
 }
 
 function flagString(flags: Record<string, string | boolean>, name: string): string | undefined {
@@ -251,7 +282,10 @@ async function runRun(flags: Record<string, string | boolean>): Promise<void> {
   console.log(`  memes:        ${formats.length} queued`);
   console.log(`  dashboard:    ${dashboardUrlForRun(res.data.runId)}`);
   console.log("");
-  console.log(`Poll: exodus status --id ${res.data.runId} --type creative`);
+  // #1142: a meme run IS an Image Rig workflow run, so the workflow status verb
+  // is the honest one to point at (the legacy `status --type creative` still
+  // answers too — see the module header).
+  console.log(`Poll: exodus workflow status --id ${res.data.runId}`);
   console.log("(The batch renders server-side — closing this session won't kill it.)");
 }
 

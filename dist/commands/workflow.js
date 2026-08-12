@@ -18,7 +18,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
@@ -27,12 +27,12 @@ Usage:
   exodus workflow triggers <workflowId|name> [--json]
   exodus workflow triggers <workflowId|name> enable <n> [--json]
   exodus workflow triggers <workflowId|name> disable <n> [--json]
-  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--wait] [--json]
+  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--wait] [--json]
   exodus workflow inbox [--json]
   exodus workflow checkpoint <runId> [show] [--json]
   exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
   exodus workflow checkpoint <runId> approve [--reject <n[,n..]>] [--wait] [--json]
-  exodus workflow checkpoint <runId> retry [--wait] [--json]
+  exodus workflow checkpoint <runId> retry [--note "..."] [--wait] [--json]
   exodus workflow checkpoint <runId> cancel [--reason "..."] [--json]
   exodus workflow repair <runId> retry|skip|kill [--wait] [--json]
   exodus workflow answer <runId> --slot key=value [--slot key=value ...] [--json]
@@ -49,11 +49,16 @@ Flags:
                          them as source "asset") take a local file path instead:
                          --input hero=./photos/hero.png. The CLI uploads the file
                          and sends the stored asset in its place; a leading "@"
-                         is accepted and ignored. Pass an asset id from an
-                         earlier upload to reuse it. Accepted files: image PNG,
-                         JPEG, WebP, GIF (≤15MB) · video MP4, MOV, WebM (≤200MB)
-                         · audio MP3, M4A, WAV, OGG (≤50MB) · document PDF, TXT,
-                         MD, DOC, DOCX (≤25MB).
+                         is accepted and ignored. An http(s) URL is accepted too
+                         (--input hero=https://example.com/hero.png) — the server
+                         fetches and registers it at launch. Pass an asset id
+                         from an earlier upload to reuse it. Accepted files:
+                         image PNG, JPEG, WebP, GIF (≤15MB) · video MP4, MOV,
+                         WebM (≤200MB) · audio MP3, M4A, WAV, OGG (≤50MB) ·
+                         document PDF, TXT, MD, DOC, DOCX (≤25MB).
+                         MULTI-CHOICE fields (describe tags them "multi-select")
+                         take several picks in ONE value, comma-separated:
+                         --input tone=casual,punchy.
   --fill <name>          (run) Launch from a saved fill — a named set of inputs
                          saved on THIS brand's copy of the workflow. Its values
                          become the run's inputs; any --input you also pass wins
@@ -65,9 +70,30 @@ Flags:
                          of these end node(s) — only nodes feeding a picked
                          terminal execute; the rest are recorded out-of-scope.
                          Omit to run the whole graph.
+  --rig-overrides <json> (run, triggers fire) Change what an Image Rig box fires
+                         for THIS ONE run, without editing the saved workflow —
+                         a different number of images, a different meme format,
+                         a different model. Takes a JSON object keyed by the
+                         box's node id, or @path to a .json file holding one:
+                           --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
+                         Add "confirmLargeRun": true beside "lines" to allow a
+                         run over the brand's image safety cap — the same
+                         acknowledgement the tick-box in the app asks for. A box
+                         or line name the workflow doesn't have is refused
+                         before anything runs, and the error names it. On
+                         "triggers fire" it REPLACES the schedule's own
+                         overrides for that one test fire.
+  --auto-approve         (run) Deliberately unattended launch: every Checkpoint
+                         box this run stops at is approved automatically, with
+                         whatever it was holding left exactly as it is, and the
+                         run record marks each stop as auto-approved so you can
+                         see nobody looked. Default is to park and wait for a
+                         person's verdict. This is a choice you make for ONE
+                         launch — it is never a setting on the workflow itself.
   --wait                 Poll until the workflow run reaches a terminal status.
-                         (checkpoint retry) Waits until the step's fresh output
-                         is ready and the run parks again — that IS its finish
+                         (checkpoint retry) Re-runs the step feeding the
+                         Checkpoint box and waits until its fresh output is
+                         ready and the run parks again — that IS its finish
                          line; a redo never runs the workflow to completion.
   --id <runId>           Workflow run id for status detail
   --out <file>           Write the export to a file instead of stdout
@@ -99,7 +125,11 @@ Flags:
   --file <path>          (checkpoint edit) Load the replacement copy from a file.
   --reason "..."         (checkpoint cancel) Optional reason recorded on the
                          cancel.
-  --reject <n[,n..]>     (checkpoint approve) Only for a checkpoint that is
+  --note "..."           (checkpoint retry) Optional correction for the redo
+                         ("make the hook punchier"). Steps that call a model
+                         follow it on the re-run; deterministic steps only
+                         record it on the run's review trail.
+  --reject <n[,n..]>     (checkpoint approve) Only for a Checkpoint box that is
                          reviewing a Splitter fan-out item by item. Drops those
                          ITEM numbers (the "Item N of M" headings in the show
                          listing, 1-based) and approves the rest. Rejecting is
@@ -121,13 +151,18 @@ Examples:
   exodus workflow schema --kind transform
   exodus workflow schema --kind splitter
   exodus workflow schema --kind collector
+  exodus workflow schema --kind checkpoint
   exodus workflow schema --face collector
   exodus workflow run "Launch Flow" --input brief="new offer" --wait
   exodus workflow run "Launch Flow" --input brief=@brief.txt
   exodus workflow run "Product Shots" --input hero=./photos/hero.png --wait
+  exodus workflow run "Product Shots" --input hero=https://example.com/hero.png
   exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
   exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
   exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
+  exodus workflow run "Launch Flow" --auto-approve --wait
+  exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
+  exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status --id wr_123
   exodus workflow status --id wr_123 --out ./deliverables
@@ -146,7 +181,7 @@ Examples:
   exodus workflow checkpoint wr_123 edit 1 --text "tighter opener"
   exodus workflow checkpoint wr_123 approve --wait
   exodus workflow checkpoint wr_123 approve --reject 2,5 --wait
-  exodus workflow checkpoint wr_123 retry --wait
+  exodus workflow checkpoint wr_123 retry --note "make the hook punchier" --wait
   exodus workflow checkpoint wr_123 cancel --reason "wrong direction"
   exodus workflow repair wr_123 retry --wait
   exodus workflow answer wr_123 --slot tone=casual --slot length=short
@@ -162,6 +197,13 @@ Notes:
   its choices, a number, a true/false toggle; a plain text box shows no tag),
   and the author's help text. Supply those keys with --input; a value the
   contract can't accept is rejected before the run starts, naming the field.
+  It also prints the EXIT contract under "Delivers" — the named results a
+  finished run hands back, in the author's order: the slot's label, its key (the
+  name --out files and a webhook key off), what kind of thing it is (text /
+  structured data / file / set of files), and the author's note. A workflow with
+  no Output node says so plainly ("Delivers: nothing — no Output node."), and
+  "workflow run" repeats that as a warning before it spends the run. Against a
+  backend too old to report deliveries the section is omitted entirely.
   "workflow run --fill <name>" launches from a saved fill instead of typing the
   inputs again — the fill's values fill the contract, and any --input you pass
   alongside it overrides just that key.
@@ -173,6 +215,13 @@ Notes:
   deployed against, so what you author matches what will validate; --kind/--face
   narrow it, --json is the machine payload. "workflow validate <file>" checks a
   file against the live backend (it IS import --dry-run under its own door).
+  "workflow run --rig-overrides" re-aims an Image Rig box for ONE run without
+  touching the saved workflow: how many images a line fires, which meme format,
+  which model. Node ids and line keys come from "workflow export" (or the box's
+  panel in the app); anything you name that isn't there stops the launch and the
+  message says which key was wrong. A trigger can carry the same payload in its
+  YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
+  Friday one can fire the same workflow at different sizes.
   workflow triggers are addressed by 1-based position — a trigger carries no id,
   so the CLI reads the live list from the export contract and sends a fingerprint
   of the trigger's fields as the guard; a concurrent edit fails loud rather than
@@ -190,10 +239,12 @@ Notes:
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
   workflow inbox lists every run parked waiting on you, badged by park kind
-  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A run parked
-  at a checkpoint is resolved with the "checkpoint" verbs: show what the step
-  produced, edit one output in place (edit 1 --text ...), approve (resume),
-  retry (re-run just that step), or cancel. A require-all collector that stalled
+  (checkpoint/repair/slots/gate/legacy) and how it started (bg / trig:<event>).
+  A run parked at a Checkpoint box is resolved with the "checkpoint" verbs: show
+  what is waiting there, edit one output in place (edit 1 --text ...), approve
+  (resume), retry (re-run the step feeding the box), or cancel. A Checkpoint is
+  its own box on the canvas, sitting on a wire between two steps, so the diagram
+  shows exactly where a run will stop. A require-all collector that stalled
   on a dead input is a "repair" park — retry it, skip the dead input, or kill the
   run. A nested sub-workflow waiting on inputs is a "slots" park — answer it with
   repeatable --slot key=value flags (run "answer" with no --slot to list the slot
@@ -242,6 +293,8 @@ const VALUE_FLAGS = new Set([
     "reason",
     "slot",
     "reject",
+    "rig-overrides",
+    "note",
 ]);
 function defaultMkdirp(dir) {
     fs.mkdirSync(dir, { recursive: true });
@@ -376,7 +429,7 @@ function gateParkedNodeId(status, pauseReason, pausedNodeId) {
     }
     return undefined;
 }
-const RETIRED_GATE_VERB_POINTER = "The Gate node retired in 2.0 — runs now pause with the checkpoint switch on a node. " +
+const RETIRED_GATE_VERB_POINTER = "The Gate node retired in 2.0 — runs now pause at a Checkpoint box on the canvas. " +
     "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
 export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     if (!pauseReason) {
@@ -389,14 +442,14 @@ export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     }
     if (pauseReason === "checkpoint") {
         return [
-            "  ⏸ paused at a checkpoint — a step's output is waiting on your approval.",
+            "  ⏸ paused at a checkpoint — what's flowing through it is waiting on your approval.",
             `     Resolve here:  exodus workflow checkpoint ${runId}`,
             `     Or in the app: ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
         ];
     }
     if (pauseReason === "taste") {
         return [
-            "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen with the checkpoint switch.",
+            "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen at a Checkpoint box.",
             `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
             `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
             "     Then run the workflow again.",
@@ -431,6 +484,13 @@ function expandInputValue(key, value, readFile) {
         }
     }
     return value;
+}
+function normalizeMultiValue(value) {
+    return value
+        .split(",")
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0)
+        .join(", ");
 }
 export function parseRawInputFlags(args) {
     const inputs = {};
@@ -626,6 +686,41 @@ function looksLikeFileArgument(value, deps) {
         return false;
     return looksLikePath(value);
 }
+export const NO_DELIVERIES_WARNING = "Warning: this workflow has no Output node — the run will finish with no named " +
+    "deliveries (nothing for --out to save, and nothing to send to a webhook).";
+export function noDeliveriesWarning(described) {
+    if (!isRecord(described))
+        return undefined;
+    const deliveries = described["deliveries"];
+    if (Array.isArray(deliveries)) {
+        return deliveries.length === 0 ? NO_DELIVERIES_WARNING : undefined;
+    }
+    return undefined;
+}
+export function serverWarningsToPrint(serverWarnings, alreadyPrinted) {
+    if (!Array.isArray(serverWarnings))
+        return [];
+    const key = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const printedKeys = new Set(alreadyPrinted.map(key));
+    const saidNoDeliveries = alreadyPrinted.includes(NO_DELIVERIES_WARNING);
+    const out = [];
+    for (const raw of serverWarnings) {
+        if (typeof raw !== "string")
+            continue;
+        const text = raw.trim();
+        if (text === "")
+            continue;
+        const k = key(text);
+        if (printedKeys.has(k))
+            continue;
+        if (saidNoDeliveries && (k.includes("no output node") || k.includes("no named deliver"))) {
+            continue;
+        }
+        printedKeys.add(k);
+        out.push(text);
+    }
+    return out;
+}
 async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
     const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
     if (!described.ok) {
@@ -640,21 +735,29 @@ async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
         for (const [key, value] of Object.entries(raw)) {
             text[key] = expandInputValue(key, value, deps.readFile);
         }
-        return text;
+        return { inputs: text, warnings: [] };
     }
+    const warnings = [];
+    const noDeliveries = noDeliveriesWarning(described.data);
+    if (noDeliveries)
+        warnings.push(noDeliveries);
     const descriptors = described.data.inputs ?? [];
     const assetFields = new Map();
+    const multiFields = new Set();
     for (const descriptor of descriptors) {
         if (descriptor?.source === "asset")
             assetFields.set(descriptor.fieldName, descriptor);
+        if (descriptor?.type === "multi-select")
+            multiFields.add(descriptor.fieldName);
     }
     if (!scoped) {
         const missing = [...assetFields.values()].filter((d) => d.required && (raw[d.fieldName] ?? "").trim() === "");
         if (missing.length > 0) {
             const names = missing.map((d) => d.fieldName).join(", ");
             const first = missing[0];
-            throw new Error(`Missing required file input(s): ${names}. Pass each one as a local file — ` +
-                `e.g. --input ${first.fieldName}=./path/to/file` +
+            throw new Error(`Missing required file input(s): ${names}. Pass each one as a local file ` +
+                `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
+                `--input ${first.fieldName}=https://…` +
                 (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""));
         }
     }
@@ -665,11 +768,18 @@ async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
         const descriptor = assetFields.get(key);
         if (!descriptor) {
             try {
-                prepared[key] = expandInputValue(key, value, deps.readFile);
+                const expanded = expandInputValue(key, value, deps.readFile);
+                prepared[key] = multiFields.has(key)
+                    ? normalizeMultiValue(expanded)
+                    : expanded;
             }
             catch (e) {
                 problems.push(e instanceof Error ? e.message : String(e));
             }
+            continue;
+        }
+        if (/^https?:\/\//i.test(value)) {
+            prepared[key] = value;
             continue;
         }
         const hinted = value.startsWith("@");
@@ -706,7 +816,7 @@ async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
         prepared[plan.field] = uploaded.assetId;
         done.push({ field: plan.field, assetId: uploaded.assetId });
     }
-    return prepared;
+    return { inputs: prepared, warnings };
 }
 export function parseTerminalFlags(args) {
     const ids = [];
@@ -731,6 +841,73 @@ export function parseTerminalFlags(args) {
         ids.push(id);
     }
     return ids;
+}
+export function parseAutoApproveFlag(args) {
+    for (const arg of args) {
+        if (arg === "--auto-approve")
+            return true;
+        if (arg.startsWith("--auto-approve=")) {
+            throw new Error("--auto-approve takes no value — pass it bare");
+        }
+    }
+    return false;
+}
+export function parseRigOverridesFlag(args, readFile) {
+    let raw;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        let value;
+        if (arg === "--rig-overrides") {
+            value = args[i + 1];
+            i++;
+        }
+        else if (arg.startsWith("--rig-overrides=")) {
+            value = arg.slice("--rig-overrides=".length);
+        }
+        else {
+            continue;
+        }
+        if (value === undefined || value.startsWith("--")) {
+            throw new Error("--rig-overrides requires JSON or @path/to/file.json");
+        }
+        raw = value;
+    }
+    if (raw === undefined)
+        return undefined;
+    let text = raw.trim();
+    if (!text)
+        throw new Error("--rig-overrides requires JSON or @path/to/file.json");
+    if (text.startsWith("@@")) {
+        text = text.slice(1);
+    }
+    else if (text.startsWith("@")) {
+        const filePath = text.slice(1);
+        if (!filePath) {
+            throw new Error("--rig-overrides @<file> needs a file path after \"@\"");
+        }
+        if (!readFile) {
+            throw new Error(`--rig-overrides: cannot load @${filePath} here (no file access)`);
+        }
+        try {
+            text = readFile(filePath);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`--rig-overrides: could not read file "${filePath}": ${msg}`);
+        }
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`--rig-overrides is not valid JSON: ${msg}`);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("--rig-overrides must be a JSON object keyed by Image Rig node id, e.g. '{\"rig_1\":{\"lines\":{\"line_1\":{\"count\":3}}}}'");
+    }
+    return parsed;
 }
 export function parseFillFlag(args) {
     let name;
@@ -857,6 +1034,9 @@ export function formatWorkflowRun(run) {
     if (Object.keys(run.inputs ?? {}).length > 0) {
         const inputs = Object.entries(run.inputs).map(([k, v]) => `${k}=${v}`).join(", ");
         lines.push(`inputs:       ${inputs}`);
+    }
+    if (run.autoApprovals && run.autoApprovals.length > 0) {
+        lines.push(`auto-approved: ${run.autoApprovals.length} checkpoint stop${run.autoApprovals.length === 1 ? "" : "s"} (${run.autoApprovals.map((a) => a.nodeId).join(", ")}) — launched with --auto-approve, nobody reviewed these`);
     }
     const parkedNodeId = gateParkedNodeId(run.status, run.pauseReason, run.pausedNodeId);
     if (run.nodes.length > 0) {
@@ -1048,13 +1228,51 @@ export async function saveDeliveries(run, dir, deps) {
     return { lines, paths };
 }
 function inputValueHint(input) {
+    const open = input.allowOther ? ", or your own answer" : "";
     if (input.type === "select") {
         const options = input.options ?? [];
-        return options.length > 0 ? `one of: ${options.join(", ")}` : undefined;
+        return options.length > 0 ? `one of: ${options.join(", ")}${open}` : undefined;
+    }
+    if (input.type === "multi-select") {
+        const options = input.options ?? [];
+        return options.length > 0
+            ? `one or more of: ${options.join(", ")} (comma-separated)${open}`
+            : undefined;
     }
     if (input.type === "toggle")
         return "true or false";
     return undefined;
+}
+export function deliveryTypeWord(type) {
+    switch (type) {
+        case "text":
+            return "text";
+        case "structured":
+            return "structured data";
+        case "asset":
+            return "file";
+        case "collection":
+            return "set of files";
+        default:
+            return type;
+    }
+}
+export function deliveryContractLines(deliveries) {
+    if (deliveries === undefined)
+        return [];
+    if (deliveries.length === 0)
+        return ["Delivers: nothing — no Output node."];
+    const lines = [`Delivers (${deliveries.length}):`];
+    const ordered = deliveries
+        .map((delivery, index) => ({ delivery, index }))
+        .sort((a, b) => (a.delivery.order ?? a.index) - (b.delivery.order ?? b.index) || a.index - b.index)
+        .map((entry) => entry.delivery);
+    for (const delivery of ordered) {
+        lines.push(`  ${delivery.label} (${delivery.key}) — ${deliveryTypeWord(delivery.type)}`);
+        if (delivery.description)
+            lines.push(`      ${delivery.description}`);
+    }
+    return lines;
 }
 export function formatDescribe(res) {
     const lines = [];
@@ -1074,7 +1292,8 @@ export function formatDescribe(res) {
             const type = input.type && input.type !== "text" ? ` (${input.type})` : "";
             const bundle = input.bundleSize !== undefined ? `, bundle=${input.bundleSize}` : "";
             const family = input.source === "asset" && input.assetType ? ` (${input.assetType})` : "";
-            lines.push(`  ${input.fieldName} — ${input.source}${family}${type}, ${req}${bundle}`);
+            const label = input.label ? ` (${input.label})` : "";
+            lines.push(`  ${input.fieldName}${label} — ${input.source}${family}${type}, ${req}${bundle}`);
             const hint = inputValueHint(input);
             if (hint)
                 lines.push(`      ${hint}`);
@@ -1110,6 +1329,11 @@ export function formatDescribe(res) {
             const slug = output.botSlug ? ` (${output.botSlug})` : "";
             lines.push(`  ${output.label} [${output.type}]${slug}`);
         }
+    }
+    const delivers = deliveryContractLines(res.deliveries);
+    if (delivers.length > 0) {
+        lines.push("");
+        lines.push(...delivers);
     }
     return lines.join("\n");
 }
@@ -1476,9 +1700,9 @@ export async function runFlow(workflowRef, opts, deps) {
     }
     const preface = [];
     const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
-    let inputs;
+    let prepared;
     try {
-        inputs = await prepareRunInputs(workflowId, opts.inputs, deps, (line) => {
+        prepared = await prepareRunInputs(workflowId, opts.inputs, deps, (line) => {
             if (opts.json)
                 return;
             if (opts.onProgressLine)
@@ -1497,6 +1721,12 @@ export async function runFlow(workflowRef, opts, deps) {
                 : [...preface, message],
         };
     }
+    const inputs = prepared.inputs;
+    const warned = [];
+    for (const warning of prepared.warnings) {
+        warned.push(warning);
+        opts.onWarningLine?.(warning);
+    }
     const body = {
         workflowId,
         ...(Object.keys(inputs).length > 0 ? { inputs } : {}),
@@ -1504,11 +1734,18 @@ export async function runFlow(workflowRef, opts, deps) {
         ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
             ? { terminalNodeIds: opts.terminalNodeIds }
             : {}),
+        ...(opts.autoApprove === true ? { autoApprove: true } : {}),
+        ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
+        launchedVia: "cli",
     };
     const start = await deps.post(RUN_PATH, body);
     if (!start.ok)
         return asErrorResult(start, opts.json);
     const data = start.data;
+    for (const warning of serverWarningsToPrint(data?.warnings, warned)) {
+        warned.push(warning);
+        opts.onWarningLine?.(warning);
+    }
     const base = { ...data, workflowId };
     if (opts.json && !opts.wait)
         return { code: 0, lines: [JSON.stringify(base)] };
@@ -1935,6 +2172,9 @@ export async function triggersFireFlow(workflowRef, opts, deps) {
         triggerIndex: idx,
         expect: triggerExpect(t),
         ...(opts.text !== undefined ? { text: opts.text } : {}),
+        ...(opts.imageRigOverrides
+            ? { imageRigOverrides: opts.imageRigOverrides }
+            : {}),
     });
     if (!res.ok)
         return triggerErrorResult(res, verb, opts.json);
@@ -2276,7 +2516,7 @@ export async function checkpointShowFlow(runId, opts, deps) {
             `runId:      ${runId}`,
             `step:       ${stepLabel}`,
             "",
-            "This step is done and the run is holding here until you say go.",
+            "The run is holding at this checkpoint until you say go.",
             "",
             ...itemsNote,
             `Its output (${outputs.length}):`,
@@ -2388,11 +2628,15 @@ export async function checkpointRetryFlow(runId, opts, deps) {
     const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint retry", opts.json, deps);
     if (!pf.ok)
         return pf.result;
-    const res = await deps.post(CHECKPOINT_RETRY_PATH, { runId });
+    const note = opts.note?.trim();
+    const res = await deps.post(CHECKPOINT_RETRY_PATH, {
+        runId,
+        ...(note ? { note } : {}),
+    });
     if (!res.ok)
         return triggerErrorResult(res, "workflow checkpoint retry", opts.json);
     const triggerRunId = res.data.triggerRunId;
-    return resumeAndMaybeWait(runId, triggerRunId, ["Redoing the step — its old output is discarded."], opts, deps, {
+    return resumeAndMaybeWait(runId, triggerRunId, ["Redoing the step that feeds this checkpoint — its old output is discarded."], opts, deps, {
         pauseReason: "checkpoint",
         headline: "  ⏸ The step re-ran — its fresh output is waiting on your approval.",
     });
@@ -2606,16 +2850,20 @@ export async function run(flags) {
         const workflowRef = rest[0];
         if (!workflowRef) {
             console.error("Error: workflow run requires <workflowId|name>.");
-            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--wait] [--json]");
+            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--auto-approve] [--wait] [--json]");
             process.exit(1);
         }
         let inputs;
         let terminalNodeIds;
         let fill;
+        let autoApprove;
+        let imageRigOverrides;
         try {
             inputs = parseRawInputFlags(process.argv.slice(3));
             terminalNodeIds = parseTerminalFlags(process.argv.slice(3));
             fill = parseFillFlag(process.argv.slice(3));
+            autoApprove = parseAutoApproveFlag(process.argv.slice(3));
+            imageRigOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -2625,10 +2873,13 @@ export async function run(flags) {
             inputs,
             terminalNodeIds,
             fill,
+            autoApprove,
+            imageRigOverrides,
             wait: flags["wait"] === true,
             json,
             out: flagString(flags, "out"),
             onProgressLine: (line) => console.log(line),
+            onWarningLine: (line) => console.error(line),
         }, defaultDeps));
     }
     if (sub === "status") {
@@ -2708,7 +2959,14 @@ export async function run(flags) {
             }, defaultDeps));
         }
         if (action === "retry") {
-            return printResult(await checkpointRetryFlow(runId, { wait: flags["wait"] === true, json, onProgressLine: (line) => console.log(line) }, defaultDeps));
+            return printResult(await checkpointRetryFlow(runId, {
+                wait: flags["wait"] === true,
+                json,
+                ...(flags["note"] !== undefined
+                    ? { note: flagString(flags, "note") }
+                    : {}),
+                onProgressLine: (line) => console.log(line),
+            }, defaultDeps));
         }
         if (action === "cancel") {
             return printResult(await checkpointCancelFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps));
@@ -2776,9 +3034,18 @@ export async function run(flags) {
                     process.exit(1);
                 }
             }
+            let fireOverrides;
+            try {
+                fireOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
+            }
+            catch (e) {
+                console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+                process.exit(1);
+            }
             return printResult(await triggersFireFlow(workflowRef, {
                 n,
                 text: flagString(flags, "text"),
+                imageRigOverrides: fireOverrides,
                 wait: flags["wait"] === true,
                 json,
                 onProgressLine: (line) => console.log(line),

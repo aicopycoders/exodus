@@ -19,11 +19,14 @@ Flow:
   2. run        → pass the picked recommendation objects straight into --formats
                   (a JSON array; both recommendation-shape and run-shape entries
                   are accepted, 1–50). Returns { runId } — the whole batch renders
-                  server-side via Trigger.dev; closing your session won't kill it.
-  3. poll       → exodus status --id <runId> --type creative
-                  (terminal: complete | partial-error | error)
+                  server-side; closing your session won't kill it.
+  3. poll       → exodus workflow status --id <runId>
+                  Memes render through the Image Rig now, so a meme run IS a
+                  workflow run — the workflow verb is the one that can read it.
   4. regenerate → re-render a single miss using the format fields from the
                   recommend output. Synchronous; returns the new image URL.
+                  Its optional --id takes a CREATIVE-SUITE run id, which the id
+                  from step 2 is not — omit --id and use the returned URL.
 
 Keys (strict BYOK — checked server-side before anything starts):
   classic (layer 1) memes need your Imgflip login; AI (layer 2/3) memes need
@@ -32,10 +35,10 @@ Keys (strict BYOK — checked server-side before anything starts):
 Examples:
   exodus meme recommend --brief "grounding sheets reduce inflammation"
   exodus meme run --brief "grounding sheets reduce inflammation" --formats '[{"layer":2,"name":"Group Chat","format_id":"group-chat"}]'
-  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product" --id <runId>
+  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product"
 `.trim();
 function dashboardUrlForRun(runId) {
-    return `${getDashboardUrl()}/creative-suite/runs/${runId}`;
+    return `${getDashboardUrl()}/runs/${runId}`;
 }
 function flagString(flags, name) {
     const v = flags[name];
@@ -185,7 +188,7 @@ async function runRun(flags) {
     console.log(`  memes:        ${formats.length} queued`);
     console.log(`  dashboard:    ${dashboardUrlForRun(res.data.runId)}`);
     console.log("");
-    console.log(`Poll: exodus status --id ${res.data.runId} --type creative`);
+    console.log(`Poll: exodus workflow status --id ${res.data.runId}`);
     console.log("(The batch renders server-side — closing this session won't kill it.)");
 }
 async function runRegenerate(flags) {

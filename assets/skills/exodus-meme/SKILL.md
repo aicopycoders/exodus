@@ -4,11 +4,11 @@ description: Generate meme-style ad creative for the active brand — recommends
 ---
 
 ```operator-guide
-Subcommands (three; the batch renders server-side via Trigger.dev):
+Subcommands (three; the batch renders server-side):
   exodus meme recommend --brief "<text>" [--avatar "<text>"]
   exodus meme run --brief "<text>" --formats '<json>' [--formats-file <path>] [--avatar "<text>"] [--name "<label>"]
-  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <runId>]
-  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <runId>]
+  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N>
+  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"]
 
 Flow:
   1. recommend → { recommendations: [...] } — 15 picks (5 per layer), each with
@@ -17,14 +17,17 @@ Flow:
   2. run → pass the picked recommendation objects straight into --formats (JSON
      array, 1–50; the CLI normalizes them). Returns { runId }. One enqueue —
      closing the session does NOT kill the batch.
-  3. Poll: exodus status --id <runId> --type creative
-     Terminal statuses: complete | partial-error | error (also failed/cancelled).
-  4. regenerate → re-render one miss, synchronously (returns image_url).
+  3. Poll: exodus workflow status --id <runId>
+     Memes render through the Image Rig, so a meme run IS a workflow run — the
+     workflow verb is the one that can read it, NOT `status --type creative`.
+  4. regenerate → re-render one miss, synchronously (returns image_url). Do not
+     pass its optional --id the run id from step 2 — that flag takes a
+     creative-suite run id, a different id space.
 
 Keys (strict BYOK, refused server-side before anything starts):
   layer 1 needs the member's Imgflip login · layers 2/3 need their Kie.ai key ·
   captions always need their LLM key. `npx @aicopycoders/exodus doctor` checks all three.
-Returns: runId + dashboard URL /creative-suite/runs/<runId> (the visual review surface).
+Returns: runId + dashboard URL /runs/<runId> (the visual review surface).
 ```
 
 # Meme — Meme Ad Generator (Max's pipeline)
@@ -111,38 +114,43 @@ session and the run finishes anyway.
 ### 3. Poll
 
 ```bash
-npx @aicopycoders/exodus status --id <runId> --type creative
+npx @aicopycoders/exodus workflow status --id <runId>
 ```
+
+Memes render through the Image Rig, so a meme run **is** a workflow run — the
+workflow status verb reads it. `status --type creative` will not find it.
 
 Poll roughly every 45 seconds while the user is waiting (or just hand them the
 dashboard URL if they'd rather watch it live). Treat these statuses as
-terminal: `complete`, `partial-error`, `error` — plus `failed`/`cancelled`. The
-status output includes `completedImages / totalImages` and, on failures, an
-`errorMessage` naming what missed.
+terminal: `succeeded`, `succeeded-with-warnings`, `failed`, `cancelled`. A
+warnings verdict is the meme batch's old `partial-error` — some memes landed,
+some missed, and the node detail names what missed.
 
 ### 4. Regenerate the misses
 
-`partial-error` means some renders failed and the rest landed. Name the misses
-to the user and offer to re-render them — the format fields come from the
-recommend output you're still holding:
+"Succeeded with warnings" means some renders failed and the rest landed. Name
+the misses to the user and offer to re-render them — the format fields come from
+the recommend output you're still holding:
 
 ```bash
 # Classic (layer 1) miss:
 npx @aicopycoders/exodus meme regenerate --brief "<brief>" --layer 1 \
-  --template-id <imgflip_template_id> --template-name "<name>" --boxes <imgflip_box_count> --id <runId>
+  --template-id <imgflip_template_id> --template-name "<name>" --boxes <imgflip_box_count>
 
 # AI (layer 2/3) miss — --hint steers the re-roll:
 npx @aicopycoders/exodus meme regenerate --brief "<brief>" --layer 2 --format <format_id> \
-  --hint "make the punchline land the product" --id <runId>
+  --hint "make the punchline land the product"
 ```
 
-Regenerate is synchronous (caption + render server-side) and
-returns the new `image_url` directly. Passing `--id <runId>` attaches the fresh
-meme to the run so it shows up in the same library entry.
+Regenerate is synchronous (caption + render server-side) and returns the new
+`image_url` directly. **Do not pass the run id from step 2 to `--id`** — that
+flag attaches the fresh meme to a *creative-suite* run, and since memes moved
+onto the Image Rig the id `run` prints is a workflow run id, a different id
+space. Omit `--id` and hand the user the returned URL.
 
 ### 5. Report
 
-Surface the dashboard URL (`/creative-suite/runs/<runId>`) + a 2-line
+Surface the dashboard URL (`/runs/<runId>`) + a 2-line
 strategist take ("the classics carry the relatability, the Group Chat one is
 the sleeper — review them in the library"). The dashboard is where the user
 actually evaluates memes visually; your report gets them there with a point of
@@ -157,9 +165,9 @@ internals into chat.
   `npx @aicopycoders/exodus doctor` to confirm, then send the user to **Settings → Keys** on
   the dashboard. A batch with no layer-1 picks doesn't need Imgflip at all — if
   the user lacks an Imgflip login, an AI-only batch is a legitimate fallback.
-- **`partial-error`** — not a failed run; some memes landed. Report the
-  successes, name the misses from `errorMessage`, regenerate per step 4.
-- **`error` / `failed`** — the batch died; the status `errorMessage` says why.
+- **`succeeded-with-warnings`** — not a failed run; some memes landed. Report the
+  successes, name the misses from the node detail, regenerate per step 4.
+- **`failed` / `cancelled`** — the batch died; the status error says why.
   Fix the cause (usually a key issue mid-run) before re-firing, don't just retry.
 - **No progress for 15+ minutes** — presume the run dead and say so rather than
   polling forever; the dashboard run page shows the same stall.
@@ -176,8 +184,16 @@ internals into chat.
 
 ## Admin
 
-- Backend: `/api/meme/{recommend,run,regenerate}` (Bearer-auth). `run` enqueues
-  the `meme-batch` Trigger.dev task; meme runs ride `creativeSuiteRuns` with
-  engine `meme`, which is why `exodus status --type creative` and
-  `exodus browse --agent meme` cover them.
-- Finished runs appear in the creative-suite library alongside other engines.
+- Backend: `/api/meme/{recommend,run,regenerate}` (Bearer-auth). Since #1142
+  `run` is an ADAPTER onto the Image Rig: it compiles the picked formats into a
+  firing plan and starts a hidden, per-workspace single-rig workflow, so the id
+  it returns names a `workflowRuns` row and every meme now carries the same
+  per-image provenance as any other rig render. That is why the poll verb is
+  `exodus workflow status`, not `exodus status --type creative` — the creative
+  status route reads `creativeSuiteRuns` for a Bearer caller.
+- The rig's child image runs are still `creativeSuiteRuns` with engine `meme`,
+  so finished memes appear in the creative-suite library alongside other engines
+  and `exodus browse --agent meme` still covers them.
+- `run` accepts only the two models the rig renders (`gpt-image-2`,
+  `nano-banana-pro`, or their Kie slugs); anything else is a 400 listing the
+  accepted values. It used to accept any value and silently ignore it.

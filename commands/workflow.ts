@@ -35,7 +35,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
@@ -44,12 +44,12 @@ Usage:
   exodus workflow triggers <workflowId|name> [--json]
   exodus workflow triggers <workflowId|name> enable <n> [--json]
   exodus workflow triggers <workflowId|name> disable <n> [--json]
-  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--wait] [--json]
+  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--wait] [--json]
   exodus workflow inbox [--json]
   exodus workflow checkpoint <runId> [show] [--json]
   exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
   exodus workflow checkpoint <runId> approve [--reject <n[,n..]>] [--wait] [--json]
-  exodus workflow checkpoint <runId> retry [--wait] [--json]
+  exodus workflow checkpoint <runId> retry [--note "..."] [--wait] [--json]
   exodus workflow checkpoint <runId> cancel [--reason "..."] [--json]
   exodus workflow repair <runId> retry|skip|kill [--wait] [--json]
   exodus workflow answer <runId> --slot key=value [--slot key=value ...] [--json]
@@ -66,11 +66,16 @@ Flags:
                          them as source "asset") take a local file path instead:
                          --input hero=./photos/hero.png. The CLI uploads the file
                          and sends the stored asset in its place; a leading "@"
-                         is accepted and ignored. Pass an asset id from an
-                         earlier upload to reuse it. Accepted files: image PNG,
-                         JPEG, WebP, GIF (≤15MB) · video MP4, MOV, WebM (≤200MB)
-                         · audio MP3, M4A, WAV, OGG (≤50MB) · document PDF, TXT,
-                         MD, DOC, DOCX (≤25MB).
+                         is accepted and ignored. An http(s) URL is accepted too
+                         (--input hero=https://example.com/hero.png) — the server
+                         fetches and registers it at launch. Pass an asset id
+                         from an earlier upload to reuse it. Accepted files:
+                         image PNG, JPEG, WebP, GIF (≤15MB) · video MP4, MOV,
+                         WebM (≤200MB) · audio MP3, M4A, WAV, OGG (≤50MB) ·
+                         document PDF, TXT, MD, DOC, DOCX (≤25MB).
+                         MULTI-CHOICE fields (describe tags them "multi-select")
+                         take several picks in ONE value, comma-separated:
+                         --input tone=casual,punchy.
   --fill <name>          (run) Launch from a saved fill — a named set of inputs
                          saved on THIS brand's copy of the workflow. Its values
                          become the run's inputs; any --input you also pass wins
@@ -82,9 +87,30 @@ Flags:
                          of these end node(s) — only nodes feeding a picked
                          terminal execute; the rest are recorded out-of-scope.
                          Omit to run the whole graph.
+  --rig-overrides <json> (run, triggers fire) Change what an Image Rig box fires
+                         for THIS ONE run, without editing the saved workflow —
+                         a different number of images, a different meme format,
+                         a different model. Takes a JSON object keyed by the
+                         box's node id, or @path to a .json file holding one:
+                           --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
+                         Add "confirmLargeRun": true beside "lines" to allow a
+                         run over the brand's image safety cap — the same
+                         acknowledgement the tick-box in the app asks for. A box
+                         or line name the workflow doesn't have is refused
+                         before anything runs, and the error names it. On
+                         "triggers fire" it REPLACES the schedule's own
+                         overrides for that one test fire.
+  --auto-approve         (run) Deliberately unattended launch: every Checkpoint
+                         box this run stops at is approved automatically, with
+                         whatever it was holding left exactly as it is, and the
+                         run record marks each stop as auto-approved so you can
+                         see nobody looked. Default is to park and wait for a
+                         person's verdict. This is a choice you make for ONE
+                         launch — it is never a setting on the workflow itself.
   --wait                 Poll until the workflow run reaches a terminal status.
-                         (checkpoint retry) Waits until the step's fresh output
-                         is ready and the run parks again — that IS its finish
+                         (checkpoint retry) Re-runs the step feeding the
+                         Checkpoint box and waits until its fresh output is
+                         ready and the run parks again — that IS its finish
                          line; a redo never runs the workflow to completion.
   --id <runId>           Workflow run id for status detail
   --out <file>           Write the export to a file instead of stdout
@@ -116,7 +142,11 @@ Flags:
   --file <path>          (checkpoint edit) Load the replacement copy from a file.
   --reason "..."         (checkpoint cancel) Optional reason recorded on the
                          cancel.
-  --reject <n[,n..]>     (checkpoint approve) Only for a checkpoint that is
+  --note "..."           (checkpoint retry) Optional correction for the redo
+                         ("make the hook punchier"). Steps that call a model
+                         follow it on the re-run; deterministic steps only
+                         record it on the run's review trail.
+  --reject <n[,n..]>     (checkpoint approve) Only for a Checkpoint box that is
                          reviewing a Splitter fan-out item by item. Drops those
                          ITEM numbers (the "Item N of M" headings in the show
                          listing, 1-based) and approves the rest. Rejecting is
@@ -138,13 +168,18 @@ Examples:
   exodus workflow schema --kind transform
   exodus workflow schema --kind splitter
   exodus workflow schema --kind collector
+  exodus workflow schema --kind checkpoint
   exodus workflow schema --face collector
   exodus workflow run "Launch Flow" --input brief="new offer" --wait
   exodus workflow run "Launch Flow" --input brief=@brief.txt
   exodus workflow run "Product Shots" --input hero=./photos/hero.png --wait
+  exodus workflow run "Product Shots" --input hero=https://example.com/hero.png
   exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
   exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
   exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
+  exodus workflow run "Launch Flow" --auto-approve --wait
+  exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
+  exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status --id wr_123
   exodus workflow status --id wr_123 --out ./deliverables
@@ -163,7 +198,7 @@ Examples:
   exodus workflow checkpoint wr_123 edit 1 --text "tighter opener"
   exodus workflow checkpoint wr_123 approve --wait
   exodus workflow checkpoint wr_123 approve --reject 2,5 --wait
-  exodus workflow checkpoint wr_123 retry --wait
+  exodus workflow checkpoint wr_123 retry --note "make the hook punchier" --wait
   exodus workflow checkpoint wr_123 cancel --reason "wrong direction"
   exodus workflow repair wr_123 retry --wait
   exodus workflow answer wr_123 --slot tone=casual --slot length=short
@@ -179,6 +214,13 @@ Notes:
   its choices, a number, a true/false toggle; a plain text box shows no tag),
   and the author's help text. Supply those keys with --input; a value the
   contract can't accept is rejected before the run starts, naming the field.
+  It also prints the EXIT contract under "Delivers" — the named results a
+  finished run hands back, in the author's order: the slot's label, its key (the
+  name --out files and a webhook key off), what kind of thing it is (text /
+  structured data / file / set of files), and the author's note. A workflow with
+  no Output node says so plainly ("Delivers: nothing — no Output node."), and
+  "workflow run" repeats that as a warning before it spends the run. Against a
+  backend too old to report deliveries the section is omitted entirely.
   "workflow run --fill <name>" launches from a saved fill instead of typing the
   inputs again — the fill's values fill the contract, and any --input you pass
   alongside it overrides just that key.
@@ -190,6 +232,13 @@ Notes:
   deployed against, so what you author matches what will validate; --kind/--face
   narrow it, --json is the machine payload. "workflow validate <file>" checks a
   file against the live backend (it IS import --dry-run under its own door).
+  "workflow run --rig-overrides" re-aims an Image Rig box for ONE run without
+  touching the saved workflow: how many images a line fires, which meme format,
+  which model. Node ids and line keys come from "workflow export" (or the box's
+  panel in the app); anything you name that isn't there stops the launch and the
+  message says which key was wrong. A trigger can carry the same payload in its
+  YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
+  Friday one can fire the same workflow at different sizes.
   workflow triggers are addressed by 1-based position — a trigger carries no id,
   so the CLI reads the live list from the export contract and sends a fingerprint
   of the trigger's fields as the guard; a concurrent edit fails loud rather than
@@ -207,10 +256,12 @@ Notes:
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
   workflow inbox lists every run parked waiting on you, badged by park kind
-  (gate/repair/slots/legacy) and how it started (bg / trig:<event>). A run parked
-  at a checkpoint is resolved with the "checkpoint" verbs: show what the step
-  produced, edit one output in place (edit 1 --text ...), approve (resume),
-  retry (re-run just that step), or cancel. A require-all collector that stalled
+  (checkpoint/repair/slots/gate/legacy) and how it started (bg / trig:<event>).
+  A run parked at a Checkpoint box is resolved with the "checkpoint" verbs: show
+  what is waiting there, edit one output in place (edit 1 --text ...), approve
+  (resume), retry (re-run the step feeding the box), or cancel. A Checkpoint is
+  its own box on the canvas, sitting on a wire between two steps, so the diagram
+  shows exactly where a run will stop. A require-all collector that stalled
   on a dead input is a "repair" park — retry it, skip the dead input, or kill the
   run. A nested sub-workflow waiting on inputs is a "slots" park — answer it with
   repeatable --slot key=value flags (run "answer" with no --slot to list the slot
@@ -227,7 +278,13 @@ Notes:
 // in __tests__/workflow.test.ts stay type-compatible with the widened convex
 // contract.
 export type WorkflowNodeKind =
+  // #1072: the ONE-QUESTION input (titled "Input" in the app). The wire name
+  // stays "brief" forever so every saved graph keeps loading.
   | "brief"
+  // #1072: the real Brief — a multi-field intake FORM. Mirror of convex
+  // NODE_KINDS. Each declared row is its own launch key, so the CLI keeps
+  // addressing them exactly as it always has (`--input key=value`).
+  | "brief-form"
   // The Asset Input node — mirror of convex NODE_KINDS. A source node whose
   // run-launch value is ONE uploaded file.
   | "asset"
@@ -245,8 +302,8 @@ export type WorkflowNodeKind =
   | "voiceover"
   | "output"
   // #1012: "push" and "gate" RETIRED in 2.0 — mirror of the same removal in
-  // convex NODE_KINDS. Loops (bot config.loops) replaced Push; the checkpoint
-  // switch (config.checkpoint) replaced Gate.
+  // convex NODE_KINDS. Loops (bot config.loops) replaced Push; the Checkpoint
+  // node ("checkpoint", below) replaced Gate.
   // #861 (MS-7): the Call node — mirror of convex NODE_KINDS.
   | "call"
   // #603 Video-module member-gate kinds (module templates only — the CLI
@@ -264,7 +321,20 @@ export type WorkflowNodeKind =
   // #1020: the Collector node — mirror of convex NODE_KINDS. Closes a
   // Splitter's open fan back into one artifact. Name-collides on purpose with
   // the retired `collector` TRANSFORM FACE (the node replaces it).
-  | "collector";
+  | "collector"
+  // #1069: the Checkpoint node — mirror of convex NODE_KINDS. The
+  // pause-for-approval as a box on a wire; it retires the per-node
+  // `config.checkpoint` switch, which old graphs auto-convert away at every
+  // door. (The `workflow checkpoint` verb cluster keys on the run's pauseReason
+  // and is unchanged by this.)
+  | "checkpoint"
+  // #1073: the Prompt node — mirror of convex NODE_KINDS. "The prompt IS the
+  // bot", promoted from a bot slug to a kind of its own: one provider call on
+  // the workspace's own LLM key with the member's body, whose distinct
+  // {{variable}} slots ARE its required input ports. It COEXISTS with the older
+  // bot node carrying slug "prompt" — nothing is converted — so export/import
+  // must round-trip both shapes.
+  | "prompt";
 
 /**
  * #861 (MS-7): a workflow's exposed input slot — mirror of convex/lib/workflow/
@@ -377,10 +447,20 @@ export type GraphIssueCode =
   | "fan-overlap"
   // #1014: a node downstream of a Splitter whose kind can't run once per item.
   | "lane-ineligible"
+  // #1074: an Image Rig in a Splitter's OPEN fan whose COMBINED spend — the
+  // Splitter's item cap × the rig's per-firing tally — busts the rig's caps
+  // (50 images, or 200 with `confirmLargeRun`). A rig after a Collector fires
+  // once for the whole fan and is unrestricted.
+  | "fan-image-budget"
   // #1020: a Collector whose inputs don't all come from inside one Splitter's
   // open fan — it has nothing to close, or a stray wire arrived from outside
   // the fan (merging unrelated branches is a Formatter's job, not this one).
-  | "collector-unpaired";
+  | "collector-unpaired"
+  // #1097: a structural Splitter AIMED at a field (config.sourceField) but fed
+  // from a Formatter extract node's FIELD output port. That wire already
+  // carries just that field's values, so there is no payload left to look a
+  // field up in — clear the field name, or feed it one whole JSON payload.
+  | "splitter-field-conflict";
 
 export interface GraphIssue {
   code: GraphIssueCode;
@@ -531,11 +611,26 @@ export type WorkflowMediaType = "image" | "video" | "audio" | "document";
  * graph.ts EntryFieldType. A literal union (not string) so the mutual-assignment
  * pin in __tests__/workflow.test.ts holds.
  */
-export type WorkflowEntryFieldType = "text" | "select" | "number" | "toggle";
+export type WorkflowEntryFieldType =
+  | "text"
+  | "select"
+  | "number"
+  | "toggle"
+  // #1150: a dropdown that takes SEVERAL answers. Its value is still ONE
+  // string — the picks comma-joined — so `--input key=a,b` is the whole story
+  // and nothing on the wire had to learn about lists.
+  | "multi-select";
 
 export interface WorkflowInputDescriptor {
   fieldName: string;
   nodeId: string;
+  /**
+   * #1072: the words a person reads beside the box, when the author wrote any.
+   * The CLI stays KEY-addressed (`--input key=value`) — this only labels the
+   * key when we print the field list. Omitted when unauthored, so a pre-#1072
+   * describe payload renders exactly as before.
+   */
+  label?: string;
   /** "asset" = an uploaded file (an Asset Input node), not typed copy. */
   source: WorkflowBriefSource | "asset";
   required: boolean;
@@ -545,8 +640,22 @@ export interface WorkflowInputDescriptor {
    * isn't the plain "text" box, so a pre-#1013 describe payload is unchanged.
    */
   type?: WorkflowEntryFieldType;
-  /** For type === "select": the values the caller may pick. */
+  /** For type === "select"/"multi-select": the values the caller may pick. */
   options?: string[];
+  /**
+   * #1150: this dropdown's list is OPEN — an answer nobody listed is legal, so
+   * `--input key=<anything non-blank>` passes the server's launch gate. Set
+   * only when true; absent means a closed list.
+   */
+  allowOther?: boolean;
+  /**
+   * #1150: this dropdown's choices live in a workspace LIBRARY ("personas"
+   * today), not in the graph. describe resolves the live rows into `options`
+   * before it answers, so the printed choices are current names — this only
+   * says where they came from, and that the server checks the answer against
+   * the library at launch.
+   */
+  optionsSource?: string;
   bundleSize?: number;
   /** For source === "asset": which file family the upload must be. */
   assetType?: WorkflowMediaType;
@@ -571,6 +680,26 @@ export interface WorkflowOutputDescriptor {
   port?: string;
 }
 
+/**
+ * #1082 (Exit Contract in describe): ONE named delivery slot the workflow
+ * PROMISES — the static counterpart to a run's WorkflowRunDelivery (which adds
+ * whether the slot actually arrived). Mirror of the describe route's
+ * `deliveries` entry.
+ *
+ * `type` reuses WorkflowOutputSlotType (declared with the run-side delivery
+ * below) so the two stay one vocabulary.
+ */
+export interface WorkflowDeliveryDescriptor {
+  /** Stable kebab slug — the name `--out` files and the webhook key off. */
+  key: string;
+  label: string;
+  type: WorkflowOutputSlotType;
+  /** The author's one-line note about what lands in this slot. */
+  description?: string;
+  /** 0-based presentation index. */
+  order: number;
+}
+
 /** The describe HTTP response: the derived contract + this brand's stored flags. */
 export interface WorkflowDescribeResponse {
   workflowId: string;
@@ -580,6 +709,14 @@ export interface WorkflowDescribeResponse {
   inputs: WorkflowInputDescriptor[];
   prerequisites: Array<WorkflowPrerequisiteDescriptor & { stored: boolean }>;
   outputs: WorkflowOutputDescriptor[];
+  /**
+   * #1082: the EXIT contract — the workflow's named delivery slots. OPTIONAL on
+   * purpose: a published CLI binary talks to backends that predate the field, so
+   * `undefined` means "this backend can't say" (render exactly as before) while
+   * `[]` means "this workflow promises nothing" — two different facts that must
+   * never collapse into one.
+   */
+  deliveries?: WorkflowDeliveryDescriptor[];
 }
 
 // ── Template + schema on-ramp mirrors (#892) ──────────────────────────────
@@ -717,6 +854,13 @@ export interface WorkflowRunOutput {
   documentUrl?: string;
   filename?: string;
   mimeType?: string;
+  // #1078: what the MACHINE made, when a member changed this artifact at a
+  // review stop. Present only on a hand-changed deliverable, so an untouched
+  // run's payload is byte-identical to what it always shipped.
+  humanEdited?: boolean;
+  originalText?: string;
+  originalImageUrl?: string;
+  originalVideoUrl?: string;
 }
 
 /**
@@ -787,9 +931,12 @@ export interface WorkflowRunSession {
  * on a dead input; "slots" = a nested child awaiting the member's slot answers;
  * "call" = a parent parked on a child (never actionable, filtered out of the
  * inbox). Absent on legacy video cost-gate parks.
- * #998 adds "checkpoint": ANY node can carry the "pause for approval" switch
- * (`config.checkpoint`), and when that step finishes the run parks here for the
- * member's approve / edit / retry / cancel — the `workflow checkpoint` cluster.
+ * #998 adds "checkpoint": the run has reached a Checkpoint box and is holding
+ * there for the member's approve / edit / retry / cancel — the `workflow
+ * checkpoint` cluster. (#1069 turned the pause-for-approval into that dedicated
+ * box, sitting on a wire between two steps; it used to be a per-node switch.
+ * The reason word on the wire never changed, so both park shapes — a frozen run
+ * from before the change, and a new one — resolve through the same verbs.)
  */
 export type WorkflowPauseReason =
   | "taste"
@@ -840,6 +987,12 @@ export interface WorkflowRun {
   pauseReason?: WorkflowPauseReason;
   pausedNodeId?: string;
   pendingSlots?: WorkflowPendingSlot[];
+  /**
+   * #1079: the checkpoint stops a `--auto-approve` launch released with nobody
+   * looking, in release order. Optional — absent on every ordinary run and on
+   * older backends that predate the flag.
+   */
+  autoApprovals?: { nodeId: string; approvedAt: number }[];
 }
 
 export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & { nodes?: never };
@@ -847,6 +1000,13 @@ export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & { nodes?: never
 interface WorkflowRunStartResponse {
   runId: string;
   triggerRunId: string;
+  /**
+   * #1082: additive, optional server-side heads-ups about the run that just
+   * launched. The CLI's own describe pre-check is the primary mechanism (it
+   * works against backends that never send this), so anything here that repeats
+   * a warning already said is dropped — see serverWarningsToPrint.
+   */
+  warnings?: string[];
 }
 
 export interface WorkflowRunDeps {
@@ -909,11 +1069,31 @@ interface RunFlowOptions {
    * still wins key-by-key. Blank/undefined sends no fill (unchanged behavior).
    */
   fill?: string;
+  /**
+   * #1079: launch this ONE run unattended — the server auto-approves every
+   * Checkpoint the run reaches, artifact unchanged, instead of parking for a
+   * human. Per-launch only: it is never stored on the workflow, so undefined /
+   * false is the ordinary park-and-wait run and sends nothing at all.
+   */
+  autoApprove?: boolean;
+  /**
+   * #1084 (F2): re-aim this ONE run's Image Rig boxes — more images, a different
+   * meme format, a different model — without editing the saved workflow. Already
+   * parsed from `--rig-overrides` (JSON or @file) by the time it lands here;
+   * undefined sends nothing at all, so an ordinary run's body is unchanged.
+   */
+  imageRigOverrides?: Record<string, unknown>;
   wait: boolean;
   json: boolean;
   // #1002: with --wait, save the terminal run's delivered outputs into this dir.
   out?: string;
   onProgressLine?: (line: string) => void;
+  /**
+   * #1082: where pre-launch heads-ups go. STDERR in the real CLI, so they show
+   * up in --json mode too without ever landing inside the JSON on stdout. Never
+   * blocking — a warning is said and the run launches anyway.
+   */
+  onWarningLine?: (line: string) => void;
 }
 
 const LIST_PATH = "/api/v2/workflows";
@@ -982,6 +1162,10 @@ const VALUE_FLAGS = new Set([
   "slot",
   // #1014: `workflow checkpoint <runId> approve --reject 2,5` takes a value.
   "reject",
+  // #1084 (F2): `workflow run <ref> --rig-overrides <json|@file>` takes a value.
+  "rig-overrides",
+  // #1144: `workflow checkpoint <runId> retry --note "..."` takes a value.
+  "note",
 ]);
 
 /** #1002: `mkdir -p` for the `--out <dir>` target. */
@@ -1165,9 +1349,11 @@ function progressLine(node: WorkflowRunNode, parked = false): string {
  * nothing to review (a repair collector is deliberately idle), so those node rows
  * stay as-is — the pause banner above already names the reason. Returns the
  * paused node id when the override applies, else undefined.
- * #998: a "checkpoint" park qualifies too — the flagged step's row settles `done`
- * while the run waits on the member, so it must read `⏸ awaiting approval` and its
- * outputs must NOT read as approved until the member says so.
+ * #998: a "checkpoint" park qualifies too — the parked row settles `done` while
+ * the run waits on the member, so it must read `⏸ awaiting approval` and its
+ * outputs must NOT read as approved until the member says so. (#1069: on a new
+ * run that row is the Checkpoint box itself; on a frozen pre-#1069 run it is the
+ * step that carried the old switch. Same treatment either way.)
  *
  * #994: the status test normalizes, so a pre-rename backend's "awaiting-review"
  * and a renamed backend's "awaiting-approval" behave identically.
@@ -1189,7 +1375,7 @@ function gateParkedNodeId(
  * single constant so the CLI verb, the pause banner, and the docs never drift.
  */
 const RETIRED_GATE_VERB_POINTER =
-  "The Gate node retired in 2.0 — runs now pause with the checkpoint switch on a node. " +
+  "The Gate node retired in 2.0 — runs now pause at a Checkpoint box on the canvas. " +
   "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
 
 /**
@@ -1220,11 +1406,11 @@ export function formatPauseNotice(
   if (pauseReason === "call") {
     return ["  ⏸ waiting on a child workflow run — it resumes on its own."];
   }
-  // #998: a checkpoint park is a step someone flagged "pause for approval" — say
-  // exactly that, then point at the checkpoint verb (same 3-line shape).
+  // #998: a checkpoint park means the run reached a Checkpoint box — say exactly
+  // that, then point at the checkpoint verb (same 3-line shape).
   if (pauseReason === "checkpoint") {
     return [
-      "  ⏸ paused at a checkpoint — a step's output is waiting on your approval.",
+      "  ⏸ paused at a checkpoint — what's flowing through it is waiting on your approval.",
       `     Resolve here:  exodus workflow checkpoint ${runId}`,
       `     Or in the app: ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
     ];
@@ -1234,7 +1420,7 @@ export function formatPauseNotice(
   // pointing at a verb that would refuse it.
   if (pauseReason === "taste") {
     return [
-      "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen with the checkpoint switch.",
+      "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen at a Checkpoint box.",
       `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
       `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
       "     Then run the workflow again.",
@@ -1282,6 +1468,28 @@ function expandInputValue(
     }
   }
   return value;
+}
+
+/**
+ * #1150: put a MULTI-CHOICE value into the canonical encoding — the picks
+ * comma-joined, trimmed, empties dropped — so `a,b`, `a, b` and a trailing
+ * comma all leave this CLI as the one string every other door sends.
+ *
+ * The reference pair is `splitMultiValue`/`joinMultiValue`
+ * (src/components/workflows/runForm.ts), which the run dialog, the +New modal
+ * and the chat card all share; exodus cannot import from src/, so these two
+ * lines are the mirror of them and must stay word-for-word equivalent.
+ *
+ * It normalizes only — it VALIDATES nothing. This CLI deliberately checks no
+ * membership (an option list can change between describe and launch); the
+ * server's launch gate is the authority, and its rejection names the field.
+ */
+function normalizeMultiValue(value: string): string {
+  return value
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .join(", ");
 }
 
 /**
@@ -1582,7 +1790,9 @@ function withReusableAssetIds(
  *   - `@@literal` is the documented "keep the @" escape — never a path.
  *   - a leading `@`, or a file that actually exists on disk, is decisive.
  *   - a URL is never a local path, and neither is anything with whitespace in
- *     it (that's prose — a brief, not a filename).
+ *     it (that's prose — a brief, not a filename). #1095 makes that exclusion
+ *     load-bearing: a URL is a legitimate asset value the server fetches at
+ *     intake, so a describe outage must not block it.
  */
 function looksLikeFileArgument(value: string, deps: WorkflowRunDeps): boolean {
   if (value.startsWith("@@")) return false;
@@ -1594,6 +1804,74 @@ function looksLikeFileArgument(value: string, deps: WorkflowRunDeps): boolean {
 }
 
 /**
+ * #1082: the one-line heads-up a run deserves when the workflow promises
+ * NOTHING. Spelled once so the pre-launch warning and any test that pins it
+ * can't drift.
+ */
+export const NO_DELIVERIES_WARNING =
+  "Warning: this workflow has no Output node — the run will finish with no named " +
+  "deliveries (nothing for --out to save, and nothing to send to a webhook).";
+
+/**
+ * #1082: decide, from the describe response the run flow already fetches,
+ * whether to warn BEFORE the run is spent.
+ *
+ * The rule is deliberately conservative — "no deliveries" has to be a fact the
+ * payload states, never something inferred:
+ *   - `deliveries: []`      → warn (the backend says: no named slots).
+ *   - `deliveries: [...]`   → silent.
+ *   - no `deliveries` key   → silent. A pre-#1082 backend's `outputs: []` is
+ *     NOT the same fact (codex review): `outputs` lists WIRED producers, so a
+ *     workflow whose only Output node is unwired also reports `outputs: []`
+ *     while still declaring a named (unfulfilled) slot — warning on it would
+ *     tell that member their Output node doesn't exist. A false alarm before a
+ *     real run is worse than no warning at all.
+ */
+export function noDeliveriesWarning(described: unknown): string | undefined {
+  if (!isRecord(described)) return undefined;
+  const deliveries = described["deliveries"];
+  if (Array.isArray(deliveries)) {
+    return deliveries.length === 0 ? NO_DELIVERIES_WARNING : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * #1082: fold the run-start response's optional `warnings: string[]` (an
+ * additive server field) in with what the CLI already warned about locally,
+ * dropping anything that would say the same thing twice.
+ *
+ * The local describe pre-check is the PRIMARY mechanism — it works against a
+ * backend too old to send `warnings` at all — so on a tie the local wording
+ * wins and the server's copy is dropped. Matching is on a punctuation-blind key
+ * plus a topic guard, because the two sides word the same fact differently.
+ */
+export function serverWarningsToPrint(
+  serverWarnings: unknown,
+  alreadyPrinted: string[],
+): string[] {
+  if (!Array.isArray(serverWarnings)) return [];
+  const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const printedKeys = new Set(alreadyPrinted.map(key));
+  const saidNoDeliveries = alreadyPrinted.includes(NO_DELIVERIES_WARNING);
+  const out: string[] = [];
+  for (const raw of serverWarnings) {
+    if (typeof raw !== "string") continue;
+    const text = raw.trim();
+    if (text === "") continue;
+    const k = key(text);
+    if (printedKeys.has(k)) continue;
+    // Same fact, different words: our pre-check already covered it.
+    if (saidNoDeliveries && (k.includes("no output node") || k.includes("no named deliver"))) {
+      continue;
+    }
+    printedKeys.add(k);
+    out.push(text);
+  }
+  return out;
+}
+
+/**
  * Turn the RAW `--input` values into the values the run route wants (Stage 3B).
  *
  * Asset Input fields (`source: "asset"` in describe) take a LOCAL FILE PATH:
@@ -1601,6 +1879,10 @@ function looksLikeFileArgument(value: string, deps: WorkflowRunDeps): boolean {
  * keeps the historical `@path` text-expansion. A required asset field with no
  * `--input` fails here, before a run is spent, naming the flag to pass — the
  * CLI has no interactive prompts by design.
+ *
+ * #1095: an asset field also accepts an http(s) URL. That one is relayed as
+ * typed — intake fetches, validates and registers it server-side — so the CLI
+ * neither stats nor uploads it.
  *
  * The describe fetch is a COURTESY preflight, but only for TEXT: if it fails we
  * fall through to the pre-3B behavior (expand `@path`, relay values verbatim)
@@ -1615,14 +1897,25 @@ function looksLikeFileArgument(value: string, deps: WorkflowRunDeps): boolean {
  * `scoped` is true when the caller passed `--terminal`: the run may legitimately
  * exclude the Asset Input node, so the client-side "you didn't pass the required
  * file" check is left to the server's scope-aware preflight.
+ *
+ * #1082: the same describe payload also answers "does this workflow promise
+ * anything?", so the returned `warnings` ride back out with the prepared inputs
+ * — the caller prints them to stderr before spending the run. Warnings never
+ * block: they are said once and the launch continues.
  */
+interface PreparedRunInputs {
+  inputs: Record<string, string>;
+  /** #1082: pre-launch heads-ups, in the order they should be said. */
+  warnings: string[];
+}
+
 async function prepareRunInputs(
   workflowId: string,
   raw: Record<string, string>,
   deps: WorkflowRunDeps,
   note: (line: string) => void,
   scoped: boolean,
-): Promise<Record<string, string>> {
+): Promise<PreparedRunInputs> {
   const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
   if (!described.ok) {
     const fileish = Object.keys(raw).filter((key) => looksLikeFileArgument(raw[key], deps));
@@ -1638,13 +1931,26 @@ async function prepareRunInputs(
     for (const [key, value] of Object.entries(raw)) {
       text[key] = expandInputValue(key, value, deps.readFile);
     }
-    return text;
+    // Describe failed, so we know nothing about the exit contract either — no
+    // warning, same as pre-#1082.
+    return { inputs: text, warnings: [] };
   }
+
+  // #1082: the exit-contract pre-check. Computed here (the only place describe
+  // is read on the run path) and carried out with the inputs.
+  const warnings: string[] = [];
+  const noDeliveries = noDeliveriesWarning(described.data);
+  if (noDeliveries) warnings.push(noDeliveries);
 
   const descriptors = (described.data as Partial<WorkflowDescribeResponse>).inputs ?? [];
   const assetFields = new Map<string, WorkflowInputDescriptor>();
+  // #1150: the multi-choice fields, by key. Their answer is ONE string (the
+  // picks comma-joined), and this is the only place the CLI knows which fields
+  // those are — describe is what says so.
+  const multiFields = new Set<string>();
   for (const descriptor of descriptors) {
     if (descriptor?.source === "asset") assetFields.set(descriptor.fieldName, descriptor);
+    if (descriptor?.type === "multi-select") multiFields.add(descriptor.fieldName);
   }
 
   // A `--terminal` run only executes the picked end nodes' upstream closure, so
@@ -1658,8 +1964,9 @@ async function prepareRunInputs(
       const names = missing.map((d) => d.fieldName).join(", ");
       const first = missing[0];
       throw new Error(
-        `Missing required file input(s): ${names}. Pass each one as a local file — ` +
-          `e.g. --input ${first.fieldName}=./path/to/file` +
+        `Missing required file input(s): ${names}. Pass each one as a local file ` +
+          `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
+          `--input ${first.fieldName}=https://…` +
           (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""),
       );
     }
@@ -1673,10 +1980,24 @@ async function prepareRunInputs(
     const descriptor = assetFields.get(key);
     if (!descriptor) {
       try {
-        prepared[key] = expandInputValue(key, value, deps.readFile);
+        const expanded = expandInputValue(key, value, deps.readFile);
+        // #1150: a multi-choice answer is normalized AFTER any @file expansion
+        // — the list may well have come out of a file — so what leaves this CLI
+        // is the same string the run dialog would have sent.
+        prepared[key] = multiFields.has(key)
+          ? normalizeMultiValue(expanded)
+          : expanded;
       } catch (e) {
         problems.push(e instanceof Error ? e.message : String(e));
       }
+      continue;
+    }
+    // #1095: an http(s) URL is a launch value the SERVER settles — intake
+    // fetches, type/size-checks and registers it before the run starts. The
+    // CLI's only job is to not mistake one for a file path (looksLikePath is
+    // true for anything with a "/"), so relay it untouched.
+    if (/^https?:\/\//i.test(value)) {
+      prepared[key] = value;
       continue;
     }
     // A bare path is the natural argument for a file field, but someone in the
@@ -1718,7 +2039,7 @@ async function prepareRunInputs(
     prepared[plan.field] = uploaded.assetId;
     done.push({ field: plan.field, assetId: uploaded.assetId });
   }
-  return prepared;
+  return { inputs: prepared, warnings };
 }
 
 /**
@@ -1755,6 +2076,99 @@ export function parseTerminalFlags(args: string[]): string[] {
  * form reliably, and a fill silently dropped would launch the WRONG run. Returns
  * undefined when the flag was never passed; throws when it was passed empty.
  */
+/**
+ * Detect the bare `--auto-approve` flag (#1079) off the raw argv. The shared
+ * flags map can't be trusted for it: parseArgs greedily eats the NEXT token as
+ * any flag's value, so `run --auto-approve "Flow"` lands in the map as
+ * `{"auto-approve": "Flow"}` — and a strict `=== true` check would silently
+ * launch ATTENDED, which is the one failure nobody is around to notice. Raw
+ * presence is the truth: the flag takes no value, so seeing it at all means it
+ * was passed. (Same raw-argv convention as --input/--terminal/--fill; an
+ * `--auto-approve=...` form is rejected rather than guessed at.)
+ */
+export function parseAutoApproveFlag(args: string[]): boolean {
+  for (const arg of args) {
+    if (arg === "--auto-approve") return true;
+    if (arg.startsWith("--auto-approve=")) {
+      throw new Error("--auto-approve takes no value — pass it bare");
+    }
+  }
+  return false;
+}
+
+/**
+ * Read the `--rig-overrides <json|@file.json>` flag (#1084 F2) off the raw argv —
+ * the per-run Image Rig re-aim a launch carries. Accepts both
+ * `--rig-overrides '<json>'` and `--rig-overrides=@plan.json`; `@path` reads the
+ * file (the `--input` convention), and `@@` escapes a literal leading `@`.
+ *
+ * The JSON is parsed HERE, before the run is requested, for one reason: a typo
+ * in a payload should cost a shell error, not a round trip that comes back as an
+ * opaque 400. WHAT the payload points at is still the server's call — it is the
+ * only side that has the graph — so this parse only insists the text is an
+ * object. Returns undefined when the flag was never passed.
+ */
+export function parseRigOverridesFlag(
+  args: string[],
+  readFile?: (path: string) => string,
+): Record<string, unknown> | undefined {
+  let raw: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    let value: string | undefined;
+    if (arg === "--rig-overrides") {
+      value = args[i + 1];
+      i++;
+    } else if (arg.startsWith("--rig-overrides=")) {
+      value = arg.slice("--rig-overrides=".length);
+    } else {
+      continue;
+    }
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--rig-overrides requires JSON or @path/to/file.json");
+    }
+    // Last one wins, matching how the shared flags map treats a repeated flag.
+    raw = value;
+  }
+  if (raw === undefined) return undefined;
+
+  let text = raw.trim();
+  if (!text) throw new Error("--rig-overrides requires JSON or @path/to/file.json");
+  if (text.startsWith("@@")) {
+    text = text.slice(1);
+  } else if (text.startsWith("@")) {
+    const filePath = text.slice(1);
+    if (!filePath) {
+      throw new Error("--rig-overrides @<file> needs a file path after \"@\"");
+    }
+    if (!readFile) {
+      throw new Error(
+        `--rig-overrides: cannot load @${filePath} here (no file access)`,
+      );
+    }
+    try {
+      text = readFile(filePath);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`--rig-overrides: could not read file "${filePath}": ${msg}`);
+    }
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`--rig-overrides is not valid JSON: ${msg}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      "--rig-overrides must be a JSON object keyed by Image Rig node id, e.g. '{\"rig_1\":{\"lines\":{\"line_1\":{\"count\":3}}}}'",
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function parseFillFlag(args: string[]): string | undefined {
   let name: string | undefined;
   for (let i = 0; i < args.length; i++) {
@@ -1905,6 +2319,15 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   if (Object.keys(run.inputs ?? {}).length > 0) {
     const inputs = Object.entries(run.inputs).map(([k, v]) => `${k}=${v}`).join(", ");
     lines.push(`inputs:       ${inputs}`);
+  }
+  // #1079: an --auto-approve launch — say WHICH stops were waved through with
+  // nobody looking, so "it finished" never quietly means "it was reviewed".
+  if (run.autoApprovals && run.autoApprovals.length > 0) {
+    lines.push(
+      `auto-approved: ${run.autoApprovals.length} checkpoint stop${
+        run.autoApprovals.length === 1 ? "" : "s"
+      } (${run.autoApprovals.map((a) => a.nodeId).join(", ")}) — launched with --auto-approve, nobody reviewed these`,
+    );
   }
 
   // #923/#929: while the run is parked at a REVIEW stop (a checkpoint, or a
@@ -2215,12 +2638,78 @@ export async function saveDeliveries(
  * all).
  */
 function inputValueHint(input: WorkflowInputDescriptor): string | undefined {
+  // #1150: an OPEN list ("Other…") accepts an answer that is on no list at all,
+  // so the hint has to say so — otherwise describe reads as a closed menu and
+  // nobody discovers the answer they actually want is allowed. A LIBRARY list
+  // needs no extra words: describe already resolved the live rows into
+  // `options`, so the ordinary "one of: …" IS the current, true list.
+  const open = input.allowOther ? ", or your own answer" : "";
   if (input.type === "select") {
     const options = input.options ?? [];
-    return options.length > 0 ? `one of: ${options.join(", ")}` : undefined;
+    return options.length > 0 ? `one of: ${options.join(", ")}${open}` : undefined;
+  }
+  if (input.type === "multi-select") {
+    // The value is ONE string: the picks comma-joined. Say the separator — it
+    // is the difference between `--input key=a,b` and a rejected run.
+    const options = input.options ?? [];
+    return options.length > 0
+      ? `one or more of: ${options.join(", ")} (comma-separated)${open}`
+      : undefined;
   }
   if (input.type === "toggle") return "true or false";
   return undefined;
+}
+
+/**
+ * #1082: the delivery slot's type in WORDS. The wire vocabulary
+ * (text/structured/asset/collection) is authoring shorthand; describe is read by
+ * people deciding what a run will hand back, so spell it.
+ *
+ * An unknown value (a newer backend growing a fifth type) prints verbatim rather
+ * than being dropped or mislabelled.
+ */
+export function deliveryTypeWord(type: string): string {
+  switch (type) {
+    case "text":
+      return "text";
+    case "structured":
+      return "structured data";
+    case "asset":
+      return "file";
+    case "collection":
+      return "set of files";
+    default:
+      return type;
+  }
+}
+
+/**
+ * #1082: the "Delivers" block — the workflow's EXIT contract, one line per named
+ * slot in the author's presentation order, with the author's note indented under
+ * it. Pure so the shape is unit-testable without a describe round-trip.
+ *
+ * Returns [] for `undefined` (a backend that predates the field — the caller
+ * must then print nothing at all, keeping old output byte-for-byte), and the
+ * plain "nothing" line for `[]` (a workflow with no Output node, which IS a
+ * fact worth printing).
+ */
+export function deliveryContractLines(
+  deliveries: WorkflowDeliveryDescriptor[] | undefined,
+): string[] {
+  if (deliveries === undefined) return [];
+  if (deliveries.length === 0) return ["Delivers: nothing — no Output node."];
+  const lines: string[] = [`Delivers (${deliveries.length}):`];
+  // `order` is the author's presentation index; sort by it rather than trusting
+  // array order, and fall back to array order for ties/missing values.
+  const ordered = deliveries
+    .map((delivery, index) => ({ delivery, index }))
+    .sort((a, b) => (a.delivery.order ?? a.index) - (b.delivery.order ?? b.index) || a.index - b.index)
+    .map((entry) => entry.delivery);
+  for (const delivery of ordered) {
+    lines.push(`  ${delivery.label} (${delivery.key}) — ${deliveryTypeWord(delivery.type)}`);
+    if (delivery.description) lines.push(`      ${delivery.description}`);
+  }
+  return lines;
 }
 
 export function formatDescribe(res: WorkflowDescribeResponse): string {
@@ -2246,7 +2735,13 @@ export function formatDescribe(res: WorkflowDescribeResponse): string {
       // An asset field takes a FILE, so name the family it accepts — that's the
       // difference between "--input hero=text" and "--input hero=./hero.png".
       const family = input.source === "asset" && input.assetType ? ` (${input.assetType})` : "";
-      lines.push(`  ${input.fieldName} — ${input.source}${family}${type}, ${req}${bundle}`);
+      // #1072: the authored question, when there is one. The KEY still leads —
+      // that is what `--input key=value` takes — and the label just says what
+      // the key is asking for.
+      const label = input.label ? ` (${input.label})` : "";
+      lines.push(
+        `  ${input.fieldName}${label} — ${input.source}${family}${type}, ${req}${bundle}`,
+      );
       const hint = inputValueHint(input);
       if (hint) lines.push(`      ${hint}`);
       if (input.description) lines.push(`      ${input.description}`);
@@ -2282,6 +2777,15 @@ export function formatDescribe(res: WorkflowDescribeResponse): string {
       const slug = output.botSlug ? ` (${output.botSlug})` : "";
       lines.push(`  ${output.label} [${output.type}]${slug}`);
     }
+  }
+
+  // #1082: the EXIT contract, under the raw collected-outputs bag above. Only
+  // when the backend actually sent the field — against a pre-#1082 backend this
+  // block is absent entirely and describe prints exactly what it always did.
+  const delivers = deliveryContractLines(res.deliveries);
+  if (delivers.length > 0) {
+    lines.push("");
+    lines.push(...delivers);
   }
 
   return lines.join("\n");
@@ -2735,9 +3239,9 @@ export async function runFlow(
   // the run exists); otherwise they ride ahead of the returned lines.
   const preface: string[] = [];
   const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
-  let inputs: Record<string, string>;
+  let prepared: PreparedRunInputs;
   try {
-    inputs = await prepareRunInputs(
+    prepared = await prepareRunInputs(
       workflowId,
       opts.inputs,
       deps,
@@ -2759,6 +3263,16 @@ export async function runFlow(
         : [...preface, message],
     };
   }
+  const inputs = prepared.inputs;
+
+  // #1082: say the pre-launch heads-up BEFORE the run is spent — on both the
+  // --wait and no-wait paths, and in --json mode too (it goes to stderr, so it
+  // can't corrupt the JSON on stdout). It never prompts and never aborts.
+  const warned: string[] = [];
+  for (const warning of prepared.warnings) {
+    warned.push(warning);
+    opts.onWarningLine?.(warning);
+  }
 
   const body = {
     workflowId,
@@ -2773,11 +3287,36 @@ export async function runFlow(
     ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
       ? { terminalNodeIds: opts.terminalNodeIds }
       : {}),
+    // #1079: unattended launch — the server auto-approves every Checkpoint this
+    // run reaches. Only ever sent as `true`: omitted when the flag is absent, so
+    // an ordinary run's body stays byte-identical to pre-#1079 and no backend
+    // can read an explicit `false` as anything but the default.
+    ...(opts.autoApprove === true ? { autoApprove: true } : {}),
+    // #1084 (F2): the per-run Image Rig re-aim, relayed as the object the flag
+    // parsed. A SIBLING of `inputs` (inputs are strings; this is structured), and
+    // omitted when the flag wasn't passed, so an ordinary run's body is
+    // byte-identical to pre-#1084. The server judges what it points at — it is
+    // the only side holding the graph — and answers with the exact key path.
+    ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
+    // #1089: name the SURFACE this run was fired from so the Runs board's
+    // Launched-via filter can tell a terminal launch from a script hitting the
+    // same v2 route. Sent unconditionally (unlike the flags above) because it
+    // describes the client, not the launch — every `exodus workflow run` is a
+    // CLI run. The route only ever honours the exact string "cli" and downgrades
+    // anything else to "programmatic", so an older backend that doesn't know the
+    // field simply ignores it and the run starts exactly as it does today.
+    launchedVia: "cli",
   };
   const start = await deps.post(RUN_PATH, body);
   if (!start.ok) return asErrorResult(start, opts.json);
 
   const data = start.data as WorkflowRunStartResponse;
+  // #1082: relay any server-side warning the local pre-check didn't already
+  // cover. Same stderr seam, so --json stdout stays one clean object.
+  for (const warning of serverWarningsToPrint(data?.warnings, warned)) {
+    warned.push(warning);
+    opts.onWarningLine?.(warning);
+  }
   const base = { ...data, workflowId };
   if (opts.json && !opts.wait) return { code: 0, lines: [JSON.stringify(base)] };
 
@@ -2827,8 +3366,8 @@ export async function runFlow(
  *   - human:  a timeout pointer, or ["", formatWorkflowRun(run)].
  *
  * #998 `landOnPark`: some waits are DESIGNED to end on a park rather than on a
- * finished run — `checkpoint retry` re-runs one step and the run parks straight
- * back at the same checkpoint with fresh output. For those, that park IS the
+ * finished run — `checkpoint retry` re-runs the step feeding the checkpoint and
+ * the run parks straight back at the same checkpoint with fresh output. For those, that park IS the
  * success, so it must stop the loop (opt-in only: without this option every
  * `awaiting-review` stays non-terminal exactly as before).
  */
@@ -3395,6 +3934,13 @@ export async function triggersFireFlow(
   opts: {
     n?: number;
     text?: string;
+    /**
+     * #1084 (F2): a per-FIRE Image Rig re-aim. It REPLACES whatever the trigger
+     * definition carries rather than merging with it, so a test fire can say
+     * "this schedule, but aim the rig here instead" in one command. Omitted =
+     * the fire simulates the schedule faithfully, its own overrides included.
+     */
+    imageRigOverrides?: Record<string, unknown>;
     wait: boolean;
     json: boolean;
     onProgressLine?: (line: string) => void;
@@ -3462,6 +4008,10 @@ export async function triggersFireFlow(
     triggerIndex: idx,
     expect: triggerExpect(t),
     ...(opts.text !== undefined ? { text: opts.text } : {}),
+    // #1084 (F2): the per-fire re-aim, when the caller passed one.
+    ...(opts.imageRigOverrides
+      ? { imageRigOverrides: opts.imageRigOverrides }
+      : {}),
   });
   if (!res.ok) return triggerErrorResult(res, verb, opts.json);
 
@@ -3683,8 +4233,8 @@ export function formatAge(value: number | string | undefined, now = Date.now()):
  * The park-kind badge. Ruling (#891): "taste" → `gate` (now a LEGACY park at the
  * retired Gate node, #1012), "repair"/"slots" as-is, and an ABSENT pauseReason →
  * `legacy` (a video cost-gate park). Never badge an absent reason as `gate`.
- * #998: "checkpoint" as-is —
- * a step flagged "pause for approval", resolved by its own verb cluster.
+ * #998: "checkpoint" as-is — the run is holding at a Checkpoint box, resolved by
+ * its own verb cluster.
  */
 export function parkBadge(pauseReason: string | undefined): string {
   if (pauseReason === "taste") return "gate";
@@ -3829,17 +4379,26 @@ async function preflightPark(
 
 // ── Checkpoint verbs (#998) ───────────────────────────────────────────────
 //
-// A checkpoint park is ANY node whose author flipped the "pause for approval"
-// switch (`config.checkpoint`). When that step finishes, the run parks with
-// pauseReason "checkpoint" and waits — indefinitely — for the member to approve
-// the step's output, hand-edit it first, re-run the step, or cancel the run.
+// A checkpoint park is a run that reached a Checkpoint box — its own node kind
+// ("checkpoint", #1069), sitting on a wire between two steps and passing what
+// arrives straight through once it is approved. The run parks with pauseReason
+// "checkpoint" and waits — indefinitely — for the member to approve what is
+// waiting there, hand-edit it first, re-run the step feeding the box, or cancel
+// the run. (Graphs authored before #1069 carried a per-node switch instead;
+// those auto-convert to a box, and frozen runs that parked on the old switch
+// still resolve through these same verbs.)
+//
+// The one exception is a run launched with `--auto-approve` (#1079): that run
+// was deliberately sent off unattended, so the server approves each Checkpoint
+// the moment it is reached — artifact untouched, stop recorded as
+// auto-approved — and the run never parks for these verbs at all.
 //
 // It is NOT a Gate node: there are no selection-port candidates and nothing to
-// "pick". What the member reviews is the step's plain text output(s), so the
-// numbering below covers EVERY text artifact the step produced.
+// "pick". What the member reviews is the plain text held at the box, so the
+// numbering below covers EVERY text artifact the parked node carries.
 
 /**
- * One reviewable output on the checkpoint-parked step, numbered 1-based for the
+ * One reviewable output held at the checkpoint, numbered 1-based for the
  * member, each carrying its index into the node's FULL outputs array — which is
  * what /checkpoint/edit's `outputIndex` means. Non-text artifacts (images,
  * session handles, …) are skipped in the NUMBERING but still occupy their real
@@ -4001,7 +4560,7 @@ export async function checkpointShowFlow(
       `runId:      ${runId}`,
       `step:       ${stepLabel}`,
       "",
-      "This step is done and the run is holding here until you say go.",
+      "The run is holding at this checkpoint until you say go.",
       "",
       ...itemsNote,
       `Its output (${outputs.length}):`,
@@ -4176,14 +4735,27 @@ export async function checkpointEditFlow(
 
 export async function checkpointRetryFlow(
   runId: string,
-  opts: { wait: boolean; json: boolean; onProgressLine?: (line: string) => void },
+  opts: {
+    wait: boolean;
+    json: boolean;
+    // #1144: why the step is being sent back. Model-backed steps follow it on
+    // the redo; deterministic ones only record it on the review trail.
+    note?: string;
+    onProgressLine?: (line: string) => void;
+  },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
   const pf = await preflightPark(runId, "checkpoint", "workflow checkpoint retry", opts.json, deps);
   if (!pf.ok) return pf.result;
-  // Throws away what the step produced and runs it again; the run parks right
-  // back here with the fresh output.
-  const res = await deps.post(CHECKPOINT_RETRY_PATH, { runId });
+  // Throws away what is waiting at the box and runs the step feeding it again
+  // (#1069 — a Checkpoint only passes things through, so re-running the box
+  // itself would hand back the identical text); the run parks right back here
+  // with the fresh output.
+  const note = opts.note?.trim();
+  const res = await deps.post(CHECKPOINT_RETRY_PATH, {
+    runId,
+    ...(note ? { note } : {}),
+  });
   if (!res.ok) return triggerErrorResult(res, "workflow checkpoint retry", opts.json);
   const triggerRunId = (res.data as { triggerRunId?: string }).triggerRunId;
   // --wait therefore LANDS ON THE FRESH PARK — a successful redo never reaches a
@@ -4193,7 +4765,7 @@ export async function checkpointRetryFlow(
   return resumeAndMaybeWait(
     runId,
     triggerRunId,
-    ["Redoing the step — its old output is discarded."],
+    ["Redoing the step that feeds this checkpoint — its old output is discarded."],
     opts,
     deps,
     {
@@ -4502,13 +5074,15 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     if (!workflowRef) {
       console.error("Error: workflow run requires <workflowId|name>.");
       console.log(
-        "Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--wait] [--json]",
+        "Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--auto-approve] [--wait] [--json]",
       );
       process.exit(1);
     }
     let inputs: Record<string, string>;
     let terminalNodeIds: string[];
     let fill: string | undefined;
+    let autoApprove: boolean;
+    let imageRigOverrides: Record<string, unknown> | undefined;
     try {
       // Stage 3B: parse RAW. runFlow expands `@path` text inputs and uploads
       // file inputs once describe has said which fields are which.
@@ -4519,6 +5093,17 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       // #1013: --fill reads the raw argv too, so `--fill=<name>` can't be
       // swallowed and an empty one fails loud instead of launching fill-less.
       fill = parseFillFlag(process.argv.slice(3));
+      // #1079: --auto-approve reads the raw argv for the same reason — the
+      // shared map can hand it the NEXT token as a "value" (flag-before-name
+      // ordering), and a strict boolean check would then silently launch
+      // ATTENDED, the one miss nobody is around to notice.
+      autoApprove = parseAutoApproveFlag(process.argv.slice(3));
+      // #1084 (F2): --rig-overrides is parsed HERE, before anything is
+      // requested — a JSON typo must cost a shell error, not a run.
+      imageRigOverrides = parseRigOverridesFlag(
+        process.argv.slice(3),
+        defaultDeps.readFile,
+      );
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -4531,11 +5116,21 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
           terminalNodeIds,
           // #1013: reuse a saved fill by name; --input still wins per key.
           fill,
+          // #1079: parsed off the raw argv above (parseAutoApproveFlag), never
+          // the shared flags map. No VALUE_FLAGS entry either — that set only
+          // exists so parsePositional can skip a flag's VALUE, and this flag
+          // takes none.
+          autoApprove,
+          // #1084 (F2): the per-run Image Rig re-aim, parsed above.
+          imageRigOverrides,
           wait: flags["wait"] === true,
           json,
           // #1002: --out saves the finished run's deliverables (needs --wait).
           out: flagString(flags, "out"),
           onProgressLine: (line) => console.log(line),
+          // #1082: warnings go to STDERR — visible in a terminal, and harmless
+          // to a `--json` consumer piping stdout.
+          onWarningLine: (line) => console.error(line),
         },
         defaultDeps,
       ),
@@ -4669,7 +5264,15 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       return printResult(
         await checkpointRetryFlow(
           runId,
-          { wait: flags["wait"] === true, json, onProgressLine: (line) => console.log(line) },
+          {
+            wait: flags["wait"] === true,
+            json,
+            // #1144: ride the redo with a correction the re-run can follow.
+            ...(flags["note"] !== undefined
+              ? { note: flagString(flags, "note") }
+              : {}),
+            onProgressLine: (line) => console.log(line),
+          },
           defaultDeps,
         ),
       );
@@ -4761,12 +5364,25 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
           process.exit(1);
         }
       }
+      // #1084 (F2): same raw-argv parse the run verb uses — a bad payload must
+      // fail here, before a run fires on the owner's keys.
+      let fireOverrides: Record<string, unknown> | undefined;
+      try {
+        fireOverrides = parseRigOverridesFlag(
+          process.argv.slice(3),
+          defaultDeps.readFile,
+        );
+      } catch (e) {
+        console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        process.exit(1);
+      }
       return printResult(
         await triggersFireFlow(
           workflowRef,
           {
             n,
             text: flagString(flags, "text"),
+            imageRigOverrides: fireOverrides,
             wait: flags["wait"] === true,
             json,
             onProgressLine: (line) => console.log(line),
