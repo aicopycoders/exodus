@@ -4,7 +4,7 @@ import nodePath from "node:path";
 import { apiGet, apiGetText, apiPost, apiPostDashboard, getDashboardUrl, } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
-import { normalizeRunStatus, runStatusLabel, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
+import { normalizeRunStatus, runStatusLabel, storedWorkflowStatusForms, workflowRunPresentation, RUN_STATUS_LABELS, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
@@ -428,6 +428,17 @@ function gateParkedNodeId(status, pauseReason, pausedNodeId) {
         return pausedNodeId;
     }
     return undefined;
+}
+function runVerdict(run) {
+    const presented = workflowRunPresentation(run.status, run.pauseReason);
+    if ((presented.status === "succeeded" || presented.status === "succeeded-with-warnings") &&
+        (run.counts?.failed ?? 0) > 0 &&
+        run.deliveries !== undefined &&
+        run.deliveries.length > 0 &&
+        !run.deliveries.some((d) => d.status === "delivered")) {
+        return `${RUN_STATUS_LABELS.failed} — nothing delivered`;
+    }
+    return presented.detail ? `${presented.label} — ${presented.detail}` : presented.label;
 }
 const RETIRED_GATE_VERB_POINTER = "The Gate node retired in 2.0 — runs now pause at a Checkpoint box on the canvas. " +
     "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
@@ -948,7 +959,7 @@ export function formatWorkflowList(workflows) {
 export function formatRecentRuns(runs) {
     if (runs.length === 0)
         return "No workflow runs found for the active brand.";
-    return table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runStatusLabel(r.status), dateOnly(r.createdAt), r._id]));
+    return table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]));
 }
 export function formatWorkflowVersions(versions) {
     if (versions.length === 0) {
@@ -1026,7 +1037,7 @@ export function formatWorkflowRun(run) {
     lines.push(`workflowId:   ${run.workflowId}`);
     if (run.triggerRunId)
         lines.push(`triggerRunId: ${run.triggerRunId}`);
-    lines.push(`verdict:      ${runStatusLabel(run.status)}${counts ? ` (${counts})` : ""}`);
+    lines.push(`verdict:      ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
     if (run.isTerminal)
         lines.push("terminal:     yes");
     if (run.error)
@@ -1051,8 +1062,9 @@ export function formatWorkflowRun(run) {
     if (run.deliveries && run.deliveries.length > 0) {
         lines.push("");
         lines.push(`Deliveries (${run.deliveries.length}):`);
-        for (const delivery of run.deliveries)
-            lines.push(...deliveryLines(delivery));
+        for (const delivery of run.deliveries) {
+            lines.push(...deliveryLines(delivery, parkedNodeId));
+        }
     }
     if (run.outputs && run.outputs.length > 0) {
         lines.push("");
@@ -1070,9 +1082,10 @@ export function formatWorkflowRun(run) {
     }
     return lines.join("\n");
 }
+const NOT_YET_APPROVED = "awaiting approval, not yet approved";
 function runOutputLines(output, awaitingReview = false) {
     const slug = output.botSlug ? ` (${output.botSlug})` : "";
-    const review = awaitingReview ? " — awaiting approval, not yet approved" : "";
+    const review = awaitingReview ? ` — ${NOT_YET_APPROVED}` : "";
     if (output.type === "image") {
         return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
     }
@@ -1102,14 +1115,19 @@ function runOutputLines(output, awaitingReview = false) {
     const note = normalized.length > 400 ? "\n    (truncated — use --json for the full text)" : "";
     return [`  ${output.label} [text]${slug}${review}:`, `    ${body}${note}`];
 }
-function deliveryLines(delivery) {
-    const status = delivery.status === "unfulfilled" && delivery.error
-        ? `unfulfilled — ${delivery.error}`
-        : delivery.status;
+function deliveryLines(delivery, parkedNodeId) {
+    const heldArtifact = (a) => parkedNodeId !== undefined && a.nodeId === parkedNodeId;
+    const held = delivery.status === "delivered" && delivery.artifacts.some(heldArtifact);
+    const status = held
+        ? `held — ${NOT_YET_APPROVED}`
+        : delivery.status === "unfulfilled" && delivery.error
+            ? `unfulfilled — ${delivery.error}`
+            : delivery.status;
     const lines = [`  ${delivery.label} (${delivery.key}) · ${delivery.type} · ${status}`];
     for (const artifact of delivery.artifacts) {
-        for (const line of runOutputLines(artifact))
+        for (const line of runOutputLines(artifact, heldArtifact(artifact))) {
             lines.push(`  ${line}`);
+        }
     }
     return lines;
 }

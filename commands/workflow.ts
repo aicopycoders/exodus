@@ -17,7 +17,9 @@ import {
   normalizeRunStatus,
   runStatusLabel,
   storedWorkflowStatusForms,
+  workflowRunPresentation,
   LEGACY_WORKFLOW_RUN_STATUS_VALUES,
+  RUN_STATUS_LABELS,
   TERMINAL_RUN_STATUSES,
   type RunStatus,
 } from "../lib/runStatus.js";
@@ -1371,6 +1373,36 @@ function gateParkedNodeId(
 }
 
 /**
+ * #1249: the verdict WORD for a run — the ruled #994 display word, plus the
+ * shared presentation seam's park detail ("Awaiting approval — needs repair"),
+ * the same "<ruled word> — <detail>" idiom the dashboard's run header speaks.
+ * Two lies this corrects:
+ *   - a repair/slots park read as a bare "Awaiting approval" (nothing was
+ *     awaiting approval — the inbox already said `repair`), and a "call" park
+ *     read as an approval at all (it is a parent busy on its child, #861);
+ *   - a finished run whose work FAILED and whose exit contract went entirely
+ *     unfulfilled read "Succeeded with warnings" — a member believed they got
+ *     an ad when nothing was delivered. That run is Failed. The demotion needs
+ *     the deliveries to be KNOWN and non-empty: an older backend that omits
+ *     them (or a workflow with no Output nodes) keeps the wire's own word.
+ */
+function runVerdict(
+  run: Pick<WorkflowRun, "status" | "pauseReason" | "counts" | "deliveries">,
+): string {
+  const presented = workflowRunPresentation(run.status, run.pauseReason);
+  if (
+    (presented.status === "succeeded" || presented.status === "succeeded-with-warnings") &&
+    (run.counts?.failed ?? 0) > 0 &&
+    run.deliveries !== undefined &&
+    run.deliveries.length > 0 &&
+    !run.deliveries.some((d) => d.status === "delivered")
+  ) {
+    return `${RUN_STATUS_LABELS.failed} — nothing delivered`;
+  }
+  return presented.detail ? `${presented.label} — ${presented.detail}` : presented.label;
+}
+
+/**
  * The one-line pointer every retired-Gate surface prints (#1012). Kept as a
  * single constant so the CLI verb, the pause banner, and the docs never drift.
  */
@@ -2213,8 +2245,10 @@ export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
   if (runs.length === 0) return "No workflow runs found for the active brand.";
   return table(
     ["workflow", "status", "created", "id"],
-    // #994: the ruled display word, never the raw stored value.
-    runs.map((r) => [r.workflowName, runStatusLabel(r.status), dateOnly(r.createdAt), r._id]),
+    // #994: the ruled display word, never the raw stored value. #1249: with the
+    // park detail when the projection carries pauseReason — a row the server
+    // sends without it degrades to the bare ruled word.
+    runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]),
   );
 }
 
@@ -2313,7 +2347,7 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   if (run.triggerRunId) lines.push(`triggerRunId: ${run.triggerRunId}`);
   // #994: the ruled display word (Succeeded / Succeeded with warnings / …),
   // never the raw stored value in either vocabulary.
-  lines.push(`verdict:      ${runStatusLabel(run.status)}${counts ? ` (${counts})` : ""}`);
+  lines.push(`verdict:      ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
   if (run.isTerminal) lines.push("terminal:     yes");
   if (run.error) lines.push(`error:        ${run.error}`);
   if (Object.keys(run.inputs ?? {}).length > 0) {
@@ -2359,7 +2393,9 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   if (run.deliveries && run.deliveries.length > 0) {
     lines.push("");
     lines.push(`Deliveries (${run.deliveries.length}):`);
-    for (const delivery of run.deliveries) lines.push(...deliveryLines(delivery));
+    for (const delivery of run.deliveries) {
+      lines.push(...deliveryLines(delivery, parkedNodeId));
+    }
   }
 
   if (run.outputs && run.outputs.length > 0) {
@@ -2390,6 +2426,13 @@ export function formatWorkflowRun(run: WorkflowRun): string {
 }
 
 /**
+ * The one unapproved-content phrase — the Outputs artifact suffix and the
+ * Deliveries held header both speak it (#929/#1249), and sharing the literal
+ * is what keeps the two sections from ever drifting apart.
+ */
+const NOT_YET_APPROVED = "awaiting approval, not yet approved";
+
+/**
  * Render one flattened final deliverable — the chaining surface (#508).
  * #929: when the run is parked and this deliverable belongs to the parked node,
  * `awaitingReview` flags it so an agent harvesting outputs from a run that is
@@ -2397,7 +2440,7 @@ export function formatWorkflowRun(run: WorkflowRun): string {
  */
 function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): string[] {
   const slug = output.botSlug ? ` (${output.botSlug})` : "";
-  const review = awaitingReview ? " — awaiting approval, not yet approved" : "";
+  const review = awaitingReview ? ` — ${NOT_YET_APPROVED}` : "";
   if (output.type === "image") {
     return [`  ${output.label} [image]${slug}: ${output.imageUrl ?? output.imageId ?? "(no url)"}${review}`];
   }
@@ -2438,15 +2481,32 @@ function runOutputLines(output: WorkflowRunOutput, awaitingReview = false): stri
  * so its header carries the producer's error instead — that missing-result
  * report is the whole point of the contract.
  */
-function deliveryLines(delivery: WorkflowRunDelivery): string[] {
-  const status =
-    delivery.status === "unfulfilled" && delivery.error
+function deliveryLines(
+  delivery: WorkflowRunDelivery,
+  parkedNodeId?: string,
+): string[] {
+  // #1249: the backend counts a settled checkpoint row as a done producer, so
+  // a slot fed through an UNAPPROVED checkpoint arrives marked "delivered"
+  // while the Output node is still idle. The parked node is the truth (#923):
+  // when the slot's artifacts come off that node's wire, render the hold —
+  // this section and the Outputs section must never disagree about the same
+  // delivery. A slot fed by some OTHER, already-resolved producer on the same
+  // parked run stays "delivered".
+  const heldArtifact = (a: WorkflowRunOutput) =>
+    parkedNodeId !== undefined && a.nodeId === parkedNodeId;
+  const held = delivery.status === "delivered" && delivery.artifacts.some(heldArtifact);
+  const status = held
+    ? `held — ${NOT_YET_APPROVED}`
+    : delivery.status === "unfulfilled" && delivery.error
       ? `unfulfilled — ${delivery.error}`
       : delivery.status;
   const lines = [`  ${delivery.label} (${delivery.key}) · ${delivery.type} · ${status}`];
   for (const artifact of delivery.artifacts) {
     // runOutputLines already indents by 2; nest one level under the slot header.
-    for (const line of runOutputLines(artifact)) lines.push(`  ${line}`);
+    // A held slot's artifacts carry the same #929 flag the Outputs block shows.
+    for (const line of runOutputLines(artifact, heldArtifact(artifact))) {
+      lines.push(`  ${line}`);
+    }
   }
   return lines;
 }
