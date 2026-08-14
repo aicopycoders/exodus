@@ -1,6 +1,7 @@
 import { type ApiResponse } from "../lib/client.js";
 import { type PollOptions, type PollResult } from "../lib/poll.js";
 import { LEGACY_WORKFLOW_RUN_STATUS_VALUES, type RunStatus } from "../lib/runStatus.js";
+import { type RunDeliverySummary } from "../lib/runVerdict.js";
 import { type Channel } from "../lib/channel.js";
 export declare const helpText: string;
 export type WorkflowNodeKind = "brief" | "brief-form" | "asset" | "bot" | "primer" | "image" | "image-rig" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform" | "formatter" | "splitter" | "collector" | "checkpoint" | "prompt";
@@ -140,6 +141,7 @@ export interface WorkflowCatalog {
         nodeKinds: string[];
         briefSources: string[];
         primerKinds: string[];
+        primerAwarenessLanes: string[];
         imageModels: string[];
         aspectRatios: string[];
         imageQuantityModes: string[];
@@ -358,6 +360,7 @@ export interface WorkflowRun {
     nodes: WorkflowRunNode[];
     outputs?: WorkflowRunOutput[];
     deliveries?: WorkflowRunDelivery[];
+    deliverySummary?: RunDeliverySummary;
     sessions?: WorkflowRunSession[];
     pauseReason?: WorkflowPauseReason;
     pausedNodeId?: string;
@@ -400,7 +403,6 @@ export interface FlowResult {
 }
 interface RunFlowOptions {
     inputs: Record<string, string>;
-    terminalNodeIds?: string[];
     fill?: string;
     autoApprove?: boolean;
     imageRigOverrides?: Record<string, unknown>;
@@ -421,7 +423,7 @@ export declare const ASSET_UPLOAD_POLICY: Record<WorkflowMediaType, {
 export declare const NO_DELIVERIES_WARNING: string;
 export declare function noDeliveriesWarning(described: unknown): string | undefined;
 export declare function serverWarningsToPrint(serverWarnings: unknown, alreadyPrinted: string[]): string[];
-export declare function parseTerminalFlags(args: string[]): string[];
+export declare function rejectTerminalFlag(args: string[]): void;
 export declare function parseAutoApproveFlag(args: string[]): boolean;
 export declare function parseRigOverridesFlag(args: string[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
 export declare function parseFillFlag(args: string[]): string | undefined;

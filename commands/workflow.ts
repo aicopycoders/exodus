@@ -15,14 +15,12 @@ import { formatApiError } from "../lib/format.js";
 import { pollUntilDone, type PollOptions, type PollResult } from "../lib/poll.js";
 import {
   normalizeRunStatus,
-  runStatusLabel,
   storedWorkflowStatusForms,
-  workflowRunPresentation,
   LEGACY_WORKFLOW_RUN_STATUS_VALUES,
-  RUN_STATUS_LABELS,
   TERMINAL_RUN_STATUSES,
   type RunStatus,
 } from "../lib/runStatus.js";
+import { runVerdict, type RunDeliverySummary } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel, type Channel } from "../lib/channel.js";
@@ -37,7 +35,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
@@ -85,10 +83,6 @@ Flags:
                          lock. Names are exact (case-sensitive); an unknown one
                          is rejected before the run starts. Fills are created and
                          named in the dashboard's run dialog.
-  --terminal <nodeId>    (run) Repeatable. Scope the run to the upstream closure
-                         of these end node(s) — only nodes feeding a picked
-                         terminal execute; the rest are recorded out-of-scope.
-                         Omit to run the whole graph.
   --rig-overrides <json> (run, triggers fire) Change what an Image Rig box fires
                          for THIS ONE run, without editing the saved workflow —
                          a different number of images, a different meme format,
@@ -178,7 +172,6 @@ Examples:
   exodus workflow run "Product Shots" --input hero=https://example.com/hero.png
   exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
   exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
-  exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
   exodus workflow run "Launch Flow" --auto-approve --wait
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
@@ -575,6 +568,8 @@ export interface WorkflowCatalog {
     nodeKinds: string[];
     briefSources: string[];
     primerKinds: string[];
+    /** #1258: the body kind's optional awareness lanes (config.primerAwareness). */
+    primerAwarenessLanes: string[];
     imageModels: string[];
     aspectRatios: string[];
     imageQuantityModes: string[];
@@ -982,6 +977,15 @@ export interface WorkflowRun {
    * omits the field entirely, so every render must tolerate its absence.
    */
   deliveries?: WorkflowRunDelivery[];
+  /**
+   * #1261: the COUNTED twin of `deliveries` — how many of the run's promised
+   * slots arrived. The recent-runs LIST gets this instead of the full contract
+   * (a list must never ship every run's artifacts), and it is exactly what the
+   * shared verdict needs, so the list and the detail reach the same word.
+   * Absent on the run detail (which carries `deliveries` itself) and on any
+   * backend older than #1261 — absent means "can't say", never "nothing".
+   */
+  deliverySummary?: RunDeliverySummary;
   /** #893: chat sessions this run opened (session-mode bots). */
   sessions?: WorkflowRunSession[];
   // #891: the park surface. Present on a parked run-detail; the
@@ -1062,9 +1066,11 @@ export interface FlowResult {
 
 interface RunFlowOptions {
   inputs: Record<string, string>;
-  // #860: scope the run to the upstream closure of these terminal node ids.
-  // Empty / undefined runs the whole graph (unchanged behavior).
-  terminalNodeIds?: string[];
+  // #1259: no scoping option lives here any more. #860's `terminalNodeIds`
+  // (run only the upstream closure of some end nodes) was repealed by #1222 —
+  // a run now executes the whole workflow or it doesn't start — so the CLI no
+  // longer has a partial-run payload to send. `--terminal` is refused before
+  // any request is made (rejectTerminalFlag).
   /**
    * #1013: the NAME of a saved fill on this brand's copy of the workflow. The
    * server loads its stored values as the launch payload; anything in `inputs`
@@ -1148,6 +1154,10 @@ const VALUE_FLAGS = new Set([
   "category",
   "slug",
   "update",
+  // #1259: --terminal is REFUSED now (partial runs were repealed by #1222), but
+  // it stays listed here so parsePositional still skips its value — otherwise
+  // `run --terminal out-a "Flow"` would read "out-a" as the workflow name and
+  // complain about the wrong thing instead of naming the dead flag.
   "terminal",
   // #1013: `workflow run <ref> --fill <name>` takes a saved fill's name.
   "fill",
@@ -1372,35 +1382,10 @@ function gateParkedNodeId(
   return undefined;
 }
 
-/**
- * #1249: the verdict WORD for a run — the ruled #994 display word, plus the
- * shared presentation seam's park detail ("Awaiting approval — needs repair"),
- * the same "<ruled word> — <detail>" idiom the dashboard's run header speaks.
- * Two lies this corrects:
- *   - a repair/slots park read as a bare "Awaiting approval" (nothing was
- *     awaiting approval — the inbox already said `repair`), and a "call" park
- *     read as an approval at all (it is a parent busy on its child, #861);
- *   - a finished run whose work FAILED and whose exit contract went entirely
- *     unfulfilled read "Succeeded with warnings" — a member believed they got
- *     an ad when nothing was delivered. That run is Failed. The demotion needs
- *     the deliveries to be KNOWN and non-empty: an older backend that omits
- *     them (or a workflow with no Output nodes) keeps the wire's own word.
- */
-function runVerdict(
-  run: Pick<WorkflowRun, "status" | "pauseReason" | "counts" | "deliveries">,
-): string {
-  const presented = workflowRunPresentation(run.status, run.pauseReason);
-  if (
-    (presented.status === "succeeded" || presented.status === "succeeded-with-warnings") &&
-    (run.counts?.failed ?? 0) > 0 &&
-    run.deliveries !== undefined &&
-    run.deliveries.length > 0 &&
-    !run.deliveries.some((d) => d.status === "delivered")
-  ) {
-    return `${RUN_STATUS_LABELS.failed} — nothing delivered`;
-  }
-  return presented.detail ? `${presented.label} — ${presented.detail}` : presented.label;
-}
+// #1249's verdict picker moved to ../lib/runVerdict.ts (#1261) so the run
+// DETAIL, the recent-runs LIST and the verb refusals all read it from one
+// place — the list used to compute its own word and disagreed with the detail
+// about the very same run.
 
 /**
  * The one-line pointer every retired-Gate surface prints (#1012). Kept as a
@@ -1926,10 +1911,6 @@ export function serverWarningsToPrint(
  * then — the bytes move. That way a bad third file can't leave the first two
  * registered with nothing pointing at them.
  *
- * `scoped` is true when the caller passed `--terminal`: the run may legitimately
- * exclude the Asset Input node, so the client-side "you didn't pass the required
- * file" check is left to the server's scope-aware preflight.
- *
  * #1082: the same describe payload also answers "does this workflow promise
  * anything?", so the returned `warnings` ride back out with the prepared inputs
  * — the caller prints them to stderr before spending the run. Warnings never
@@ -1946,7 +1927,6 @@ async function prepareRunInputs(
   raw: Record<string, string>,
   deps: WorkflowRunDeps,
   note: (line: string) => void,
-  scoped: boolean,
 ): Promise<PreparedRunInputs> {
   const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
   if (!described.ok) {
@@ -1985,23 +1965,22 @@ async function prepareRunInputs(
     if (descriptor?.type === "multi-select") multiFields.add(descriptor.fieldName);
   }
 
-  // A `--terminal` run only executes the picked end nodes' upstream closure, so
-  // an unfilled Asset Input may simply not be in it. Only the server knows the
-  // closure, so scoped runs skip this check and let its preflight rule.
-  if (!scoped) {
-    const missing = [...assetFields.values()].filter(
-      (d) => d.required && (raw[d.fieldName] ?? "").trim() === "",
+  // #1259: this check used to be skipped for a `--terminal` (scoped) run, whose
+  // closure might not contain the Asset Input node at all. #1222 repealed
+  // partial runs — every run covers the whole graph — so a required file input
+  // left blank is always a miss, and the check always runs.
+  const missing = [...assetFields.values()].filter(
+    (d) => d.required && (raw[d.fieldName] ?? "").trim() === "",
+  );
+  if (missing.length > 0) {
+    const names = missing.map((d) => d.fieldName).join(", ");
+    const first = missing[0];
+    throw new Error(
+      `Missing required file input(s): ${names}. Pass each one as a local file ` +
+        `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
+        `--input ${first.fieldName}=https://…` +
+        (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""),
     );
-    if (missing.length > 0) {
-      const names = missing.map((d) => d.fieldName).join(", ");
-      const first = missing[0];
-      throw new Error(
-        `Missing required file input(s): ${names}. Pass each one as a local file ` +
-          `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
-          `--input ${first.fieldName}=https://…` +
-          (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""),
-      );
-    }
   }
 
   // ── Pass 1: settle every value locally, collecting EVERY problem ─────────
@@ -2075,37 +2054,32 @@ async function prepareRunInputs(
 }
 
 /**
- * Collect the repeatable `--terminal <nodeId>` flag (#860) into an ordered list
- * of node ids. Accepts both `--terminal id` and `--terminal=id`. An empty list
- * means "run the whole graph" (the flag was never passed). Mirrors the
- * `--input` repeat convention (parseInputFlags) so both flags read the raw argv.
+ * #1259: `--terminal <nodeId>` (#860) used to scope a run to the upstream
+ * closure of some end nodes. #1222 repealed partial runs — the server refuses
+ * ANY launch that would skip a step — so the flag can no longer do anything but
+ * fail. It is still READ, off the raw argv, purely so an old script gets one
+ * plain sentence here instead of a raw server error after a round trip. The
+ * flag is no longer advertised in the help text.
+ *
+ * Throws when the flag appears in any form (`--terminal id`, `--terminal=id`,
+ * or bare); returns silently when it doesn't.
  */
-export function parseTerminalFlags(args: string[]): string[] {
-  const ids: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let raw: string | undefined;
-    if (arg === "--terminal") {
-      raw = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--terminal=")) {
-      raw = arg.slice("--terminal=".length);
-    } else {
-      continue;
+export function rejectTerminalFlag(args: string[]): void {
+  for (const arg of args) {
+    if (arg === "--terminal" || arg.startsWith("--terminal=")) {
+      throw new Error(
+        "--terminal is no longer supported: a run now executes the whole " +
+          "workflow or it doesn't start. Re-run without --terminal.",
+      );
     }
-    if (raw === undefined) throw new Error("--terminal requires a node id");
-    const id = raw.trim();
-    if (!id) throw new Error("--terminal requires a node id");
-    ids.push(id);
   }
-  return ids;
 }
 
 /**
  * Read the `--fill <name>` flag (#1013) off the raw argv — the saved fill a run
  * launches from. Accepts both `--fill name` and `--fill=name`, mirroring the
- * `--input`/`--terminal` parse convention; the shared flags map splits neither
- * form reliably, and a fill silently dropped would launch the WRONG run. Returns
+ * `--input` parse convention; the shared flags map splits neither form
+ * reliably, and a fill silently dropped would launch the WRONG run. Returns
  * undefined when the flag was never passed; throws when it was passed empty.
  */
 /**
@@ -2115,8 +2089,8 @@ export function parseTerminalFlags(args: string[]): string[] {
  * `{"auto-approve": "Flow"}` — and a strict `=== true` check would silently
  * launch ATTENDED, which is the one failure nobody is around to notice. Raw
  * presence is the truth: the flag takes no value, so seeing it at all means it
- * was passed. (Same raw-argv convention as --input/--terminal/--fill; an
- * `--auto-approve=...` form is rejected rather than guessed at.)
+ * was passed. (Same raw-argv convention as --input/--fill; an `--auto-approve=...`
+ * form is rejected rather than guessed at.)
  */
 export function parseAutoApproveFlag(args: string[]): boolean {
   for (const arg of args) {
@@ -2247,7 +2221,9 @@ export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
     ["workflow", "status", "created", "id"],
     // #994: the ruled display word, never the raw stored value. #1249: with the
     // park detail when the projection carries pauseReason — a row the server
-    // sends without it degrades to the bare ruled word.
+    // sends without it degrades to the bare ruled word. #1261: the SAME shared
+    // verdict the run detail prints, fed the server's `deliverySummary` so the
+    // "Failed — nothing delivered" demotion reaches this screen too.
     runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]),
   );
 }
@@ -2860,6 +2836,12 @@ function formatBotVocabulary(catalog: WorkflowCatalog): string {
   lines.push(`  node kinds:    ${v.nodeKinds.join(", ")}`);
   lines.push(`  brief sources: ${v.briefSources.join(", ")}`);
   lines.push(`  primer kinds:  ${v.primerKinds.join(", ")}`);
+  // #1258: tolerant read — a pre-#1258 server omits the lanes.
+  if (v.primerAwarenessLanes?.length) {
+    lines.push(
+      `  body primer awareness lanes (config.primerAwareness, body kind only): ${v.primerAwarenessLanes.join(", ")}`,
+    );
+  }
   lines.push(`  image models:  ${v.imageModels.join(", ")}`);
   lines.push(`  aspect ratios: ${v.aspectRatios.join(", ")}`);
   lines.push(
@@ -3298,7 +3280,6 @@ export async function runFlow(
   // Upload notes stream immediately when the caller streams (they happen before
   // the run exists); otherwise they ride ahead of the returned lines.
   const preface: string[] = [];
-  const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
   let prepared: PreparedRunInputs;
   try {
     prepared = await prepareRunInputs(
@@ -3310,7 +3291,6 @@ export async function runFlow(
         if (opts.onProgressLine) opts.onProgressLine(line);
         else preface.push(line);
       },
-      scoped,
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -3342,11 +3322,6 @@ export async function runFlow(
     // omitted entirely when no --fill was passed, so an ordinary run's body is
     // byte-identical to pre-#1013.
     ...(opts.fill && opts.fill.trim() !== "" ? { fill: opts.fill.trim() } : {}),
-    // #860: scope the run to the upstream closure of these terminals. Omitted
-    // when no --terminal was passed, so an unscoped run's body is byte-identical.
-    ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
-      ? { terminalNodeIds: opts.terminalNodeIds }
-      : {}),
     // #1079: unattended launch — the server auto-approves every Checkpoint this
     // run reaches. Only ever sent as `true`: omitted when the flag is absent, so
     // an ordinary run's body stays byte-identical to pre-#1079 and no backend
@@ -3982,7 +3957,18 @@ export async function triggersSetEnabledFlow(
   if (!res.ok) return triggerErrorResult(res, verb, opts.json);
 
   if (opts.json) return { code: 0, lines: [JSON.stringify(res.data)] };
-  return { code: 0, lines: [`Trigger ${n} ${enabled ? "enabled" : "disabled"}.`] };
+  const lines = [`Trigger ${n} ${enabled ? "enabled" : "disabled"}.`];
+  // #1260: the server's arming advisories — e.g. enabling a schedule on a
+  // workflow whose required input has no saved default, which would reject
+  // every fire at the door. Same rendering as the import summary's warnings;
+  // absent from an older backend, so guard the shape.
+  const warnings = (res.data as { warnings?: unknown } | null)?.warnings;
+  if (Array.isArray(warnings)) {
+    for (const w of warnings) {
+      if (typeof w === "string") lines.push(`  ⚠ ${w}`);
+    }
+  }
+  return { code: 0, lines };
 }
 
 interface TriggerFireResponse {
@@ -4366,9 +4352,12 @@ function asWorkflowRun(data: unknown): WorkflowRun | undefined {
 /** Human phrase for a run's ACTUAL park state — used when a preflight fails. */
 function describePark(run: WorkflowRun): string {
   // #994: normalize before testing, and name a non-parked state with the ruled
-  // display word rather than the raw stored value.
+  // display word rather than the raw stored value. #1261: through the SHARED
+  // verdict, so a refusal can't call a run "Succeeded with warnings" while its
+  // own status screen calls it Failed. (Park detail can't apply on this branch
+  // — the run is not awaiting approval.)
   if (normalizeRunStatus(run.status) !== "awaiting-approval") {
-    return `status: ${runStatusLabel(run.status)}`;
+    return `status: ${runVerdict(run)}`;
   }
   switch (run.pauseReason) {
     // #1012: a LEGACY park at the retired Gate node — unresumable, cancel only.
@@ -5139,7 +5128,6 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       process.exit(1);
     }
     let inputs: Record<string, string>;
-    let terminalNodeIds: string[];
     let fill: string | undefined;
     let autoApprove: boolean;
     let imageRigOverrides: Record<string, unknown> | undefined;
@@ -5147,9 +5135,10 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       // Stage 3B: parse RAW. runFlow expands `@path` text inputs and uploads
       // file inputs once describe has said which fields are which.
       inputs = parseRawInputFlags(process.argv.slice(3));
-      // #860: --terminal repeats like --input, so read the raw argv (the shared
-      // flags map only keeps the last value of a repeated flag).
-      terminalNodeIds = parseTerminalFlags(process.argv.slice(3));
+      // #1259: --terminal (partial runs, #860) was repealed by #1222. Refuse it
+      // HERE, before a single request goes out, so an old script gets one plain
+      // sentence instead of a raw server error.
+      rejectTerminalFlag(process.argv.slice(3));
       // #1013: --fill reads the raw argv too, so `--fill=<name>` can't be
       // swallowed and an empty one fails loud instead of launching fill-less.
       fill = parseFillFlag(process.argv.slice(3));
@@ -5173,7 +5162,6 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         workflowRef,
         {
           inputs,
-          terminalNodeIds,
           // #1013: reuse a saved fill by name; --input still wins per key.
           fill,
           // #1079: parsed off the raw argv above (parseAutoApproveFlag), never

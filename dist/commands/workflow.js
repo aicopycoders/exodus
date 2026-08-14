@@ -4,7 +4,8 @@ import nodePath from "node:path";
 import { apiGet, apiGetText, apiPost, apiPostDashboard, getDashboardUrl, } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
-import { normalizeRunStatus, runStatusLabel, storedWorkflowStatusForms, workflowRunPresentation, RUN_STATUS_LABELS, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
+import { normalizeRunStatus, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
+import { runVerdict } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
@@ -18,7 +19,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--terminal <nodeId> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--id <runId>] [--out <dir>] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
@@ -66,10 +67,6 @@ Flags:
                          lock. Names are exact (case-sensitive); an unknown one
                          is rejected before the run starts. Fills are created and
                          named in the dashboard's run dialog.
-  --terminal <nodeId>    (run) Repeatable. Scope the run to the upstream closure
-                         of these end node(s) — only nodes feeding a picked
-                         terminal execute; the rest are recorded out-of-scope.
-                         Omit to run the whole graph.
   --rig-overrides <json> (run, triggers fire) Change what an Image Rig box fires
                          for THIS ONE run, without editing the saved workflow —
                          a different number of images, a different meme format,
@@ -159,7 +156,6 @@ Examples:
   exodus workflow run "Product Shots" --input hero=https://example.com/hero.png
   exodus workflow run "Launch Flow" --fill "Weekly promo" --wait
   exodus workflow run "Launch Flow" --fill "Weekly promo" --input brief="new offer"
-  exodus workflow run "Launch Flow" --terminal bot-3 --terminal image-2
   exodus workflow run "Launch Flow" --auto-approve --wait
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
@@ -428,17 +424,6 @@ function gateParkedNodeId(status, pauseReason, pausedNodeId) {
         return pausedNodeId;
     }
     return undefined;
-}
-function runVerdict(run) {
-    const presented = workflowRunPresentation(run.status, run.pauseReason);
-    if ((presented.status === "succeeded" || presented.status === "succeeded-with-warnings") &&
-        (run.counts?.failed ?? 0) > 0 &&
-        run.deliveries !== undefined &&
-        run.deliveries.length > 0 &&
-        !run.deliveries.some((d) => d.status === "delivered")) {
-        return `${RUN_STATUS_LABELS.failed} — nothing delivered`;
-    }
-    return presented.detail ? `${presented.label} — ${presented.detail}` : presented.label;
 }
 const RETIRED_GATE_VERB_POINTER = "The Gate node retired in 2.0 — runs now pause at a Checkpoint box on the canvas. " +
     "Use: exodus workflow checkpoint <runId> [approve|edit|retry|cancel]";
@@ -732,7 +717,7 @@ export function serverWarningsToPrint(serverWarnings, alreadyPrinted) {
     }
     return out;
 }
-async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
+async function prepareRunInputs(workflowId, raw, deps, note) {
     const described = await deps.get(`${DESCRIBE_PATH}?id=${encodeURIComponent(workflowId)}`);
     if (!described.ok) {
         const fileish = Object.keys(raw).filter((key) => looksLikeFileArgument(raw[key], deps));
@@ -761,16 +746,14 @@ async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
         if (descriptor?.type === "multi-select")
             multiFields.add(descriptor.fieldName);
     }
-    if (!scoped) {
-        const missing = [...assetFields.values()].filter((d) => d.required && (raw[d.fieldName] ?? "").trim() === "");
-        if (missing.length > 0) {
-            const names = missing.map((d) => d.fieldName).join(", ");
-            const first = missing[0];
-            throw new Error(`Missing required file input(s): ${names}. Pass each one as a local file ` +
-                `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
-                `--input ${first.fieldName}=https://…` +
-                (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""));
-        }
+    const missing = [...assetFields.values()].filter((d) => d.required && (raw[d.fieldName] ?? "").trim() === "");
+    if (missing.length > 0) {
+        const names = missing.map((d) => d.fieldName).join(", ");
+        const first = missing[0];
+        throw new Error(`Missing required file input(s): ${names}. Pass each one as a local file ` +
+            `or a URL — e.g. --input ${first.fieldName}=./path/to/file or ` +
+            `--input ${first.fieldName}=https://…` +
+            (first.assetType ? ` (${acceptedLabel(first.assetType)})` : ""));
     }
     const prepared = {};
     const planned = [];
@@ -829,29 +812,13 @@ async function prepareRunInputs(workflowId, raw, deps, note, scoped) {
     }
     return { inputs: prepared, warnings };
 }
-export function parseTerminalFlags(args) {
-    const ids = [];
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let raw;
-        if (arg === "--terminal") {
-            raw = args[i + 1];
-            i++;
+export function rejectTerminalFlag(args) {
+    for (const arg of args) {
+        if (arg === "--terminal" || arg.startsWith("--terminal=")) {
+            throw new Error("--terminal is no longer supported: a run now executes the whole " +
+                "workflow or it doesn't start. Re-run without --terminal.");
         }
-        else if (arg.startsWith("--terminal=")) {
-            raw = arg.slice("--terminal=".length);
-        }
-        else {
-            continue;
-        }
-        if (raw === undefined)
-            throw new Error("--terminal requires a node id");
-        const id = raw.trim();
-        if (!id)
-            throw new Error("--terminal requires a node id");
-        ids.push(id);
     }
-    return ids;
 }
 export function parseAutoApproveFlag(args) {
     for (const arg of args) {
@@ -1362,6 +1329,9 @@ function formatBotVocabulary(catalog) {
     lines.push(`  node kinds:    ${v.nodeKinds.join(", ")}`);
     lines.push(`  brief sources: ${v.briefSources.join(", ")}`);
     lines.push(`  primer kinds:  ${v.primerKinds.join(", ")}`);
+    if (v.primerAwarenessLanes?.length) {
+        lines.push(`  body primer awareness lanes (config.primerAwareness, body kind only): ${v.primerAwarenessLanes.join(", ")}`);
+    }
     lines.push(`  image models:  ${v.imageModels.join(", ")}`);
     lines.push(`  aspect ratios: ${v.aspectRatios.join(", ")}`);
     lines.push(`  custom bot:    set a bot node's slug to "${catalog.customBot.slug}" and ` +
@@ -1717,7 +1687,6 @@ export async function runFlow(workflowRef, opts, deps) {
         return resolveIdErrorResult(e, opts.json ?? false);
     }
     const preface = [];
-    const scoped = (opts.terminalNodeIds?.length ?? 0) > 0;
     let prepared;
     try {
         prepared = await prepareRunInputs(workflowId, opts.inputs, deps, (line) => {
@@ -1727,7 +1696,7 @@ export async function runFlow(workflowRef, opts, deps) {
                 opts.onProgressLine(line);
             else
                 preface.push(line);
-        }, scoped);
+        });
     }
     catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -1749,9 +1718,6 @@ export async function runFlow(workflowRef, opts, deps) {
         workflowId,
         ...(Object.keys(inputs).length > 0 ? { inputs } : {}),
         ...(opts.fill && opts.fill.trim() !== "" ? { fill: opts.fill.trim() } : {}),
-        ...(opts.terminalNodeIds && opts.terminalNodeIds.length > 0
-            ? { terminalNodeIds: opts.terminalNodeIds }
-            : {}),
         ...(opts.autoApprove === true ? { autoApprove: true } : {}),
         ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
         launchedVia: "cli",
@@ -2138,7 +2104,15 @@ export async function triggersSetEnabledFlow(workflowRef, n, enabled, opts, deps
         return triggerErrorResult(res, verb, opts.json);
     if (opts.json)
         return { code: 0, lines: [JSON.stringify(res.data)] };
-    return { code: 0, lines: [`Trigger ${n} ${enabled ? "enabled" : "disabled"}.`] };
+    const lines = [`Trigger ${n} ${enabled ? "enabled" : "disabled"}.`];
+    const warnings = res.data?.warnings;
+    if (Array.isArray(warnings)) {
+        for (const w of warnings) {
+            if (typeof w === "string")
+                lines.push(`  ⚠ ${w}`);
+        }
+    }
+    return { code: 0, lines };
 }
 export async function triggersFireFlow(workflowRef, opts, deps) {
     const verb = "workflow triggers fire";
@@ -2378,7 +2352,7 @@ function asWorkflowRun(data) {
 }
 function describePark(run) {
     if (normalizeRunStatus(run.status) !== "awaiting-approval") {
-        return `status: ${runStatusLabel(run.status)}`;
+        return `status: ${runVerdict(run)}`;
     }
     switch (run.pauseReason) {
         case "taste":
@@ -2872,13 +2846,12 @@ export async function run(flags) {
             process.exit(1);
         }
         let inputs;
-        let terminalNodeIds;
         let fill;
         let autoApprove;
         let imageRigOverrides;
         try {
             inputs = parseRawInputFlags(process.argv.slice(3));
-            terminalNodeIds = parseTerminalFlags(process.argv.slice(3));
+            rejectTerminalFlag(process.argv.slice(3));
             fill = parseFillFlag(process.argv.slice(3));
             autoApprove = parseAutoApproveFlag(process.argv.slice(3));
             imageRigOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
@@ -2889,7 +2862,6 @@ export async function run(flags) {
         }
         return printResult(await runFlow(workflowRef, {
             inputs,
-            terminalNodeIds,
             fill,
             autoApprove,
             imageRigOverrides,

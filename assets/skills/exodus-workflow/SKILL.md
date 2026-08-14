@@ -8,7 +8,7 @@ Core — discover & run:
   exodus workflow list [--json]                              List the brand's saved workflows
   exodus workflow describe <workflowId|name> [--json]        Inputs, prerequisites, outputs
   exodus workflow bots [--category <cat>] [--slug <slug>] [--json]   Bot catalog / one bot's spec
-  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--terminal <nodeId> ...] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
+  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
   exodus workflow status [--id <runId>] [--out <dir>] [--json]   Poll a run / read its outputs
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]   Dump the contract (YAML)
 
@@ -50,8 +50,6 @@ Flag notes that add agent-level guidance (everything else is in --help):
                        earlier upload is relayed as-is. Accepted: image PNG/JPEG/
                        WebP/GIF ≤15MB, video MP4/MOV/WebM ≤200MB, audio MP3/M4A/
                        WAV/OGG ≤50MB, document PDF/TXT/MD/DOC/DOCX ≤25MB.
-  --terminal <nodeId>  (run) Repeatable. Scope the run to the upstream closure of
-                       these end node(s); omit to run the whole graph.
   --auto-approve       (run) Send this ONE run off unattended: every Checkpoint it
                        reaches is approved for you, exactly as it stands, and the
                        run records that nobody looked. Without it a Checkpoint
@@ -133,7 +131,7 @@ npx @aicopycoders/exodus workflow run "Product Shots" --input hero=./photos/hero
 
 A bare path is the argument (a leading `@` is accepted and ignored — a file field never text-expands). Accepted files: **image** PNG/JPEG/WebP/GIF ≤15MB · **video** MP4/MOV/WebM ≤200MB · **audio** MP3/M4A/WAV/OGG ≤50MB · **document** PDF/TXT/MD/DOC/DOCX ≤25MB. **Every file you passed is checked first — all of them — before a single byte moves**, so one bad path can't leave the others half-uploaded; you get every problem in one message and fix them in one edit. If an upload itself dies partway, the message names the asset ids that DID land so you can pass those instead of re-uploading them.
 
-There is no file picker and no prompt: a required file input with no `--input` fails immediately, naming the flag to pass — **unless you scoped the run with `--terminal`**, since the file's node may not even be in that slice; there the server decides. If you already uploaded the file on an earlier run, pass the asset id instead of the path and it's relayed as-is.
+There is no file picker and no prompt: a required file input with no `--input` fails immediately, naming the flag to pass. If you already uploaded the file on an earlier run, pass the asset id instead of the path and it's relayed as-is.
 
 One edge case worth knowing: the CLI reads the workflow's input list before it uploads anything. If that read fails (the server is down or flaking) and any value you passed looks like a file path, the run stops right there rather than sending your path as literal text. Retry, or pass an already-uploaded asset id.
 
@@ -149,7 +147,7 @@ npx @aicopycoders/exodus workflow run "Launch Flow" --input brief="new cortisol 
 npx @aicopycoders/exodus workflow status --id <runId>
 ```
 
-To run only part of a graph, scope it with `--terminal <nodeId>` (repeatable): only nodes feeding the picked end node(s) execute; the rest are recorded out-of-scope.
+There is no way to run only part of a graph: a run executes the whole workflow or it doesn't start.
 
 **Read the `Deliveries:` block first.** Each Output node on the canvas is a named, typed promise — "Final ad copy · text", "Hero image · asset" — and a finished run answers every one of them: `delivered` with the artifacts underneath, or `unfulfilled` with the reason the upstream node gave. That block is the honest scorecard; the `Outputs:` block below it is the same artifacts as one flat pile, kept for chaining. If a run says `completed` but a slot says `unfulfilled`, the workflow did NOT deliver what it promised — say so.
 
