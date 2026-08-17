@@ -87,9 +87,13 @@ export function findParentRoot(startDir: string = process.cwd()): string {
   return startDir;
 }
 
+// Mirror of lib/state.ts's `State`. Kept duplicated on purpose: state.ts
+// imports findParentRoot from here, so sharing the type would close an import
+// cycle. Any new state.json field must be added in BOTH places (#588).
 interface StateFile {
   activeBrand?: string;
   layoutVersion?: number;
+  scaffoldVersion?: string;
 }
 
 function readStateFile(root: string): StateFile {

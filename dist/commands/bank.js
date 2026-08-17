@@ -51,7 +51,7 @@ const LIST_PATH = "/api/v2/banks";
 const SHOW_PATH = "/api/v2/banks/show";
 const PROMOTE_PATH = "/api/v2/banks/promote";
 const FLYWHEEL_LINE = 'Winner Flywheel: "winner-promoted" dispatched — any workflow with an enabled ' +
-    "trigger starts a background run (watch: exodus workflow inbox)";
+    "trigger starts a background run (see it: exodus workflow status)";
 const VALUE_FLAGS = new Set(["file", "awareness", "spend", "roas", "ctr", "note", "run", "node"]);
 const defaultDeps = {
     get: (path) => apiGet(path),

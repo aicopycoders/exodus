@@ -11,6 +11,8 @@ import {
 import { loadWorkspaceEnv } from "../lib/load-env.js";
 import { ensureBrandDir } from "../lib/layout.js";
 import { pkgRef } from "../lib/channel.js";
+import { setScaffoldVersion } from "../lib/state.js";
+import { getVersion } from "../lib/version.js";
 
 export const helpText = `
 exodus init — Set up (or refresh) an Exodus workspace in the current folder
@@ -42,6 +44,11 @@ export function scaffoldInit(root: string): InitResult {
   const skills = writeSkills(root);
   writeReferences(root);
   const docs = writeDocs(root);
+  // Stamp AFTER the writes land, so a half-finished scaffold never claims to
+  // be current. This is the only writer of the stamp — `ensureBaseDirs` seeds
+  // state.json only when it is absent, so an existing install would otherwise
+  // stay unstamped forever and doctor could never see stale skills (#588).
+  setScaffoldVersion(getVersion(), root);
   return { existing, envCreated, skills, docs };
 }
 

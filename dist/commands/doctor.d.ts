@@ -13,6 +13,7 @@ export declare function checkEnvFile(): CheckResult;
 export declare function checkWhoami(): Promise<CheckResult>;
 export declare function checkActiveBrandMatch(): Promise<CheckResult>;
 export declare function checkExodusDistFreshness(pkgRootOverride?: string): CheckResult;
+export declare function checkScaffoldedSkills(rootOverride?: string, assetsSearchOverride?: string): CheckResult;
 export declare function checkVersionCurrency(pkgRootOverride?: string, fetchImpl?: typeof fetch): Promise<CheckResult>;
 export declare function checkApiAndDrive(): Promise<CheckResult[]>;
 export declare function checkDashboardAuth(): Promise<CheckResult>;

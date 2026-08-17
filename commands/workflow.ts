@@ -15,6 +15,7 @@ import { formatApiError } from "../lib/format.js";
 import { pollUntilDone, type PollOptions, type PollResult } from "../lib/poll.js";
 import {
   normalizeRunStatus,
+  isTerminalRunStatus,
   storedWorkflowStatusForms,
   LEGACY_WORKFLOW_RUN_STATUS_VALUES,
   TERMINAL_RUN_STATUSES,
@@ -36,7 +37,9 @@ Usage:
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
   exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
-  exodus workflow status [--id <runId>] [--out <dir>] [--json]
+  exodus workflow status [--json]
+  exodus workflow status --id <runId> [--out <dir>] [--json]
+  exodus workflow cancel <runId> [--reason "..."] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
   exodus workflow validate <file> [--update <workflowId>] [--json]
@@ -108,7 +111,12 @@ Flags:
                          Checkpoint box and waits until its fresh output is
                          ready and the run parks again — that IS its finish
                          line; a redo never runs the workflow to completion.
-  --id <runId>           Workflow run id for status detail
+  --id <runId>           (status) One run's full detail. LEAVE IT OFF and status
+                         prints the brand's recent runs instead — workflow name,
+                         status, when it started, and the run id — which is how
+                         you find the id of a run that started in the background
+                         (a trigger fired it, or a promoted winner did) and
+                         never stopped to ask you anything.
   --out <file>           Write the export to a file instead of stdout
   --out <dir>            (run --wait / status --id) Save every delivered output
                          of the finished run into this directory (created if
@@ -136,8 +144,8 @@ Flags:
                          Required for event triggers; rejected for cron triggers.
                          (checkpoint edit) The replacement copy for one output.
   --file <path>          (checkpoint edit) Load the replacement copy from a file.
-  --reason "..."         (checkpoint cancel) Optional reason recorded on the
-                         cancel.
+  --reason "..."         (cancel, checkpoint cancel) Optional reason recorded on
+                         the cancel, so the run's history says why it stopped.
   --note "..."           (checkpoint retry) Optional correction for the redo
                          ("make the hook punchier"). Steps that call a model
                          follow it on the re-run; deterministic steps only
@@ -176,8 +184,10 @@ Examples:
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
+  exodus workflow status                      # recent runs + their ids
   exodus workflow status --id wr_123
   exodus workflow status --id wr_123 --out ./deliverables
+  exodus workflow cancel wr_123 --reason "wrong brief"
   exodus workflow versions "Launch Flow"
   exodus workflow export "Launch Flow" --out workflow.yaml
   exodus workflow export "Launch Flow" --version 3 --out v3.yaml
@@ -250,6 +260,19 @@ Notes:
   workflow bots --json emits the FULL catalog response verbatim (--category /
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
+  workflow status with no --id lists the brand's recent runs — name, status,
+  when it started, and the run id — and that list is the ONLY place a run that
+  never stopped to ask you anything shows up. "workflow inbox" is a different
+  list: it holds runs waiting on a person, so a background run whose workflow
+  has no approval step finishes without ever appearing there. Take an id from
+  the run list, then read it with "workflow status --id <runId>". (#933/#934)
+  workflow cancel <runId> stops a run that has not finished — queued, running,
+  or parked, all of it. The run stops for good and any child workflow it started
+  is cancelled with it; a stop is also sent to the step still running, though
+  that last part is best-effort. --reason records why on the run's history.
+  A run that already finished is refused (nothing to cancel). The older
+  "workflow checkpoint <runId> cancel" is the same action under its old name and
+  keeps working. (#1231)
   workflow inbox lists every run parked waiting on you, badged by park kind
   (checkpoint/repair/slots/gate/legacy) and how it started (bg / trig:<event>).
   A run parked at a Checkpoint box is resolved with the "checkpoint" verbs: show
@@ -455,7 +478,14 @@ export type GraphIssueCode =
   // from a Formatter extract node's FIELD output port. That wire already
   // carries just that field's values, so there is no payload left to look a
   // field up in — clear the field name, or feed it one whole JSON payload.
-  | "splitter-field-conflict";
+  | "splitter-field-conflict"
+  // #519: a wire into a brand-primer port with a Brief set to "swipe-ad" or
+  // "swipe-bundle" anywhere on its upstream rail. Competitor ads are what the
+  // swiper bots read FROM, never the brand's own voice, and running them
+  // through the Primer Extractor/Summarizer does not launder them. Feed the
+  // port a "summary" Primer (or the brand's own materials) and keep the swipe
+  // Brief on the swipe port.
+  | "competitor-source";
 
 export interface GraphIssue {
   code: GraphIssueCode;
@@ -714,6 +744,18 @@ export interface WorkflowDescribeResponse {
    * never collapse into one.
    */
   deliveries?: WorkflowDeliveryDescriptor[];
+  /**
+   * #518: plain-language sentences about the WORKFLOW ITSELF that a reader must
+   * see before they read the contract below — today, exactly one: the graph
+   * builds the brand primer out of competitor swipe material, which the run
+   * doors refuse (#519).
+   *
+   * OPTIONAL for the same reason `deliveries` is: a published CLI binary talks
+   * to backends that predate the field, so `undefined` means "this backend
+   * can't say" (render exactly as before) while `[]` means "nothing to warn
+   * about" — two different facts that must never collapse into one.
+   */
+  warnings?: string[];
 }
 
 // ── Template + schema on-ramp mirrors (#892) ──────────────────────────────
@@ -1438,7 +1480,7 @@ export function formatPauseNotice(
   if (pauseReason === "taste") {
     return [
       "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen at a Checkpoint box.",
-      `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
+      `     Cancel it here: exodus workflow cancel ${runId}`,
       `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
       "     Then run the workflow again.",
     ];
@@ -2215,9 +2257,14 @@ export function formatWorkflowList(workflows: WorkflowListItem[]): string {
   );
 }
 
+// The server's default page size for the bare `workflow status` run list
+// (convex/workflows.ts listRuns clamps `limit ?? 25`). The CLI sends no limit,
+// so a page of exactly this many rows means "there is probably more".
+const RECENT_RUNS_PAGE = 25;
+
 export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
   if (runs.length === 0) return "No workflow runs found for the active brand.";
-  return table(
+  const rows = table(
     ["workflow", "status", "created", "id"],
     // #994: the ruled display word, never the raw stored value. #1249: with the
     // park detail when the projection carries pauseReason — a row the server
@@ -2226,6 +2273,26 @@ export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
     // "Failed — nothing delivered" demotion reaches this screen too.
     runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]),
   );
+  const notes: string[] = [];
+  // #934: the server caps this list at 25 (convex/workflows.ts listRuns) and the
+  // CLI has no --limit, so a full page is very likely a TRUNCATED page. Say so.
+  // This screen is now the documented way to answer "did my promote start a
+  // run?", and a silent cut turns "older than the newest 25" into "nothing ran"
+  // — the exact false negative #933 exists to stop. Its sibling
+  // formatWorkflowVersions has always printed a notice; this one never did.
+  if (runs.length >= RECENT_RUNS_PAGE) {
+    notes.push(
+      `Showing the ${RECENT_RUNS_PAGE} newest runs — there may be older ones this list doesn't reach.`,
+    );
+  }
+  // #1231: this table is where someone watching a job burn money actually
+  // looks, so the off switch is named HERE and not only in --help. Shown only
+  // when something on screen can still be stopped — a footer that never applies
+  // is noise, and noise is how a real hint gets skipped.
+  if (runs.some((r) => !isTerminalRunStatus(r.status))) {
+    notes.push(`Stop one that's still going: exodus workflow cancel <id> --reason "..."`);
+  }
+  return notes.length > 0 ? `${rows}\n\n${notes.join("\n")}` : rows;
 }
 
 export function formatWorkflowVersions(versions: WorkflowVersion[]): string {
@@ -2323,7 +2390,12 @@ export function formatWorkflowRun(run: WorkflowRun): string {
   if (run.triggerRunId) lines.push(`triggerRunId: ${run.triggerRunId}`);
   // #994: the ruled display word (Succeeded / Succeeded with warnings / …),
   // never the raw stored value in either vocabulary.
-  lines.push(`verdict:      ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
+  // #935: labelled `status:` — the SAME name the `--json` payload's top-level
+  // key uses and the same name the recent-runs table's column header uses, so
+  // "the status" means one thing on all three screens. (It was `verdict:` here
+  // only, which sent poll loops hunting a `.verdict` JSON field that never
+  // existed.) The value is unchanged: still the shared runVerdict() word.
+  lines.push(`status:       ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
   if (run.isTerminal) lines.push("terminal:     yes");
   if (run.error) lines.push(`error:        ${run.error}`);
   if (Object.keys(run.inputs ?? {}).length > 0) {
@@ -2755,6 +2827,21 @@ export function formatDescribe(res: WorkflowDescribeResponse): string {
   if (res.description) lines.push(`description:  ${res.description}`);
   lines.push(`updated:     ${dateOnly(res.updatedAt)}`);
 
+  // #518: warnings go FIRST — above Inputs, right under the identity block —
+  // because they change how everything below reads. The motivating case is a
+  // stale workflow whose own saved input description says the swipe bundle is
+  // "read to build the brand primer": member-authored prose in the database
+  // that describe copies verbatim (see the `input.description` line below).
+  // That sentence can't be rewritten from here, and shouldn't be — so the
+  // warning at the top is what makes it readable in context.
+  // Absent field (a pre-#518 backend) prints nothing at all; `[]` prints
+  // nothing either — describe renders exactly as it always did.
+  if (res.warnings && res.warnings.length > 0) {
+    lines.push("");
+    lines.push(`✗ ${res.warnings.length === 1 ? "Warning" : "Warnings"}:`);
+    for (const warning of res.warnings) lines.push(`  ✗ ${warning}`);
+  }
+
   lines.push("");
   lines.push(`Inputs (${res.inputs.length}):`);
   if (res.inputs.length === 0) {
@@ -2780,6 +2867,12 @@ export function formatDescribe(res: WorkflowDescribeResponse): string {
       );
       const hint = inputValueHint(input);
       if (hint) lines.push(`      ${hint}`);
+      // #518: this is the AUTHOR'S OWN prose out of the saved graph
+      // (config.description on the Brief node), printed verbatim. It can be
+      // stale or plain wrong — the #518 workflow's says its swipe bundle is
+      // "read to build the brand primer", which is exactly the thing that no
+      // longer runs. Rewriting a member's words in the database is not on the
+      // table, so the honesty lives in the warning block at the TOP instead.
       if (input.description) lines.push(`      ${input.description}`);
     }
   }
@@ -4619,7 +4712,7 @@ export async function checkpointShowFlow(
       ...rejectLine,
       `Edit:    exodus workflow checkpoint ${runId} edit 1 --text "..."`,
       `Redo:    exodus workflow checkpoint ${runId} retry --wait`,
-      `Cancel:  exodus workflow checkpoint ${runId} cancel --reason "..."`,
+      `Cancel:  exodus workflow cancel ${runId} --reason "..."`,
     ],
   };
 }
@@ -4824,28 +4917,67 @@ export async function checkpointRetryFlow(
   );
 }
 
+/**
+ * #1231 — stop a run that has not finished. THE one cancel implementation;
+ * `workflow cancel <runId>` and the older `workflow checkpoint <runId> cancel`
+ * are two doors onto it.
+ *
+ * There is deliberately NO preflight here. The old checkpoint-only door ran
+ * `preflightPark(runId, ["checkpoint","taste"])` first, which refused a queued
+ * or running run ("… is not parked for a checkpoint approval — it is status:
+ * Running.") and never reached the route at all — so the CLI could not stop a
+ * run that was actively spending money, even though the server has accepted
+ * exactly that since #1217. The server owns the only real precondition ("has
+ * this run already finished?"), it states it in a sentence written for a
+ * member, and `triggerErrorResult` relays that sentence verbatim. A second,
+ * CLI-side opinion about which runs are cancellable could only be wrong.
+ *
+ * (Cancelling cascades to any queued/running child sub-workflow in the same
+ * transaction, and schedules a best-effort stop of the in-flight worker — see
+ * convex/workflows.ts cancelWorkflowRun / cancelTriggerRun.)
+ */
+export async function cancelRunFlow(
+  runId: string,
+  opts: { reason?: string; json: boolean; verb?: string },
+  deps: WorkflowRunDeps,
+): Promise<FlowResult> {
+  const res = await deps.post(CANCEL_PATH, {
+    runId,
+    ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
+  });
+  if (!res.ok) return triggerErrorResult(res, opts.verb ?? "workflow cancel", opts.json);
+  // Deliberately does NOT promise the worker died. The run row is cancelled
+  // transactionally, and any queued/running child is cancelled with it — those
+  // are facts. Stopping the in-flight worker is a separate best-effort hop
+  // (convex/workflows.ts cancelTriggerRun): it warns and returns when
+  // TRIGGER_API_KEY is unset, when Trigger answers non-2xx, and when the call
+  // throws. Claiming the kill would be a guarantee the system doesn't make.
+  return okLine(
+    `Canceled — run ${runId} is marked cancelled and won't go any further. Any sub-workflow it started is cancelled too, and a stop was sent to the step still running.`,
+    { ok: true, runId },
+    opts.json,
+  );
+}
+
+/**
+ * The `workflow checkpoint <runId> cancel` door (#998). Kept verbatim so nobody's
+ * muscle memory (or script) breaks; it delegates to {@link cancelRunFlow}.
+ *
+ * #1012 context: this door has always accepted a legacy "taste" park too — a run
+ * frozen at a retired Gate box can't be approved anymore, and the pause notice
+ * sends members here to cancel it. With the preflight gone (#1231) that is no
+ * longer a special case: every non-terminal run is cancellable from either door.
+ */
 export async function checkpointCancelFlow(
   runId: string,
   opts: { reason?: string; json: boolean },
   deps: WorkflowRunDeps,
 ): Promise<FlowResult> {
-  // #1012: cancel ALSO accepts a legacy "taste" park — a run frozen at a
-  // retired Gate box can't be approved anymore (the pointer notice sends
-  // members here to cancel it), and the cancel endpoint is reason-agnostic.
-  const pf = await preflightPark(
+  return cancelRunFlow(
     runId,
-    ["checkpoint", "taste"],
-    "workflow checkpoint cancel",
-    opts.json,
+    { ...opts, verb: "workflow checkpoint cancel" },
     deps,
   );
-  if (!pf.ok) return pf.result;
-  const res = await deps.post(CANCEL_PATH, {
-    runId,
-    ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
-  });
-  if (!res.ok) return triggerErrorResult(res, "workflow checkpoint cancel", opts.json);
-  return okLine(`Checkpoint canceled — run ${runId} stopped.`, { ok: true, runId }, opts.json);
 }
 
 // ── Repair verbs ──────────────────────────────────────────────────────────
@@ -5334,6 +5466,22 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
 
     console.error(`Error: unknown checkpoint action "${action}" (expected show, edit, approve, retry, or cancel).`);
     process.exit(1);
+  }
+
+  // #1231: cancel is its own top-level verb — a run does NOT have to be parked
+  // to be stopped, so burying it under `checkpoint` hid it from exactly the
+  // person watching a queued or running job burn money. The checkpoint door
+  // above still works and reaches the same flow.
+  if (sub === "cancel") {
+    const runId = rest[0];
+    if (!runId) {
+      console.error("Error: workflow cancel requires <runId>.");
+      console.log('Usage: exodus workflow cancel <runId> [--reason "..."] [--json]');
+      process.exit(1);
+    }
+    return printResult(
+      await cancelRunFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps),
+    );
   }
 
   if (sub === "repair") {

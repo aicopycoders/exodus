@@ -130,9 +130,14 @@ const PROMOTE_PATH = "/api/v2/banks/promote";
 // The exact line printed after a successful promote — a promote emits the
 // "winner-promoted" platform event (#862, MS-8), so any workflow with an
 // enabled trigger kicks off a background run.
+// #933: the pointer used to say "watch: exodus workflow inbox", which cannot
+// work — `inbox` lists only runs parked waiting on a person, and the shipped
+// Winner Flywheel (brief → splitter → output) has no approval step, so its run
+// finishes without ever appearing there. The recent-run list is where a
+// background run actually shows up.
 const FLYWHEEL_LINE =
   'Winner Flywheel: "winner-promoted" dispatched — any workflow with an enabled ' +
-  "trigger starts a background run (watch: exodus workflow inbox)";
+  "trigger starts a background run (see it: exodus workflow status)";
 
 const VALUE_FLAGS = new Set(["file", "awareness", "spend", "roas", "ctr", "note", "run", "node"]);
 

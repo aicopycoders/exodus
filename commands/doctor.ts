@@ -4,7 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { apiGet, apiGetDashboard, getApiUrl } from "../lib/client.js";
-import { findWorkspaceRoot } from "../lib/state.js";
+import { findWorkspaceRoot, getScaffoldVersion } from "../lib/state.js";
+import { skillsDir } from "../lib/assets.js";
+import { getVersion } from "../lib/version.js";
 import {
   detectLayout,
   listBrandDirs,
@@ -340,6 +342,99 @@ export function checkExodusDistFreshness(pkgRootOverride?: string): CheckResult 
     };
   }
   return { ok: true, label: "Exodus CLI build", detail: "dist up-to-date" };
+}
+
+function dirNamesIn(dir: string): string[] {
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+}
+
+/**
+ * Is the workspace's scaffolded `.claude/skills/` from the CLI that is running
+ * now? Freshness above compares the package against ITS OWN dist; nothing
+ * compared the *workspace* against the package, so a workspace scaffolded by
+ * an old CLI kept serving old skills while doctor printed all-green and
+ * "version — up to date". A newly bundled skill simply never appeared (#588).
+ *
+ * Always advisory (green/yellow, never red): a stale scaffold is one `update`
+ * away and must not fail an otherwise healthy install's exit code — same
+ * contract the version-currency check uses for "we couldn't check".
+ *
+ * `rootOverride` / `assetsSearchOverride` exist for tests with fixture trees,
+ * mirroring checkExodusDistFreshness's `pkgRootOverride`.
+ */
+export function checkScaffoldedSkills(
+  rootOverride?: string,
+  assetsSearchOverride?: string,
+): CheckResult {
+  const label = "Workspace skills";
+  const refresh = `run \`npx ${pkgRef()} update\` to refresh your skills`;
+  const root = rootOverride ?? findWorkspaceRoot();
+  const running = getVersion();
+
+  // TWO signals, and BOTH always run. An earlier cut treated the stamp as
+  // authoritative and only compared skill names when no stamp was present —
+  // which quietly disabled the check the moment it started working: once an
+  // install is stamped, deleting `.claude/skills/exodus-winners/` still printed
+  // "scaffolded by <current> — current", because a string comparison never
+  // looks at the disk. The stamp answers "is this scaffold from an older CLI?";
+  // only the disk answers "is it still all there?" (#588).
+  //
+  // Names only, never file contents: the beta channel's stampTree rewrite makes
+  // a content hash differ by design (lib/scaffold.ts), and a member is entitled
+  // to edit their own copies.
+  const problems: string[] = [];
+
+  const stamped = getScaffoldVersion(root);
+  if (stamped && stamped !== running) {
+    problems.push(`scaffolded by ${stamped}, CLI is ${running}`);
+  }
+
+  let bundled: string[] | null = null;
+  try {
+    bundled = dirNamesIn(skillsDir(assetsSearchOverride));
+  } catch {
+    // No resolvable assets/ (a source checkout before `npm run bundle-assets`).
+    // We genuinely could not compare — say so rather than imply all-clear.
+    bundled = null;
+  }
+
+  let installed: string[] | null = null;
+  if (bundled) {
+    try {
+      installed = dirNamesIn(path.join(root, ".claude", "skills"));
+    } catch {
+      installed = null;
+    }
+    if (installed === null) {
+      problems.push("no .claude/skills/ in this workspace");
+    } else {
+      const missing = bundled.filter((n) => !installed!.includes(n));
+      if (missing.length > 0) {
+        problems.push(`missing skill(s): ${missing.join(", ")}`);
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    return { ok: true, warn: true, label, detail: problems.join("; "), fix: refresh };
+  }
+  if (!bundled) {
+    return {
+      ok: true,
+      warn: true,
+      label,
+      detail: "couldn't read the bundled skills to compare",
+    };
+  }
+  return {
+    ok: true,
+    label,
+    detail: `${installed?.length ?? 0} skill(s) installed${stamped ? `, scaffolded by ${stamped}` : ""} — every bundled skill is present`,
+  };
 }
 
 // Currency compares against the dist-tag the running build shipped on — a beta
@@ -750,6 +845,7 @@ export async function run(_flags: Record<string, string | boolean>): Promise<voi
   results.push(checkEnvFile());
   results.push(checkLayout());
   results.push(checkExodusDistFreshness());
+  results.push(checkScaffoldedSkills());
   results.push(checkBrandProfileGenesisDepth());
 
   // Network checks

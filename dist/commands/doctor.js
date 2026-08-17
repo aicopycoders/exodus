@@ -3,7 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { apiGet, apiGetDashboard, getApiUrl } from "../lib/client.js";
-import { findWorkspaceRoot } from "../lib/state.js";
+import { findWorkspaceRoot, getScaffoldVersion } from "../lib/state.js";
+import { skillsDir } from "../lib/assets.js";
+import { getVersion } from "../lib/version.js";
 import { detectLayout, listBrandDirs, resolveActiveBrand, brandStateDir, } from "../lib/layout.js";
 import { auth401Hint, isPlaceholderApiUrl } from "../lib/backend-hint.js";
 import { compareVersions, readPackageVersion, } from "../lib/release.js";
@@ -251,6 +253,65 @@ export function checkExodusDistFreshness(pkgRootOverride) {
         };
     }
     return { ok: true, label: "Exodus CLI build", detail: "dist up-to-date" };
+}
+function dirNamesIn(dir) {
+    return fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+}
+export function checkScaffoldedSkills(rootOverride, assetsSearchOverride) {
+    const label = "Workspace skills";
+    const refresh = `run \`npx ${pkgRef()} update\` to refresh your skills`;
+    const root = rootOverride ?? findWorkspaceRoot();
+    const running = getVersion();
+    const problems = [];
+    const stamped = getScaffoldVersion(root);
+    if (stamped && stamped !== running) {
+        problems.push(`scaffolded by ${stamped}, CLI is ${running}`);
+    }
+    let bundled = null;
+    try {
+        bundled = dirNamesIn(skillsDir(assetsSearchOverride));
+    }
+    catch {
+        bundled = null;
+    }
+    let installed = null;
+    if (bundled) {
+        try {
+            installed = dirNamesIn(path.join(root, ".claude", "skills"));
+        }
+        catch {
+            installed = null;
+        }
+        if (installed === null) {
+            problems.push("no .claude/skills/ in this workspace");
+        }
+        else {
+            const missing = bundled.filter((n) => !installed.includes(n));
+            if (missing.length > 0) {
+                problems.push(`missing skill(s): ${missing.join(", ")}`);
+            }
+        }
+    }
+    if (problems.length > 0) {
+        return { ok: true, warn: true, label, detail: problems.join("; "), fix: refresh };
+    }
+    if (!bundled) {
+        return {
+            ok: true,
+            warn: true,
+            label,
+            detail: "couldn't read the bundled skills to compare",
+        };
+    }
+    return {
+        ok: true,
+        label,
+        detail: `${installed?.length ?? 0} skill(s) installed${stamped ? `, scaffolded by ${stamped}` : ""} — every bundled skill is present`,
+    };
 }
 function npmRegistryUrl(channel) {
     return `https://registry.npmjs.org/@aicopycoders/exodus/${channel}`;
@@ -550,6 +611,7 @@ export async function run(_flags) {
     results.push(checkEnvFile());
     results.push(checkLayout());
     results.push(checkExodusDistFreshness());
+    results.push(checkScaffoldedSkills());
     results.push(checkBrandProfileGenesisDepth());
     const apiAndDrive = await checkApiAndDrive();
     results.push(...apiAndDrive);

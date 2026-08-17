@@ -9,7 +9,8 @@ Core — discover & run:
   exodus workflow describe <workflowId|name> [--json]        Inputs, prerequisites, outputs
   exodus workflow bots [--category <cat>] [--slug <slug>] [--json]   Bot catalog / one bot's spec
   exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
-  exodus workflow status [--id <runId>] [--out <dir>] [--json]   Poll a run / read its outputs
+  exodus workflow status [--id <runId>] [--out <dir>] [--json]   Poll a run / read its outputs (no --id → the brand's 25 newest runs + their ids)
+  exodus workflow cancel <runId> [--reason "..."] [--json]   Stop a run that hasn't finished — queued, running, or parked
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]   Dump the contract (YAML)
 
 Authoring:
@@ -21,7 +22,7 @@ Authoring:
 
 Parked runs:
   exodus workflow inbox [--json]                             Every run parked waiting on you
-  exodus workflow checkpoint <runId> [show | edit <n> | approve [--reject <n,..>] [--wait] | retry [--wait] | cancel [--reason "..."]] [--json]   Resolve a checkpoint park
+  exodus workflow checkpoint <runId> [show | edit <n> | approve [--reject <n,..>] [--wait] | retry [--note "..."] [--wait] | cancel [--reason "..."]] [--json]   Resolve a checkpoint park
   exodus workflow gate <runId>                              RETIRED in 2.0 — prints a pointer at "checkpoint" and exits 1
   exodus workflow repair <runId> retry|skip|kill [--wait] [--json]   Resolve a repair park
   exodus workflow answer <runId> [--slot key=value ...] [--json]   Answer a nested workflow's slots (no --slot → list them)
@@ -79,6 +80,25 @@ An Exodus **Workflow** is a saved graph the member builds on the dashboard canva
 
 **The `--json` contract (read this once).** Every `workflow`, `session`, and `bank` verb takes `--json`, and that structured output **is** the machine API — there is no separate agent command set and no MCP server. Read for humans without it; parse `--json` when you need to chain or branch on the result.
 
+**Polling a run in `--json`: the fields that matter.** `workflow status --id <runId> --json` returns the run object as-is. The keys a poll loop actually needs:
+
+- **`status`** — the run's **stored lifecycle state**, as the machine spells it: `queued`, `running`, `awaiting-approval`, `succeeded`, `succeeded-with-warnings`, `failed`, `cancelled`. **Branch on this key, not on the printed words.** One warning: a run created before the 2.0 rename can still store the old spelling — `awaiting-review`, `completed`, `partial`, `canceled` — so treat those as the same states.
+  - **The human `status:` line is a JUDGEMENT, not this raw value.** It starts from this field and then reads the rest of the run, so the two can legitimately disagree: a run stored `succeeded-with-warnings` that delivered no slot at all prints `Failed — nothing delivered`, and a run stored `awaiting-approval` that is only waiting on a child workflow prints `Running — sub-workflow`. Neither is a bug — the printed line is the honest verdict for a human, the key is the state machine. If you need the verdict a person would see, don't recompute it from `status` alone: read `counts` and `deliveries` too, or just read the human output.
+- **`isTerminal`** — `true` once the run is finished for good and polling should stop. Trust this over comparing status strings yourself; a park is **not** terminal.
+- **`counts`** — step tallies: `done`, `failed`, `skipped`, `total`, plus `outOfScope` on runs that deliberately skipped steps outside the run's scope (absent otherwise). **This is a final tally, not a progress meter.** It is added up once, at the moment the run reaches its end — finished, failed, or cancelled — so on a run that is `queued`, `running`, or parked the key is simply **not there**. Never build a progress readout on it; count the `nodes` array yourself if you want live progress.
+- **`nodes`** — one entry per step, each with its own `nodeId`, `kind`, `status`, and `outputs`.
+- **`outputs`** — the flat pile of final deliverables, the chaining surface (see §8).
+- **`deliveries`** — the named, typed promises answered slot by slot (`delivered` / `unfulfilled`). Present on newer backends; when it's there, read it before `outputs`.
+- **`pauseReason`** — why the run parked. **Only read it when `status` is awaiting-approval**: it is left behind on a run that was cancelled out of a park, so a terminal row can still carry a stale one. **Five values are stored, and it can also be missing altogether — so always write a fallback branch, never a switch that assumes four cases:**
+  - `checkpoint`, `repair`, `slots` — each names the verb that resolves the park (`checkpoint` / `repair` / `answer`).
+  - `call` — informational. The run is waiting on a child workflow and resumes by itself when the child finishes, so there is nothing for you to do (which is also why `call` parks are kept out of `inbox`).
+  - `taste` — **frozen legacy**: a run that parked at the Gate box, which retired in 2.0. Nothing writes it any more, but old rows still carry it. It cannot be resumed — cancel the run and run the workflow again.
+  - **absent** — an old cost-gate park, from before parks recorded a reason. The run is still alive and still approvable, but **no CLI verb resolves it**: the checkpoint/repair/answer verbs all refuse it by name ("parked at the cost gate (legacy)"). Send the user to the dashboard run page to approve it there, or cancel it.
+
+Run `status --json` with **no** `--id` and you get `{ "runs": [...] }` instead — a lighter row per recent run, each carrying `_id`, `workflowName`, `status`, `pauseReason`, and `createdAt`. That is the list to search when you need a run's id.
+
+**That list is capped at the 25 newest runs, and it never says so.** Nothing in the output marks the cut-off, so a run that exists but is older than the last 25 simply isn't in it. Never read an absence there as "it didn't run" on a busy brand — say "not in the 25 most recent" and, if you have the run id, check it directly with `status --id <runId>`.
+
 **Auth is one bearer key.** `EXODUS_API_KEY` from `.env` authorizes every verb; there are no scoped tokens. If a call 401s, run `npx @aicopycoders/exodus doctor`.
 
 ## The agent operating loop
@@ -90,10 +110,10 @@ The end-to-end narrative, every step naming its verb. You rarely walk all of it 
 3. **Import** — `workflow import <file>` to create, or `import <file> --update <id>` to edit in place.
 4. **Describe** — `workflow describe` to confirm inputs, prerequisites (✓/✗ primers), and outputs before spending a run.
 5. **Run** — `workflow run … --wait` (streams progress, prints outputs) or omit `--wait` and poll `workflow status --id <runId>`. Inputs come from `--input key=value` flags, from `--fill <name>` (a saved fill — a named, reusable set of launch answers saved from the app's Run dialog; flags win per key when you pass both), or a mix. Launches that don't satisfy the workflow's entry contract are rejected at the door with the gap named — `describe` shows each input's type, required/optional, and accepted values. Add `--auto-approve` only when the run is meant to go start-to-finish with nobody watching: it approves every Checkpoint the run hits, unchanged, instead of stopping for a verdict. It's a per-launch choice, not a setting on the workflow, and the run keeps a record of each stop it waved through — so confirm with the user before you pass it.
-6. **Notice the park** — a run can stop and wait on you. There are no webhooks in v1; you notice a park one of three ways: `run --wait` prints a pause notice naming the verb to use (the command keeps waiting — resolve from another shell, or Ctrl-C and pick it up via `inbox`), `workflow inbox` lists it, or `workflow status` shows `awaiting-review`.
+6. **Notice the park** — a run can stop and wait on you. There are no webhooks in v1; you notice a park one of three ways: `run --wait` prints a pause notice naming the verb to use (the command keeps waiting — resolve from another shell, or Ctrl-C and pick it up via `inbox`), `workflow inbox` lists it, or `workflow status --id <runId>` prints `status: Awaiting approval`.
 7. **Resolve** — `workflow checkpoint <runId> …` (the run reached a Checkpoint box), `workflow repair <runId> …` (a stalled collector), or `workflow answer <runId> …` (a nested workflow's slots).
 8. **Harvest** — read deliverables with `workflow status --id <runId> --json`; read banked deposits with `bank show <key>`; keep thinking with a bot via `session chat`.
-9. **Promote** — `bank promote <key>` lands the winner **and** fires the Winner Flywheel; then check `workflow inbox` for any background run it kicked off.
+9. **Promote** — `bank promote <key>` lands the winner **and** emits the `winner-promoted` event, so any workflow with an **enabled** matching trigger starts a background run. To find out whether one actually started, run `workflow status` with **no** `--id` — the recent-run list. Don't send the user to `inbox` for this: `inbox` only holds runs waiting on a person, and a flywheel run with no approval step will never appear there (§5).
 
 ## 1. Discover & run
 
@@ -149,7 +169,7 @@ npx @aicopycoders/exodus workflow status --id <runId>
 
 There is no way to run only part of a graph: a run executes the whole workflow or it doesn't start.
 
-**Read the `Deliveries:` block first.** Each Output node on the canvas is a named, typed promise — "Final ad copy · text", "Hero image · asset" — and a finished run answers every one of them: `delivered` with the artifacts underneath, or `unfulfilled` with the reason the upstream node gave. That block is the honest scorecard; the `Outputs:` block below it is the same artifacts as one flat pile, kept for chaining. If a run says `completed` but a slot says `unfulfilled`, the workflow did NOT deliver what it promised — say so.
+**Read the `Deliveries:` block first.** Each Output node on the canvas is a named, typed promise — "Final ad copy · text", "Hero image · asset" — and a finished run answers every one of them: `delivered` with the artifacts underneath, or `unfulfilled` with the reason the upstream node gave. That block is the honest scorecard; the `Outputs:` block below it is the same artifacts as one flat pile, kept for chaining. If a run says `Succeeded` but a slot says `unfulfilled`, the workflow did NOT deliver what it promised — say so.
 
 **Save the deliverables to disk with `--out <dir>`** (works on `run --wait` and on `status --id`):
 
@@ -160,7 +180,7 @@ npx @aicopycoders/exodus workflow status --id <runId> --out ./deliverables
 
 Every delivered slot becomes a file named `<workflow>-<runId tail>-<slot key>.<ext>` — text as `.md`, storyboards and frame sets as `.json`, images/video/audio downloaded from their URLs — and each written path is printed. Unfulfilled slots are reported, never written. The directory is created if it doesn't exist.
 
-Report the outputs plus a short take. Don't call a run "done" off the kickoff line alone — a run reaches `completed`, `partial`, `failed`, or **parks** (`awaiting-review`). A `partial` means some nodes were skipped or failed; a park means it's waiting on you (see the next section). Read `status` before declaring victory.
+Report the outputs plus a short take. Don't call a run "done" off the kickoff line alone. **`status` prints one `status:` line, and it says one of seven words:** `Queued`, `Running`, `Awaiting approval`, `Succeeded`, `Succeeded with warnings`, `Failed`, `Cancelled`. Some of them carry a short "why" after a dash — `Awaiting approval — needs repair`, `Awaiting approval — needs inputs`, `Running — sub-workflow` (it's waiting on a child workflow, not on you), `Failed — nothing delivered` (steps failed AND not one promised slot arrived, so it is not a success no matter what the run row says). `Succeeded with warnings` means some steps were skipped or failed but the run still delivered. `Awaiting approval` means it **parked** and is waiting on you (see the next section). Read `status` before declaring victory.
 
 ## 2. Runs that park
 
@@ -170,11 +190,48 @@ A run doesn't always finish on its own — it can **park** and wait for a human 
 - **repair** — a require-all collector stalled on a dead input and needs a decision.
 - **slots** — a nested sub-workflow is waiting on inputs (slot answers).
 
-**No webhooks in v1 — nothing parks silently, but nothing pings you either.** You find parks three ways: `run --wait` prints a pause notice naming the verb to use (a park is not terminal — the command keeps polling so it can resume after you resolve; resolve from another shell, or Ctrl-C and pick it up via `inbox`); `workflow inbox` lists every parked run badged by kind (`checkpoint`/`repair`/`slots`; the badge `gate` shows up only on a pre-2.0 run parked at the retired Gate node — those can't be resumed, cancel and run the workflow again) and how it started (`bg`, `trig:<event>`); or `workflow status` shows `awaiting-review`. **`inbox` is the one place nothing hides** — including background runs a trigger fired or a promote's flywheel kicked off.
+**No webhooks in v1 — nothing parks silently, but nothing pings you either.** You find parks three ways: `run --wait` prints a pause notice naming the verb to use (a park is not terminal — the command keeps polling so it can resume after you resolve; resolve from another shell, or Ctrl-C and pick it up via `inbox`); `workflow inbox` lists every parked run badged by kind (`checkpoint`/`repair`/`slots`; the badge `gate` shows up only on a pre-2.0 run parked at the retired Gate node — those can't be resumed, cancel and run the workflow again) and how it started (`bg`, `trig:<event>`); or `workflow status --id <runId>` prints `status: Awaiting approval`.
+
+### `inbox` vs the run list — two different questions
+
+**`inbox` answers one question: what is waiting on a person?** For that job it is the right list — how a run started makes no difference to it. A run fired by a trigger, by a promote's flywheel, or in the background shows up there when it parks for a decision, exactly like a run you launched by hand.
+
+Two limits worth knowing before you treat an empty inbox as proof of anything:
+
+- **A run waiting on a child workflow is deliberately left out.** That is the `call` park — the parent resumes by itself when the child finishes, so there is nothing for you to decide and it is filtered out on purpose. It is still parked; it just isn't your problem.
+- **The inbox shows the 50 newest parked runs**, and prints no notice when it hits that ceiling. On a brand with more parks than that, the oldest ones fall off the end.
+
+**What `inbox` does not list is work that isn't waiting on anybody.** A queued run, a running run, and any automation that ran start-to-finish without an approval step never appear there — not because they're hidden, but because there is nothing for you to decide. Plenty of workflows are built that way on purpose; the shipped **Winner Flywheel** starter is one (brief → splitter → output, no Checkpoint box anywhere), so its run *can never* show up in `inbox`. An empty inbox after a promote means "nothing needs you", not "nothing ran".
+
+**To see runs that aren't waiting on you, run `workflow status` with no `--id`.** That prints the brand's recent runs — newest first, one row each with the workflow name, its status, the **date** it started, and its **run id**. That bare list is how you discover a background run at all, including one that started and finished while you weren't looking; take the id from it and `status --id <runId>` for the full detail.
+
+Two things about that list you have to know before you answer a question with it:
+
+- **It stops at the 25 newest runs and says nothing about the ones it dropped.** On a brand that runs a lot, "did my promote start a run?" can read as *no* when the honest answer is "yes, but more than 25 runs ago". Treat a miss as "not in the last 25", not as "never happened".
+- **The `created` column is a date with no clock time** (`2026-08-15`). Every run started today looks identical, so it cannot tell you whether a run started before or after something else you did a few minutes ago. Use the ordering instead — the list is newest-first, so a run kicked off by your promote is at or near the top.
 
 ```bash
-npx @aicopycoders/exodus workflow inbox
+npx @aicopycoders/exodus workflow status          # recent runs: name, status, created, run id
+npx @aicopycoders/exodus workflow status --id <runId>   # one run in full
+npx @aicopycoders/exodus workflow inbox           # only the runs waiting on a person
 ```
+
+### Stopping a run early — `workflow cancel`
+
+**A run you want to stop does not have to be parked.** `workflow cancel <runId>` stops any run that hasn't finished — waiting in the queue, halfway through, or parked at a checkpoint, all the same verb:
+
+```bash
+npx @aicopycoders/exodus workflow cancel <runId> --reason "wrong brief"
+```
+
+This is the verb to reach for the moment a run is going the wrong way. A run costs money the entire time it is queued or running, so you do **not** have to wait for it to reach a Checkpoint before you can pull the plug.
+
+What cancelling guarantees: the run is marked cancelled and will not advance another step, and any sub-workflow it started is cancelled with it. What it does **not** guarantee: that the step already mid-flight dies instantly. A stop is sent to the worker, but that hop is best-effort — if it doesn't land, the step can finish what it was already doing before everything comes to rest. So cancel promptly, and don't promise the user that a half-finished image or video was stopped mid-render.
+
+- **`--reason "..."`** is optional and recorded on the run's history, so anyone reading it later sees why it stopped. Use it.
+- **A run that already finished is refused** — the CLI relays the server's own sentence ("This run has already finished — there is nothing to cancel."). That is a statement of fact, not an error to work around.
+- **Get the run id from `workflow status`** (no `--id`) if you don't have it in front of you.
+- **`workflow checkpoint <runId> cancel` still works** and does exactly the same thing — it's the older name for this, kept so existing habits and scripts don't break.
 
 ### The `gate` verbs retired in 2.0
 
@@ -186,12 +243,12 @@ resumed, because the step it's waiting on no longer exists. Cancel it and run th
 workflow again:
 
 ```bash
-npx @aicopycoders/exodus workflow checkpoint <runId> cancel --reason "legacy gate park"
+npx @aicopycoders/exodus workflow cancel <runId> --reason "legacy gate park"
 ```
 
 ### Checkpoint parks — show / edit / approve / retry / cancel
 
-A **Checkpoint** is its own box on the canvas, sitting on a wire between two steps: the step before it finishes, the work reaches the Checkpoint, and the whole run stops there until a human signs off. Because it's a box you can see, the diagram tells you exactly where a run will stop. It waits **indefinitely**, so a `run --wait` left unattended simply keeps polling; nothing times out and nothing is lost. A Checkpoint is never approved automatically — not in a background run, not in a triggered one. The single exception is a run someone launched with `run --auto-approve`, which is an explicit "nobody is watching this one" choice made at launch time; those runs approve each Checkpoint as they reach it and mark the stop as auto-approved.
+A **Checkpoint** is its own box on the canvas, sitting on a wire between two steps: the step before it finishes, the work reaches the Checkpoint, and the whole run stops there until a human signs off. Because it's a box you can see, the diagram tells you exactly where a run will stop. **The park itself waits indefinitely** — nothing on the server expires it, and the sweep that kills stalled runs deliberately skips parked ones, so a run can sit at a Checkpoint for days and lose nothing. **The `--wait` command watching it does not wait that long:** after about an hour of polling it gives up, exits non-zero, and prints `Timed out waiting. Check later: exodus workflow status --id <runId>`. That is the *command* ending, not the run — the run is still parked exactly where it was, and `inbox` or `status --id` picks it back up. A Checkpoint is never approved automatically — not in a background run, not in a triggered one. The single exception is a run someone launched with `run --auto-approve`, which is an explicit "nobody is watching this one" choice made at launch time; those runs approve each Checkpoint as they reach it and mark the stop as auto-approved.
 
 The box itself does no work: whatever arrives goes straight back out, unchanged, the moment you approve.
 
@@ -201,13 +258,13 @@ There are **no candidates to pick** — there's held work to read and either ble
 npx @aicopycoders/exodus workflow checkpoint <runId>                  # show what's waiting at the checkpoint
 npx @aicopycoders/exodus workflow checkpoint <runId> edit 1 --text "tighter opener"   # rewrite an output in place
 npx @aicopycoders/exodus workflow checkpoint <runId> approve --wait   # sign off, the run continues
-npx @aicopycoders/exodus workflow checkpoint <runId> retry --wait     # redo the step feeding it, wait for fresh output
+npx @aicopycoders/exodus workflow checkpoint <runId> retry --note "make the hook punchier" --wait   # redo the step feeding it
 npx @aicopycoders/exodus workflow checkpoint <runId> cancel --reason "wrong direction"   # stop the run here
 ```
 
 - **`edit`** takes `--text`, `--file <path>`, or piped stdin. It does **not** resume the run — edit first, then `approve`.
-- **`retry`** discards what's waiting and re-runs the step **feeding** the checkpoint (re-running the checkpoint itself would hand back the identical text, since it only passes things through). The run parks right back at the *same* checkpoint with the fresh output — that re-park **is** the success. So `retry --wait` finishes as soon as the new output is ready, prints it, and hands you back the same four choices; it does **not** wait for the run to complete (it never would). Review the fresh output and `approve` when you're happy.
-- **`cancel`** stops the run for good, recording your reason — the same audit trail the web uses.
+- **`retry`** discards what's waiting and re-runs the step **feeding** the checkpoint (re-running the checkpoint itself would hand back the identical text, since it only passes things through). The run parks right back at the *same* checkpoint with the fresh output — that re-park **is** the success. So `retry --wait` finishes as soon as the new output is ready, prints it, and hands you back the same four choices; it does **not** wait for the run to complete (it never would). Review the fresh output and `approve` when you're happy. Add **`--note "..."`** to say what was wrong: a step that calls a model is given the note on the re-run, and every step records it on the run's review trail either way.
+- **`cancel`** stops the run for good, recording your reason — the same audit trail the web uses. It is the same action as the top-level `workflow cancel <runId>`, so you can use either; the top-level one is the one to remember, because it also works on a run that hasn't parked.
 
 **Authoring one** (when you're building or editing a graph from the CLI): add a `checkpoint` node and put it **on the wire** — producer → checkpoint `in`, checkpoint `out` → whoever used to receive it. `in` accepts any wire type so the box drops onto any wire; `out` is typed by `config.passType`, which must name the **same type as the wire feeding it** (`text` is the default and by far the common case). Get that wrong and `validate` returns `bad-config` naming the wire's real type.
 
@@ -235,7 +292,7 @@ npx @aicopycoders/exodus workflow checkpoint <runId> approve --reject 2,5 --wait
 - `--reject` takes the **item numbers you see** (1-based, comma-separated) — not row numbers, not the 0-based indexes in `--json`.
 - **Rejecting is filtering, not failing.** The dropped items disappear from the batch and the run carries on with the survivors; nothing is marked failed and no warning is raised. Say it that way to the user: "kept 5 of 7."
 - **Approve with no `--reject` keeps everything** — the ordinary approve, unchanged.
-- **Rejecting every item is refused.** If nothing is worth keeping, `cancel` the run — that's the honest action, and the CLI relays the server's message telling you so.
+- **Rejecting every item is refused.** If nothing is worth keeping, stop the run instead (`workflow cancel <runId> --reason "..."`) — that's the honest action, and the CLI relays the server's message telling you so.
 - `edit <n>` works inside a fan exactly as it does anywhere else; edit the rows you want to fix, then approve (with or without `--reject`).
 
 ### Repair parks — retry / skip / kill
@@ -296,7 +353,22 @@ npx @aicopycoders/exodus bank show hooks           # entries, newest-first, with
 npx @aicopycoders/exodus bank promote hooks "Stop scrolling — your knees will thank you"
 ```
 
-`bank promote` lands a winning line **and fires the Winner Flywheel** — it emits the `winner-promoted` event with **exact web parity and no opt-out**. Any workflow with an enabled matching trigger then starts a background run. So **after a promote, check `workflow inbox`** for the background run it may have kicked off. Promote reads text from an argument, `--file <path>`, or stdin (one of the three), and takes optional flags for awareness tagging (`--awareness`, body bank), win metrics (`--spend`, `--roas`, `--ctr`, `--note`), and provenance (`--run`, `--node`) — see `bank promote --help`.
+`bank promote` lands a winning line **and fires the Winner Flywheel** — it emits the `winner-promoted` event with **exact web parity and no opt-out**. Any workflow with an enabled matching trigger then starts a background run. Promote reads text from an argument, `--file <path>`, or stdin (one of the three), and takes optional flags for awareness tagging (`--awareness`, body bank), win metrics (`--spend`, `--roas`, `--ctr`, `--note`), and provenance (`--run`, `--node`) — see `bank promote --help`.
+
+**Two honest things to tell the user after a promote.**
+
+**First: a promote often fires nothing, and that is the default.** The event goes out every time, but it only starts a run if some workflow on this brand has a `winner-promoted` trigger that is **switched on**. The shipped **Winner Flywheel** starter arrives with its trigger **disabled** on purpose — so on a brand that imported it and never enabled it, a promote lands the line and stops there. Check before you promise a run: `workflow triggers "Winner Flywheel"` shows the switch, and `workflow triggers "Winner Flywheel" enable 1` flips it on.
+
+**Second: check the run list, not the inbox.** `inbox` holds runs that are waiting on a person. The Winner Flywheel is three steps — brief → splitter → output — with **no Checkpoint box anywhere**, so its run has nothing to ask you and never lands in the inbox; it just runs and finishes. Looking for it there and finding nothing tells you nothing. Look here instead:
+
+```bash
+npx @aicopycoders/exodus workflow triggers "Winner Flywheel"   # is the switch even on?
+npx @aicopycoders/exodus bank promote hooks "…"                # land the winner
+npx @aicopycoders/exodus workflow status                       # did a run start? (25 newest runs + ids)
+npx @aicopycoders/exodus workflow status --id <runId>          # what it produced
+```
+
+Run it **right after** the promote: that list holds only the 25 newest runs, with no clock time on the rows, so the fresh run is only easy to spot while it's still near the top.
 
 ## 6. Versions
 
@@ -555,12 +627,12 @@ The inbox/checkpoint/session/bank verbs have v2 routes too, but the CLI is the m
 ## Failure handling
 
 - **`describe` shows a ✗ prerequisite** — don't run yet. Fill the primer via `exodus-primer` / `exodus-foundation`, then re-check `describe`.
-- **Run comes back `partial` or `failed`** — read `status --id <runId>` (drop `--json` for a readable view) to see which node failed and why **before re-running**. A partial still has usable outputs; harvest them first.
-- **A verb refuses because the run isn't in that state** — the checkpoint/repair/answer verbs preflight the run and name its **actual** state (e.g. "parked for repair" when you tried a checkpoint verb). Read the state it reports and switch to the matching verb, or check `inbox` for what's actually pending.
+- **Run comes back `Succeeded with warnings` or `Failed`** — read `status --id <runId>` (drop `--json` for a readable view) to see which node failed and why **before re-running**. "Succeeded with warnings" still has usable outputs; harvest them first. `Failed — nothing delivered` means the run produced none of what it promised.
+- **A verb refuses because the run isn't in that state** — the checkpoint/repair/answer verbs check the run first and name its **actual** state (e.g. "parked for repair" when you tried a checkpoint verb). Read the state it reports and switch to the matching verb, or check `inbox` for what's actually pending. **`cancel` is the exception on purpose**: it doesn't care what state the run is in, only that it hasn't finished.
 - **Trigger fingerprint mismatch** — the workflow changed since you listed its triggers. Re-list (`workflow triggers <wf>`) and retry the enable/disable/fire against the fresh numbering.
 - **`validate` / `import` errors** — fix the exact node/port each issue names using its remedy; don't guess. `validate` needs network + login — there is no offline check.
 - **`import --update` 409** — re-export, reapply, re-import. This is a conflict, not a bug.
-- **After a promote** — the success line includes the flywheel note; check `workflow inbox` for the background run it may have started.
+- **After a promote, and no run appeared** — first check the trigger is actually enabled (`workflow triggers "<workflow>"`); the Winner Flywheel starter ships **disabled**. If it is on, look in the **recent-run list** (`workflow status`, no `--id`), not in `inbox` — a flywheel run has no approval step, so it finishes without ever appearing in the inbox.
 - **Auth / whoami failure** — run `npx @aicopycoders/exodus doctor` and confirm `EXODUS_API_KEY`.
 - **Wrong brand** — workflows, sessions, and banks are per-brand. `npx @aicopycoders/exodus brand current` to confirm you're on the brand you think you are; switch with the `exodus-brand` skill.
 

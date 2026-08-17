@@ -9,8 +9,8 @@ Usage:
   exodus meme recommend --brief "<text>" [--avatar "<text>"]
   exodus meme run --brief "<text>" --formats '<json>' [--avatar "<text>"] [--name "<label>"]
   exodus meme run --brief "<text>" --formats-file <path> [--avatar "<text>"] [--name "<label>"]
-  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <runId>] [--avatar "<text>"]
-  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <runId>] [--avatar "<text>"]
+  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <run id>] [--avatar "<text>"]
+  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <run id>] [--avatar "<text>"]
 
 Flow:
   1. recommend  → { recommendations: [...] } — 15 picks (5 per layer), each with
@@ -25,8 +25,12 @@ Flow:
                   workflow run — the workflow verb is the one that can read it.
   4. regenerate → re-render a single miss using the format fields from the
                   recommend output. Synchronous; returns the new image URL.
-                  Its optional --id takes a CREATIVE-SUITE run id, which the id
-                  from step 2 is not — omit --id and use the returned URL.
+                  Pass --id <the runId from step 2> to file the fresh meme with
+                  the rest of that run, so it shows up in the library next to
+                  its siblings. Leave --id off and you just get the URL — handy,
+                  but that image is not saved anywhere. If the id doesn't match
+                  a run (or that run never made this format) you get a plain
+                  error saying so, not a silent miss.
 
 Keys (strict BYOK — checked server-side before anything starts):
   classic (layer 1) memes need your Imgflip login; AI (layer 2/3) memes need
@@ -36,6 +40,8 @@ Examples:
   exodus meme recommend --brief "grounding sheets reduce inflammation"
   exodus meme run --brief "grounding sheets reduce inflammation" --formats '[{"layer":2,"name":"Group Chat","format_id":"group-chat"}]'
   exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product"
+  # Same re-roll, filed with the run it belongs to (the runId step 2 printed):
+  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --id <runId from step 2>
 `.trim();
 function dashboardUrlForRun(runId) {
     return `${getDashboardUrl()}/runs/${runId}`;
@@ -235,8 +241,9 @@ async function runRegenerate(flags) {
     }
     const res = await apiPostDashboard("/api/meme/regenerate", body);
     if (!res.ok) {
-        console.error(formatError(res));
-        if (res.status === 400) {
+        const detail = formatError(res);
+        console.error(detail);
+        if (res.status === 400 && /\bkey/i.test(detail)) {
             console.error(`Hint: run \`npx ${pkgRef()} doctor\` to check your keys.`);
         }
         process.exit(1);

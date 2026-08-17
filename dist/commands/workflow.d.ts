@@ -69,7 +69,7 @@ export interface WorkflowImportResult {
     unresolved: UnresolvedWorkflowRef[];
     warnings: string[];
 }
-export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "duplicate-input-key" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger" | "nested-split" | "fan-overlap" | "lane-ineligible" | "fan-image-budget" | "collector-unpaired" | "splitter-field-conflict";
+export type GraphIssueCode = "bad-shape" | "unknown-kind" | "duplicate-node-id" | "dangling-edge" | "unknown-port" | "type-mismatch" | "duplicate-input" | "duplicate-input-key" | "cycle" | "missing-required-input" | "bad-config" | "bad-slot" | "bad-trigger" | "nested-split" | "fan-overlap" | "lane-ineligible" | "fan-image-budget" | "collector-unpaired" | "splitter-field-conflict" | "competitor-source";
 export interface GraphIssue {
     code: GraphIssueCode;
     message: string;
@@ -211,6 +211,7 @@ export interface WorkflowDescribeResponse {
     }>;
     outputs: WorkflowOutputDescriptor[];
     deliveries?: WorkflowDeliveryDescriptor[];
+    warnings?: string[];
 }
 export interface WorkflowTemplateListItem {
     key: string;
@@ -567,6 +568,11 @@ export declare function checkpointRetryFlow(runId: string, opts: {
     json: boolean;
     note?: string;
     onProgressLine?: (line: string) => void;
+}, deps: WorkflowRunDeps): Promise<FlowResult>;
+export declare function cancelRunFlow(runId: string, opts: {
+    reason?: string;
+    json: boolean;
+    verb?: string;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
 export declare function checkpointCancelFlow(runId: string, opts: {
     reason?: string;

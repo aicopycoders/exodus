@@ -26,11 +26,22 @@
 //     workflow verb going forward.
 //   • The dashboard link is the canonical `/runs/<id>` forwarder (the same one
 //     `exodus workflow` mints), which resolves either id space.
-//   • `regenerate --id <runId>` still takes a CREATIVE-SUITE run id — the id
-//     `run` prints is no longer one. Regenerate without `--id`; the fresh meme
-//     comes back as a URL either way.
 //
-// Old installed CLI builds still print the pre-#1142 hint against the new
+// #1164 — `regenerate --id` now takes the id `run` prints.
+//
+// Between #1142 and #1164 this file carried a warning that `--id` spoke a
+// different id space and had to be omitted. That was true, and it was a trap
+// nobody could work around: the flag accepted the id anyway, the server cast it
+// blindly, the save failed silently, and the CLI still printed "✓ Meme
+// regenerated" over an expiring URL that never reached the Library.
+//
+// /api/meme/regenerate now RESOLVES the id instead of casting it: hand it the id
+// `meme run` printed and it finds the run's child for that format and files the
+// fresh meme beside its siblings. A creative-suite run id still works too. An id
+// it can't place is a 400 that says so — never a silent no-op. `--id` stays
+// optional: leave it off and you get the image URL and nothing in the Library.
+//
+// Old installed CLI builds still print the pre-#1164 warning against the new
 // backend. Accepted: this is the source fix, and `update` carries it.
 import { apiPostDashboard, getDashboardUrl } from "../lib/client.js";
 import { formatError } from "../lib/format.js";
@@ -44,8 +55,8 @@ Usage:
   exodus meme recommend --brief "<text>" [--avatar "<text>"]
   exodus meme run --brief "<text>" --formats '<json>' [--avatar "<text>"] [--name "<label>"]
   exodus meme run --brief "<text>" --formats-file <path> [--avatar "<text>"] [--name "<label>"]
-  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <runId>] [--avatar "<text>"]
-  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <runId>] [--avatar "<text>"]
+  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <run id>] [--avatar "<text>"]
+  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <run id>] [--avatar "<text>"]
 
 Flow:
   1. recommend  → { recommendations: [...] } — 15 picks (5 per layer), each with
@@ -60,8 +71,12 @@ Flow:
                   workflow run — the workflow verb is the one that can read it.
   4. regenerate → re-render a single miss using the format fields from the
                   recommend output. Synchronous; returns the new image URL.
-                  Its optional --id takes a CREATIVE-SUITE run id, which the id
-                  from step 2 is not — omit --id and use the returned URL.
+                  Pass --id <the runId from step 2> to file the fresh meme with
+                  the rest of that run, so it shows up in the library next to
+                  its siblings. Leave --id off and you just get the URL — handy,
+                  but that image is not saved anywhere. If the id doesn't match
+                  a run (or that run never made this format) you get a plain
+                  error saying so, not a silent miss.
 
 Keys (strict BYOK — checked server-side before anything starts):
   classic (layer 1) memes need your Imgflip login; AI (layer 2/3) memes need
@@ -71,6 +86,8 @@ Examples:
   exodus meme recommend --brief "grounding sheets reduce inflammation"
   exodus meme run --brief "grounding sheets reduce inflammation" --formats '[{"layer":2,"name":"Group Chat","format_id":"group-chat"}]'
   exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --hint "make the last message land the product"
+  # Same re-roll, filed with the run it belongs to (the runId step 2 printed):
+  exodus meme regenerate --brief "grounding sheets reduce inflammation" --layer 2 --format group-chat --id <runId from step 2>
 `.trim();
 
 interface RecommendResponse {
@@ -335,8 +352,12 @@ async function runRegenerate(flags: Record<string, string | boolean>): Promise<v
   // Synchronous server-side caption + render (maxDuration 300) — no polling.
   const res = await apiPostDashboard<RegenerateResponse>("/api/meme/regenerate", body);
   if (!res.ok) {
-    console.error(formatError(res));
-    if (res.status === 400) {
+    const detail = formatError(res);
+    console.error(detail);
+    // #1164: a 400 from this route is no longer always the BYOK refusal — the
+    // run-id resolution answers 400 too, and "check your keys" is useless advice
+    // for a mistyped --id. Only offer doctor when the server named a key.
+    if (res.status === 400 && /\bkey/i.test(detail)) {
       console.error(`Hint: run \`npx ${pkgRef()} doctor\` to check your keys.`);
     }
     process.exit(1);

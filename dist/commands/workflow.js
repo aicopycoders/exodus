@@ -4,7 +4,7 @@ import nodePath from "node:path";
 import { apiGet, apiGetText, apiPost, apiPostDashboard, getDashboardUrl, } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
-import { normalizeRunStatus, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
+import { normalizeRunStatus, isTerminalRunStatus, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
 import { runVerdict } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
@@ -20,7 +20,9 @@ Usage:
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
   exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
-  exodus workflow status [--id <runId>] [--out <dir>] [--json]
+  exodus workflow status [--json]
+  exodus workflow status --id <runId> [--out <dir>] [--json]
+  exodus workflow cancel <runId> [--reason "..."] [--json]
   exodus workflow versions <workflowId|name> [--json]
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]
   exodus workflow validate <file> [--update <workflowId>] [--json]
@@ -92,7 +94,12 @@ Flags:
                          Checkpoint box and waits until its fresh output is
                          ready and the run parks again — that IS its finish
                          line; a redo never runs the workflow to completion.
-  --id <runId>           Workflow run id for status detail
+  --id <runId>           (status) One run's full detail. LEAVE IT OFF and status
+                         prints the brand's recent runs instead — workflow name,
+                         status, when it started, and the run id — which is how
+                         you find the id of a run that started in the background
+                         (a trigger fired it, or a promoted winner did) and
+                         never stopped to ask you anything.
   --out <file>           Write the export to a file instead of stdout
   --out <dir>            (run --wait / status --id) Save every delivered output
                          of the finished run into this directory (created if
@@ -120,8 +127,8 @@ Flags:
                          Required for event triggers; rejected for cron triggers.
                          (checkpoint edit) The replacement copy for one output.
   --file <path>          (checkpoint edit) Load the replacement copy from a file.
-  --reason "..."         (checkpoint cancel) Optional reason recorded on the
-                         cancel.
+  --reason "..."         (cancel, checkpoint cancel) Optional reason recorded on
+                         the cancel, so the run's history says why it stopped.
   --note "..."           (checkpoint retry) Optional correction for the redo
                          ("make the hook punchier"). Steps that call a model
                          follow it on the re-run; deterministic steps only
@@ -160,8 +167,10 @@ Examples:
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
+  exodus workflow status                      # recent runs + their ids
   exodus workflow status --id wr_123
   exodus workflow status --id wr_123 --out ./deliverables
+  exodus workflow cancel wr_123 --reason "wrong brief"
   exodus workflow versions "Launch Flow"
   exodus workflow export "Launch Flow" --out workflow.yaml
   exodus workflow export "Launch Flow" --version 3 --out v3.yaml
@@ -234,6 +243,19 @@ Notes:
   workflow bots --json emits the FULL catalog response verbatim (--category /
   --slug filters are ignored in that mode). workflow bots --slug <slug> --json
   emits just that one bot's catalog JSON.
+  workflow status with no --id lists the brand's recent runs — name, status,
+  when it started, and the run id — and that list is the ONLY place a run that
+  never stopped to ask you anything shows up. "workflow inbox" is a different
+  list: it holds runs waiting on a person, so a background run whose workflow
+  has no approval step finishes without ever appearing there. Take an id from
+  the run list, then read it with "workflow status --id <runId>". (#933/#934)
+  workflow cancel <runId> stops a run that has not finished — queued, running,
+  or parked, all of it. The run stops for good and any child workflow it started
+  is cancelled with it; a stop is also sent to the step still running, though
+  that last part is best-effort. --reason records why on the run's history.
+  A run that already finished is refused (nothing to cancel). The older
+  "workflow checkpoint <runId> cancel" is the same action under its old name and
+  keeps working. (#1231)
   workflow inbox lists every run parked waiting on you, badged by park kind
   (checkpoint/repair/slots/gate/legacy) and how it started (bg / trig:<event>).
   A run parked at a Checkpoint box is resolved with the "checkpoint" verbs: show
@@ -446,7 +468,7 @@ export function formatPauseNotice(pauseReason, runId, dashboardUrl) {
     if (pauseReason === "taste") {
         return [
             "  ⏸ paused at a Gate box, which retired in 2.0. Approvals now happen at a Checkpoint box.",
-            `     Cancel it here: exodus workflow checkpoint ${runId} cancel`,
+            `     Cancel it here: exodus workflow cancel ${runId}`,
             `     Or in the app:  ${dashboardUrl}${RUN_PAGE_PREFIX}${runId}`,
             "     Then run the workflow again.",
         ];
@@ -923,10 +945,19 @@ export function formatWorkflowList(workflows) {
         w._id,
     ]));
 }
+const RECENT_RUNS_PAGE = 25;
 export function formatRecentRuns(runs) {
     if (runs.length === 0)
         return "No workflow runs found for the active brand.";
-    return table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]));
+    const rows = table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]));
+    const notes = [];
+    if (runs.length >= RECENT_RUNS_PAGE) {
+        notes.push(`Showing the ${RECENT_RUNS_PAGE} newest runs — there may be older ones this list doesn't reach.`);
+    }
+    if (runs.some((r) => !isTerminalRunStatus(r.status))) {
+        notes.push(`Stop one that's still going: exodus workflow cancel <id> --reason "..."`);
+    }
+    return notes.length > 0 ? `${rows}\n\n${notes.join("\n")}` : rows;
 }
 export function formatWorkflowVersions(versions) {
     if (versions.length === 0) {
@@ -1004,7 +1035,7 @@ export function formatWorkflowRun(run) {
     lines.push(`workflowId:   ${run.workflowId}`);
     if (run.triggerRunId)
         lines.push(`triggerRunId: ${run.triggerRunId}`);
-    lines.push(`verdict:      ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
+    lines.push(`status:       ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
     if (run.isTerminal)
         lines.push("terminal:     yes");
     if (run.error)
@@ -1266,6 +1297,12 @@ export function formatDescribe(res) {
     if (res.description)
         lines.push(`description:  ${res.description}`);
     lines.push(`updated:     ${dateOnly(res.updatedAt)}`);
+    if (res.warnings && res.warnings.length > 0) {
+        lines.push("");
+        lines.push(`✗ ${res.warnings.length === 1 ? "Warning" : "Warnings"}:`);
+        for (const warning of res.warnings)
+            lines.push(`  ✗ ${warning}`);
+    }
     lines.push("");
     lines.push(`Inputs (${res.inputs.length}):`);
     if (res.inputs.length === 0) {
@@ -2518,7 +2555,7 @@ export async function checkpointShowFlow(runId, opts, deps) {
             ...rejectLine,
             `Edit:    exodus workflow checkpoint ${runId} edit 1 --text "..."`,
             `Redo:    exodus workflow checkpoint ${runId} retry --wait`,
-            `Cancel:  exodus workflow checkpoint ${runId} cancel --reason "..."`,
+            `Cancel:  exodus workflow cancel ${runId} --reason "..."`,
         ],
     };
 }
@@ -2633,17 +2670,17 @@ export async function checkpointRetryFlow(runId, opts, deps) {
         headline: "  ⏸ The step re-ran — its fresh output is waiting on your approval.",
     });
 }
-export async function checkpointCancelFlow(runId, opts, deps) {
-    const pf = await preflightPark(runId, ["checkpoint", "taste"], "workflow checkpoint cancel", opts.json, deps);
-    if (!pf.ok)
-        return pf.result;
+export async function cancelRunFlow(runId, opts, deps) {
     const res = await deps.post(CANCEL_PATH, {
         runId,
         ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
     });
     if (!res.ok)
-        return triggerErrorResult(res, "workflow checkpoint cancel", opts.json);
-    return okLine(`Checkpoint canceled — run ${runId} stopped.`, { ok: true, runId }, opts.json);
+        return triggerErrorResult(res, opts.verb ?? "workflow cancel", opts.json);
+    return okLine(`Canceled — run ${runId} is marked cancelled and won't go any further. Any sub-workflow it started is cancelled too, and a stop was sent to the step still running.`, { ok: true, runId }, opts.json);
+}
+export async function checkpointCancelFlow(runId, opts, deps) {
+    return cancelRunFlow(runId, { ...opts, verb: "workflow checkpoint cancel" }, deps);
 }
 export async function repairFlow(runId, action, opts, deps) {
     const verb = `workflow repair ${action}`;
@@ -2963,6 +3000,15 @@ export async function run(flags) {
         }
         console.error(`Error: unknown checkpoint action "${action}" (expected show, edit, approve, retry, or cancel).`);
         process.exit(1);
+    }
+    if (sub === "cancel") {
+        const runId = rest[0];
+        if (!runId) {
+            console.error("Error: workflow cancel requires <runId>.");
+            console.log('Usage: exodus workflow cancel <runId> [--reason "..."] [--json]');
+            process.exit(1);
+        }
+        return printResult(await cancelRunFlow(runId, { reason: flagString(flags, "reason"), json }, defaultDeps));
     }
     if (sub === "repair") {
         const runId = rest[0];

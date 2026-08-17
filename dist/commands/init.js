@@ -4,6 +4,8 @@ import { writeEnvScaffold, ensureGitignore, writeSkills, writeReferences, writeD
 import { loadWorkspaceEnv } from "../lib/load-env.js";
 import { ensureBrandDir } from "../lib/layout.js";
 import { pkgRef } from "../lib/channel.js";
+import { setScaffoldVersion } from "../lib/state.js";
+import { getVersion } from "../lib/version.js";
 export const helpText = `
 exodus init — Set up (or refresh) an Exodus workspace in the current folder
 
@@ -24,6 +26,7 @@ export function scaffoldInit(root) {
     const skills = writeSkills(root);
     writeReferences(root);
     const docs = writeDocs(root);
+    setScaffoldVersion(getVersion(), root);
     return { existing, envCreated, skills, docs };
 }
 export async function syncBrands(root) {

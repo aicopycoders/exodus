@@ -7,8 +7,8 @@ description: Generate meme-style ad creative for the active brand — recommends
 Subcommands (three; the batch renders server-side):
   exodus meme recommend --brief "<text>" [--avatar "<text>"]
   exodus meme run --brief "<text>" --formats '<json>' [--formats-file <path>] [--avatar "<text>"] [--name "<label>"]
-  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N>
-  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"]
+  exodus meme regenerate --brief "<text>" --layer 1 --template-id <id> --template-name "<name>" --boxes <N> [--id <runId>]
+  exodus meme regenerate --brief "<text>" --layer 2|3 --format <formatId> [--hint "<text>"] [--id <runId>]
 
 Flow:
   1. recommend → { recommendations: [...] } — 15 picks (5 per layer), each with
@@ -20,9 +20,13 @@ Flow:
   3. Poll: exodus workflow status --id <runId>
      Memes render through the Image Rig, so a meme run IS a workflow run — the
      workflow verb is the one that can read it, NOT `status --type creative`.
-  4. regenerate → re-render one miss, synchronously (returns image_url). Do not
-     pass its optional --id the run id from step 2 — that flag takes a
-     creative-suite run id, a different id space.
+  4. regenerate → re-render one miss, synchronously (returns image_url). Pass
+     --id <runId from step 2> so the fresh meme is saved with that run; leave it
+     off and you only get a URL that is never saved. A bad --id is a 400 that
+     names the mismatch, raised before anything is rendered — but 400 is not the
+     only refusal: a --template-id / --format that isn't a real format is a 404,
+     and a lookup or render that breaks is a 502. Read the message, not just the
+     status.
 
 Keys (strict BYOK, refused server-side before anything starts):
   layer 1 needs the member's Imgflip login · layers 2/3 need their Kie.ai key ·
@@ -135,18 +139,54 @@ the recommend output you're still holding:
 ```bash
 # Classic (layer 1) miss:
 npx @aicopycoders/exodus meme regenerate --brief "<brief>" --layer 1 \
-  --template-id <imgflip_template_id> --template-name "<name>" --boxes <imgflip_box_count>
+  --template-id <imgflip_template_id> --template-name "<name>" --boxes <imgflip_box_count> \
+  --id <runId from step 2>
 
 # AI (layer 2/3) miss — --hint steers the re-roll:
 npx @aicopycoders/exodus meme regenerate --brief "<brief>" --layer 2 --format <format_id> \
-  --hint "make the punchline land the product"
+  --hint "make the punchline land the product" --id <runId from step 2>
 ```
 
 Regenerate is synchronous (caption + render server-side) and returns the new
-`image_url` directly. **Do not pass the run id from step 2 to `--id`** — that
-flag attaches the fresh meme to a *creative-suite* run, and since memes moved
-onto the Image Rig the id `run` prints is a workflow run id, a different id
-space. Omit `--id` and hand the user the returned URL.
+`image_url` directly.
+
+**Pass `--id` the runId from step 2** (#1164). The server matches it to the run's
+child for that format and files the fresh meme there, so it lands in the library
+beside its siblings and the user finds it where they expect. Both id spaces are
+accepted — the workflow run id `run` prints and a creative-suite child run id.
+
+**What `--id` now guarantees is the front door: a bad id is refused before you
+pay for anything.** The server resolves the id first, so a typo, an id from
+another brand, a run that made no memes, or a run with no meme in *this* format
+comes back as a 400 naming the mismatch — no caption call, no render, no credits
+spent. That is the promise; it is not a promise that nothing can go wrong after
+it.
+
+The refusals are not all 400s, so branch on the message, not the number alone:
+
+- **400** — the id didn't resolve (the message says which part didn't match), or
+  a required key is missing, or the brand couldn't be worked out ("No active
+  workspace for user"). Careful if you're reading the JSON envelope's `code`
+  rather than the status: that last one is labelled `INTERNAL_ERROR` even though
+  it is a plain 400, so route on the **status + message**, not the code.
+- **404** — the `--template-id` (layer 1) or `--format` (layer 2/3) isn't a
+  format the server knows. Re-check it against the recommend output you're
+  holding.
+- **429** — too many regenerates too fast (30 a minute). Wait and retry; the
+  response carries a `Retry-After`.
+- **502** — something broke rather than being refused: the run lookup failed, or
+  the caption/render leg threw. This one is worth retrying; a 400 or 404 is not.
+
+**One honest gap once the id resolves.** Filing the finished meme into the
+library is deliberately allowed to fail quietly — if that write breaks (a Convex
+hiccup), the route still answers **200** with the provider's own URL. So a 200
+means "here is your image", not "it is saved". If the user later can't find a
+regenerated meme in the library, that is the failure to suspect — and it is
+recoverable only by regenerating, since the returned URL expires.
+
+Leaving `--id` off is still valid and still returns the image URL, but that image
+is saved nowhere and the URL expires — only do it when the user explicitly wants
+a throwaway look.
 
 ### 5. Report
 
@@ -191,6 +231,16 @@ internals into chat.
   per-image provenance as any other rig render. That is why the poll verb is
   `exodus workflow status`, not `exodus status --type creative` — the creative
   status route reads `creativeSuiteRuns` for a Bearer caller.
+- Since #1164 `regenerate`'s `--id` accepts BOTH id spaces. The route resolves it
+  instead of casting it: a `creativeSuiteRuns` id is used as-is, a `workflowRuns`
+  id is walked to the rig child whose `memeFormat` matches this request, and an
+  id it can't place is a 400 raised BEFORE any caption or render is paid for.
+  Before that fix a CLI `--id` silently failed to save and left an orphaned blob.
+  What #1164 removed is the CAUSE, not the swallow: `persistMemeImage` still
+  catches a `recordMemeImage` failure, logs it, and returns null, and the route
+  still answers 200 with the provider URL. A genuine Convex failure is therefore
+  still a silent miss (plus an orphaned storage blob) — findable only in the
+  `[meme/persist] ORPHANED STORAGE BLOB` log line.
 - The rig's child image runs are still `creativeSuiteRuns` with engine `meme`,
   so finished memes appear in the creative-suite library alongside other engines
   and `exodus browse --agent meme` still covers them.
