@@ -36,6 +36,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   imgflip: "Imgflip",
   scrapecreators: "ScrapeCreators",
   apify: "Apify",
+  browserbase: "Browserbase",
 };
 
 async function status(): Promise<void> {

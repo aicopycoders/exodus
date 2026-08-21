@@ -22,6 +22,7 @@ const OTHER_COMMANDS = new Set([
     "workflow",
     "session",
     "bank",
+    "hooks",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",
@@ -39,6 +40,7 @@ const EXAMPLES = [
     'exodus meme recommend --brief "grounding sheets reduce inflammation"',
     'exodus meme run --brief "grounding sheets reduce inflammation" --formats \'[...]\'',
     'exodus browse',
+    'exodus hooks list --min-score 10',
     'exodus status --id <runId> --type genesis',
 ];
 function installedCommands() {

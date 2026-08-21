@@ -15,6 +15,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-template | Ad-Type Format Variations across 50 structured formats |
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
 | exodus-workflow | Run/build saved multi-node workflows, resolve inbox gate/repair parks, continue sessions, fire triggers, read banks + promote winners |
+| exodus-hooks | Read the Scout library of hook cards — composable filters, one-card detail, pattern matches, CSV export (read-only) |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
 | exodus-winners | Mine your own Meta ad account for winners (needs the Meta Ads MCP) and import them into Exodus |
@@ -193,6 +194,30 @@ Representative commands:
   exodus session list | show | chat
   exodus bank list | show <key> | promote <key>
 Every workflow/session/bank verb takes --json — that output is the machine API.
+```
+
+---
+
+## exodus-hooks
+
+**What it does:** Reads the Scout library — the brand's pool of hook cards captured from Instagram outliers. Filters compose, so one query answers "10×+, on-screen hooks, Spanish, under 14 days". Read-only; promoting a card is a dashboard act.
+
+```operator-guide
+Commands:
+  exodus hooks list [filters] [--limit n] [--json]      the filtered slice
+  exodus hooks show <ref> [--json]                      one full card
+  exodus hooks find-similar <ref> [--json]              cards sharing the hook pattern
+  exodus hooks explain-score <ref>                      the evidence behind the score
+  exodus hooks export --csv|--json [filters] [--out f]  the whole filtered corpus
+Filters (compose):
+  --min-score N · --lane relative|absolute|velocity|evergreen
+  --status unproven|corroborated|cross-validated|saturated|virgin-market
+  --lifecycle new|reviewed|promoted|tested|killed · --creator <handle>
+  --language xx · --market xx · --via paste|seed|expansion|spotter · --days N
+  --extract pending|complete|partial|failed|skipped · --has spoken|onscreen|caption
+  --pattern "text" · --limit N (default 50, max 200)
+<ref>: card id, Instagram shortcode, or post URL
+Returns: a table, --json data, or an exported CSV/JSON file
 ```
 
 ---

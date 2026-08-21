@@ -39,10 +39,16 @@ export const PROVIDER_ENV_MAP: Record<string, string> = {
 // server-side per run from Settings → Keys, never from a local .env var. It
 // belongs on the "used server-side; no .env entry needed" line with its
 // siblings, not in the ambiguous "no known env var mapping" skip bucket.
+// `browserbase` joins them (#1405): the Organic Scout research-account browser
+// key is an {apiKey, projectId} JSON pair that gets decrypted server-side when a
+// Door 2 run starts. The local host never reads it from .env — our own env-level
+// BROWSERBASE_* vars are the internal pilot's, never the member's — so
+// `keys pull` must not write it, and must not flag it as an unknown-mapping skip.
 export const SERVER_RESOLVED_PROVIDERS = new Set<string>([
   "imgflip",
   "scrapecreators",
   "apify",
+  "browserbase",
 ]);
 
 export interface RemoteKeys {

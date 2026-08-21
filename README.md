@@ -46,6 +46,9 @@ health, CLI currency — and tells you exactly what to fix.
 - `npx -y @aicopycoders/exodus@beta workflow --help` — run, build, and automate
   saved multi-node workflows; resolve gate/repair parks from the inbox; read
   banks and promote winners.
+- `npx -y @aicopycoders/exodus@beta hooks --help` — browse the Organic Scout
+  hook library: filter by score, lane, validation status and more; explain a
+  score; find cards sharing a hook pattern; export to CSV or JSON. Read-only.
 
 Inside Claude Code, just say **"exodus"** plus what you want
 ("exodus, write me some ads") and the skills route the rest.

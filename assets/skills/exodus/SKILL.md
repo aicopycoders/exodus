@@ -24,6 +24,7 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Read copy banks or promote a winner ("show my hook bank", "list my banks", "promote this winner") | `exodus-workflow` |
 | Onboard a new brand / build the primer | `exodus-primer` (with winning ads) or `exodus-foundation` (no ads yet) |
 | List/switch/troubleshoot brands | `exodus-brand` |
+| Read the Scout hook library — "what do my 15×+ hooks have in common", "show me my Spanish on-screen hooks", "why did that reel score 22×", "export my hooks to a spreadsheet" | `exodus-hooks` (read-only; promoting a card is a dashboard act) |
 | See past runs / find an output | `exodus-browse` |
 | Open or create Google Docs/Sheets | `exodus-drive` |
 | Import their OWN winning ads from their Meta ad account ("import my winners", "mine my ad account for winners", "exodus winners") | `exodus-winners` |

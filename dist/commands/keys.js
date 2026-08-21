@@ -27,6 +27,7 @@ const PROVIDER_LABEL = {
     imgflip: "Imgflip",
     scrapecreators: "ScrapeCreators",
     apify: "Apify",
+    browserbase: "Browserbase",
 };
 async function status() {
     let remote;
