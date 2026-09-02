@@ -117,8 +117,8 @@ export async function checkWhoami() {
             return {
                 ok: false,
                 label: "Brand resolution",
-                detail: "API key did not resolve to a workspace",
-                fix: "ask an admin to mint a brand-scoped API key in Settings → Brands → API keys",
+                detail: "API key did not resolve to a brand",
+                fix: "pick or create a brand in the dashboard (brand picker, top right); if that's done, ask an admin to mint a brand-scoped API key in Settings → Brands → API keys",
             };
         }
         if (!d.foundationReady) {
@@ -410,8 +410,8 @@ export async function checkApiAndDrive() {
         : {
             ok: false,
             label: "Dashboard API key",
-            detail: "no workspace found for this key",
-            fix: "contact support — your workspace may not be set up",
+            detail: "no brand to work in — none selected, or the saved one is gone / not yours",
+            fix: "pick or create a brand in the dashboard (brand picker, top right), then run doctor again",
         };
     const driveResult = drive.connected
         ? {
