@@ -27,7 +27,8 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Read the Scout hook library — "what do my 15×+ hooks have in common", "show me my Spanish on-screen hooks", "why did that reel score 22×", "export my hooks to a spreadsheet" | `exodus-hooks` (read-only; promoting a card is a dashboard act) |
 | See past runs / find an output | `exodus-browse` |
 | Open or create Google Docs/Sheets | `exodus-drive` |
-| Import their OWN winning ads from their Meta ad account ("import my winners", "mine my ad account for winners", "exodus winners") | `exodus-winners` |
+| Read their OWN live Meta ads and their numbers — "what are my cheapest ads", "where is my spend going", "show me that ad", "what are people saying in the comments on my ads" (`exodus ads` / `exodus comments`) | `exodus-ads` (read-only; already synced by the dashboard, no Meta MCP needed) |
+| Import their OWN winning ads from their Meta ad account ("import my winners", "mine my ad account for winners", "exodus winners") | `exodus-winners` (it checks first whether the brand's Meta account is connected — if it is, it reads `exodus ads` and `exodus winners definition` instead of a Meta MCP) |
 | Update the CLI + skills ("update exodus", "run an exodus update") | run `npx @aicopycoders/exodus@latest update` — the ONLY command that refreshes skills; `doctor` checks health but never rewrites them |
 
 If a custom pipeline skill is installed in this folder (any additional `exodus-*` directory under `.claude/skills/`), it routes the same way — match the user's words to that skill's description.

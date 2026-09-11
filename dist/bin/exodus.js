@@ -23,12 +23,15 @@ const OTHER_COMMANDS = new Set([
     "session",
     "bank",
     "hooks",
+    "ads",
+    "comments",
 ]);
 const HIDDEN_COMMANDS = new Set([
     "creative",
     "template",
     "idea",
     "swipe",
+    "video",
 ]);
 const EXAMPLES = [
     'exodus genesis run --brief "joint pain relief in 30 days" --variants 6',
@@ -41,6 +44,8 @@ const EXAMPLES = [
     'exodus meme run --brief "grounding sheets reduce inflammation" --formats \'[...]\'',
     'exodus browse',
     'exodus hooks list --min-score 10',
+    'exodus ads list --sort cost-per-result',
+    'exodus comments list --ad <adId>',
     'exodus status --id <runId> --type genesis',
 ];
 function installedCommands() {

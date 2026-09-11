@@ -63,7 +63,8 @@ These are the **Exodus** pipelines — the automatic system that drives the Gene
 | **Hooks** | `exodus-hooks` | Read the Scout library — the hook cards captured from Instagram outliers. Compose filters (score, lane, validation status, language, hook type, recency), inspect one card, find cards sharing a hook pattern, export to CSV. Read-only. |
 | **Browse** | `exodus-browse` | View history and retrieve past outputs |
 | **Drive** | `exodus-drive` | Read/write Google Docs, Sheets, and Drive files via `npx @aicopycoders/exodus drive` (uses the dashboard's Google OAuth — no local CLI) |
-| **Winners** | `exodus-winners` | Mine your own Meta ad account for winning ads (via the Meta Ads MCP) and import them into Exodus as generative fuel — interview, visual confirmation, `npx @aicopycoders/exodus winners import` |
+| **Ads** | `exodus-ads` | Read your own live Meta ads once the account is connected on the dashboard — `npx @aicopycoders/exodus ads list` (sort by cost per result, spend or CTR), `ads show <adId>` (copy, both windows, media links, comment counts), `npx @aicopycoders/exodus comments list` (already commenter-redacted), and `npx @aicopycoders/exodus winners definition` (what this brand means by a winner). Read-only; no Meta login or MCP needed. |
+| **Winners** | `exodus-winners` | Mine your own Meta ad account for winning ads and import them into Exodus as generative fuel — interview, visual confirmation, `npx @aicopycoders/exodus winners import`. A brand whose Meta account is connected reads its ads and its winner definition straight from Exodus; only an unconnected brand needs the Meta Ads MCP. |
 
 For the operator-facing quick reference on how to invoke these in Claude Code, see `PIPELINES.md` in the workspace root.
 
