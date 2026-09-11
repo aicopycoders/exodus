@@ -25,6 +25,7 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Onboard a new brand / build the primer | `exodus-primer` (with winning ads) or `exodus-foundation` (no ads yet) |
 | List/switch/troubleshoot brands | `exodus-brand` |
 | Read the Scout hook library — "what do my 15×+ hooks have in common", "show me my Spanish on-screen hooks", "why did that reel score 22×", "export my hooks to a spreadsheet" | `exodus-hooks` (read-only; promoting a card is a dashboard act) |
+| Make a video ad, or anything about a Show or a video run — "start a video ad from this script", "is my video run done", "pull the clips and cut them", "upload my cut", "what's wrong with scene 3" (`exodus video`) | `exodus-video` (admin-only on the dashboard; it drives start → storyboard → pull → cut → upload) |
 | See past runs / find an output | `exodus-browse` |
 | Open or create Google Docs/Sheets | `exodus-drive` |
 | Read their OWN live Meta ads and their numbers — "what are my cheapest ads", "where is my spend going", "show me that ad", "what are people saying in the comments on my ads" (`exodus ads` / `exodus comments`) | `exodus-ads` (read-only; already synced by the dashboard, no Meta MCP needed) |

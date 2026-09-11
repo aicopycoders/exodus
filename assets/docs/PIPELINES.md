@@ -16,6 +16,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
 | exodus-workflow | Run/build saved multi-node workflows, resolve inbox gate/repair parks, continue sessions, fire triggers, read banks + promote winners |
 | exodus-hooks | Read the Scout library of hook cards — composable filters, one-card detail, pattern matches, CSV export (read-only) |
+| exodus-video | Make a video ad from a Show — start, storyboard gate, pull every piece + manifest, first cut, upload, approve (admin-only) |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
 | exodus-winners | Mine your own Meta ad account for winners (needs the Meta Ads MCP) and import them into Exodus |
@@ -218,6 +219,27 @@ Filters (compose):
   --pattern "text" · --limit N (default 50, max 200)
 <ref>: card id, Instagram shortcode, or post URL
 Returns: a table, --json data, or an exported CSV/JSON file
+```
+
+---
+
+## exodus-video
+
+**What it does:** Makes a video ad from a locked Show, in pieces. The run writes the storyboard, draws a picture per scene, records a voice per scene, renders a clip per scene and composes a music bed, then parks for a cut. The CLI pulls the pieces to a folder with a `manifest.json`, the bundled script makes a plain cut, and the upload attaches it for approval. Admin-only.
+
+```operator-guide
+Commands:
+  exodus video shows [--json]                                          Shows and whether each is ready
+  exodus video start --show <id> --script <file> [--wait] [--json]     start an ad run; --wait parks at the storyboard gate
+  exodus video storyboard <runId> [--json]                             the scene cards
+  exodus video approve <runId> [--json]                                approve the storyboard, or the uploaded cut
+  exodus video flag <runId> --note "<what is wrong>" [--json]          send the storyboard back
+  exodus video status <runId> [--json]                                 the park and each scene's clip/voice/picture
+  exodus video pull <runId> --out <dir> [--json]                       every piece + manifest.json
+  exodus video upload <runId> --file <cut.mp4> [--duration <s>] [--json]   attach the cut (MP4/MOV/WebM, 200 MB)
+Cut:
+  node .claude/skills/exodus-video/scripts/first-cut.mjs <dir> [--skip n,m] [--no-music] [--out f]
+Returns: park lines with the exact next command; pull writes files + manifest.json
 ```
 
 ---
