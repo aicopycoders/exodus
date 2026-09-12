@@ -134,7 +134,9 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
       spine.push({
         sceneIndex: n, source: "still", file: scene.keyframe, seconds,
         hasAudio: false, voice, startSec, lineIds: plan.lineIds,
-        words: null,
+        // #1689: on a narrated scene the words are the voice track's, and the
+        // voice starts where the segment does, so they need no offset here.
+        words: voice ? readWords(scene.words) : null,
         note: `${voice ? ` + ${voice}` : ", silent"} (${seconds.toFixed(1)}s, clip ${scene.clipStatus})`,
       });
       startSec += seconds;

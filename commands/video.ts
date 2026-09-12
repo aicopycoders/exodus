@@ -124,7 +124,14 @@ export type ArtifactSubset =
       qc?: ClipQc;
       final?: boolean;
     }
-  | { type: "audio"; sceneIndex?: number; audioUrl?: string; durationSec?: number }
+  | {
+      type: "audio";
+      sceneIndex?: number;
+      audioUrl?: string;
+      durationSec?: number;
+      /** #1689: narration word timings, seconds from the start of this track. */
+      words?: ClipWord[];
+    }
   | { type: "text" | "primer" | "session" | "document" };
 
 export interface VideoRunNode {
@@ -283,7 +290,15 @@ export type RunStop =
   | { at: "storyboard-gate"; nodeId?: string }
   | { at: "final-watch" }
   | { at: "paused"; nodeId?: string; reason?: string }
-  | { at: "failed"; error?: string }
+  // #1687: a "repair" park rides the FAILED arm rather than a new one of its
+  // own. A run parked for repair has a dead step in it — `wait` must exit
+  // nonzero, `status` must say failed, and a retry is what fixes it. Every
+  // consumer already treats `at: "failed"` that way, so the honest reading is
+  // the default one; a separate arm would let any consumer that forgot about
+  // it quietly call a dead run a success. `repair` only adds the detail that
+  // this failure is retryable step-by-step, and `step`/`nodeId` name which
+  // step died.
+  | { at: "failed"; error?: string; repair?: true; nodeId?: string; step?: string }
   | { at: "finished"; status: string };
 
 const GATE_NODE_KINDS = new Set(["scene-frames", "storyboard"]);
@@ -311,6 +326,23 @@ export function classifyRun(run: VideoRun): RunStop {
   if (run.status === "failed") return { at: "failed", error: run.error };
   if (run.isTerminal) return { at: "finished", status: run.status };
   if (isAwaitingApproval(run.status)) {
+    // #1687: a "repair" park is a FAILURE wearing a park's clothes. The
+    // storyboard node died, its siblings were skipped, and the run stalled on
+    // the collector waiting for someone to retry or skip — so the run status
+    // says awaiting-approval and `pausedNodeId` points at the collector, which
+    // made nothing and explains nothing. Read the dead step out of the node
+    // list instead, and report the failure it actually is.
+    if (run.pauseReason === "repair") {
+      const deadNode = run.nodes.find((n) => n.status === "failed");
+      const why = deadNode?.error ?? run.error;
+      return {
+        at: "failed",
+        repair: true,
+        nodeId: deadNode?.nodeId ?? run.pausedNodeId,
+        ...(deadNode?.kind ? { step: deadNode.kind } : {}),
+        ...(why ? { error: why } : {}),
+      };
+    }
     const pausedNode = run.nodes.find((n) => n.nodeId === run.pausedNodeId);
     if (pausedNode && parkedAtStoryboardGate(run, pausedNode)) {
       return { at: "storyboard-gate", nodeId: pausedNode.nodeId };
@@ -336,6 +368,22 @@ export function stageWord(stage: string): string {
   return STAGE_WORDS[stage] ?? stage;
 }
 
+/** #1687: the same steps STAGE_WORDS names, as the SUBJECT of a sentence —
+ *  "The storyboard failed", not "The writing the storyboard failed". */
+const STEP_NAMES: Record<string, string> = {
+  brief: "The script read",
+  storyboard: "The storyboard",
+  reference: "The reference still",
+  "scene-frames": "The scene pictures",
+  voiceover: "The voices",
+  video: "The clips",
+};
+
+export function stepName(kind: string | undefined): string {
+  if (!kind) return "A step in this run";
+  return STEP_NAMES[kind] ?? `The ${kind} step`;
+}
+
 export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): string[] {
   if (stop.at === "storyboard-gate") {
     return [
@@ -353,6 +401,16 @@ export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): s
     ];
   }
   if (stop.at === "failed") {
+    // #1687: a repair park names the step that died and offers the retry,
+    // instead of the old "waiting on someone (repair)" — nobody was waiting,
+    // and there was nothing to wait for.
+    if (stop.repair) {
+      return [
+        `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
+        `Try that step again: exodus workflow repair ${runId} retry`,
+        `Or open the run:     ${dashboardUrl}/video?ad=${runId}`,
+      ];
+    }
     return [
       `This run failed${stop.error ? `: ${stop.error}` : "."}`,
       `See how far it got: exodus video status ${runId}`,
@@ -388,6 +446,9 @@ export interface ManifestScene {
   durationSec: number | null;
   clip: string | null;
   words: string | null;
+  /** Which media the timings in `words` are relative to: the clip's own sound,
+   *  or the scene's voice track. Null when no word times were delivered. */
+  wordsFrom: "clip" | "voice" | null;
   voice: string | null;
   keyframe: string | null;
   qc: ClipQc | null;
@@ -495,13 +556,16 @@ export function planPull(
     }
   }
 
-  const voiceByScene = new Map<number, PullDownload>();
+  const voiceByScene = new Map<number, { download: PullDownload; words: ClipWord[] | null }>();
   for (const artifact of outputsOfNodeKind(run, "voiceover")) {
     if (artifact.type !== "audio" || typeof artifact.sceneIndex !== "number") continue;
     if (!artifact.audioUrl) continue;
     voiceByScene.set(artifact.sceneIndex, {
-      file: `${scenePrefix(artifact.sceneIndex)}.voice.${extFor(artifact.audioUrl, "audio")}`,
-      url: artifact.audioUrl,
+      download: {
+        file: `${scenePrefix(artifact.sceneIndex)}.voice.${extFor(artifact.audioUrl, "audio")}`,
+        url: artifact.audioUrl,
+      },
+      words: artifact.words ?? null,
     });
   }
 
@@ -549,18 +613,32 @@ export function planPull(
 
   const scenes: ManifestScene[] = sceneIndexes.map((sceneIndex) => {
     const clip = clipByScene.get(sceneIndex);
+    const voice = voiceByScene.get(sceneIndex);
     const item = clipItemByScene.get(sceneIndex);
-    let words: string | null = null;
+    // #1689: a narrated scene's timings ride on its voice track. The clip wins
+    // when both exist, because a clip with its own dialogue is what plays; the
+    // voice track only fills a silent clip.
+    let source: ClipWord[] | null = null;
+    let wordsFrom: "clip" | "voice" | null = null;
     if (clip?.words && clip.words.length > 0) {
+      source = clip.words;
+      wordsFrom = "clip";
+    } else if (voice?.words && voice.words.length > 0) {
+      source = voice.words;
+      wordsFrom = "voice";
+    }
+    let words: string | null = null;
+    if (source) {
       words = `${scenePrefix(sceneIndex)}.words.json`;
-      texts.push({ file: words, body: `${JSON.stringify(clip.words, null, 2)}\n` });
+      texts.push({ file: words, body: `${JSON.stringify(source, null, 2)}\n` });
     }
     return {
       sceneIndex,
       durationSec: clip?.durationSec ?? null,
       clip: clip?.download.file ?? null,
       words,
-      voice: voiceByScene.get(sceneIndex)?.file ?? null,
+      wordsFrom,
+      voice: voice?.download.file ?? null,
       keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
       qc: clip?.qc ?? null,
       clipStatus: item?.status ?? "missing",
@@ -573,7 +651,7 @@ export function planPull(
   const downloads: PullDownload[] = [
     ...(reference ? [reference] : []),
     ...keyframeByScene.values(),
-    ...voiceByScene.values(),
+    ...[...voiceByScene.values()].map((v) => v.download),
     ...[...clipByScene.values()].map((c) => c.download),
     ...(music ? [music] : []),
   ];
@@ -600,10 +678,19 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
   if (manifest.reference === failure.file) manifest.reference = null;
   if (manifest.music === failure.file) manifest.music = null;
   for (const scene of manifest.scenes) {
+    // #1689: the word times are relative to ONE file. If that file never
+    // landed, the cut would play the other track and read these times against
+    // it, so the times go with the file they were measured on.
+    const lostWordsSource =
+      (scene.clip === failure.file && scene.wordsFrom === "clip") ||
+      (scene.voice === failure.file && scene.wordsFrom === "voice");
     if (scene.clip === failure.file) scene.clip = null;
     if (scene.voice === failure.file) scene.voice = null;
     if (scene.keyframe === failure.file) scene.keyframe = null;
-    if (scene.words === failure.file) scene.words = null;
+    if (scene.words === failure.file || lostWordsSource) {
+      scene.words = null;
+      scene.wordsFrom = null;
+    }
   }
 }
 
@@ -839,7 +926,14 @@ export async function statusFlow(
     byScene.set(item.sceneIndex, row);
   }
 
-  const lines = [`Ad run ${runId} — ${displayRunStatus(run.status)}`, ...stopLines(stop, runId, deps.dashboardUrl)];
+  // #1687: a repair park's raw status is still "awaiting-approval", so the
+  // headline read "Awaiting approval" over a run whose storyboard was dead.
+  // The classification is the honest headline for that one case.
+  const headline =
+    stop.at === "failed" && stop.repair
+      ? `Ad run ${runId} — Stopped, a step failed`
+      : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
+  const lines = [headline, ...stopLines(stop, runId, deps.dashboardUrl)];
 
   if (byScene.size === 0) {
     lines.push("", "No scenes yet — this run hasn't made anything to look at.");
@@ -1140,6 +1234,92 @@ export const NO_DURATION_MESSAGE =
 
 const MB = 1024 * 1024;
 
+const UPLOAD_ATTEMPTS = 3;
+/** Waits between attempt 1 -> 2 and attempt 2 -> 3. */
+const UPLOAD_BACKOFF_MS = [500, 1500];
+
+type UploadStep = "mint" | "store" | "register" | "attach";
+
+const UPLOAD_STEP_LABEL: Record<UploadStep, string> = {
+  mint: "asking the server for an upload slot",
+  store: "sending the file to storage",
+  register: "registering the uploaded file",
+  attach: "attaching the cut to the run",
+};
+
+/** #1695: a dropped socket makes `fetch` throw, and the thrown error's own
+ *  message is always the useless "fetch failed" — the real reason (ECONNRESET,
+ *  UND_ERR_SOCKET) sits one or two `cause` levels down, and undici sometimes
+ *  nests it. Dig it out so a bug report can name what actually broke. */
+export function describeFetchFailure(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts: string[] = [];
+  let cause: unknown = (err as { cause?: unknown }).cause;
+  for (let depth = 0; depth < 2 && cause && typeof cause === "object"; depth++) {
+    const level = cause as { code?: unknown; message?: unknown; cause?: unknown };
+    const code = typeof level.code === "string" && level.code ? level.code : undefined;
+    const message = typeof level.message === "string" && level.message ? level.message : undefined;
+    if (code && message) parts.push(`${code}: ${message}`);
+    else if (code) parts.push(code);
+    else if (message) parts.push(message);
+    cause = level.cause;
+  }
+  return parts.length > 0 ? `${err.message} (${parts.join("; ")})` : err.message;
+}
+
+type UploadAttempt<T> =
+  | { ok: true; value: T }
+  | { ok: false; step: UploadStep; attempts: number; cause: string };
+
+/** #1695: only a THROWN failure is retried. A throw from `fetch` means the
+ *  request never got an answer (dropped socket, DNS blip), which a second try
+ *  often fixes. A returned non-ok response IS an answer — a 403 says no, and
+ *  asking again just gets the same no — so those keep their existing one-shot
+ *  error paths untouched. */
+async function withUploadRetry<T>(
+  step: UploadStep,
+  deps: VideoDeps,
+  fn: () => Promise<T>,
+): Promise<UploadAttempt<T>> {
+  let cause = "";
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt++) {
+    try {
+      return { ok: true, value: await fn() };
+    } catch (e) {
+      cause = describeFetchFailure(e);
+      const wait = UPLOAD_BACKOFF_MS[attempt - 1];
+      if (attempt < UPLOAD_ATTEMPTS && wait !== undefined) await deps.sleep(wait);
+    }
+  }
+  return { ok: false, step, attempts: UPLOAD_ATTEMPTS, cause };
+}
+
+function uploadRetryResult(
+  failed: { step: UploadStep; attempts: number; cause: string },
+  json: boolean,
+): FlowResult {
+  if (json) {
+    return {
+      code: 1,
+      lines: [
+        JSON.stringify({
+          ok: false,
+          step: failed.step,
+          attempts: failed.attempts,
+          error: failed.cause,
+        }),
+      ],
+    };
+  }
+  return {
+    code: 1,
+    lines: [
+      `Upload failed while ${UPLOAD_STEP_LABEL[failed.step]} (${failed.attempts} tries): ${failed.cause}`,
+      "Check your connection and run the same command again.",
+    ],
+  };
+}
+
 export async function uploadFlow(
   runId: string,
   filePath: string,
@@ -1191,35 +1371,55 @@ export async function uploadFlow(
     asked ?? deps.probeDurationSec(filePath) ?? parseMvhdDurationSec(bytes);
   if (durationSec === null) return { code: 1, lines: [NO_DURATION_MESSAGE] };
 
-  const mint = await deps.post(ASSET_UPLOAD_URL_PATH, {});
+  const minting = await withUploadRetry("mint", deps, () => deps.post(ASSET_UPLOAD_URL_PATH, {}));
+  if (!minting.ok) return uploadRetryResult(minting, json);
+  const mint = minting.value;
   if (!mint.ok) return errorResult(mint, json);
   const minted = mint.data as { uploadUrl?: string; receiptId?: string };
-  if (!minted.uploadUrl || !minted.receiptId) {
+  const uploadUrl = minted.uploadUrl;
+  const receiptId = minted.receiptId;
+  if (!uploadUrl || !receiptId) {
     return { code: 1, lines: ["The server did not hand back a place to upload to."] };
   }
 
-  const put = await deps.uploadBytes(minted.uploadUrl, mime, bytes);
+  // #1695: a retry here reuses the slot minted above. The bytes never reached
+  // storage, so the slot is unspent; re-minting would only leak a receipt.
+  const storing = await withUploadRetry("store", deps, () =>
+    deps.uploadBytes(uploadUrl, mime, bytes),
+  );
+  if (!storing.ok) return uploadRetryResult(storing, json);
+  const put = storing.value;
   if (!put.ok || !put.storageId) {
     const detail = put.body ? `: ${put.body.slice(0, 200)}` : "";
     return { code: 1, lines: [`Upload failed (HTTP ${put.status})${detail}`] };
   }
+  const storageId = put.storageId;
 
-  const registered = await deps.post(ASSETS_PATH, {
-    storageId: put.storageId,
-    receiptId: minted.receiptId,
-    filename: path.basename(filePath),
-  });
+  const registering = await withUploadRetry("register", deps, () =>
+    deps.post(ASSETS_PATH, {
+      storageId,
+      receiptId,
+      filename: path.basename(filePath),
+    }),
+  );
+  if (!registering.ok) return uploadRetryResult(registering, json);
+  const registered = registering.value;
   if (!registered.ok) return errorResult(registered, json);
   const asset = registered.data as { assetId?: string };
-  if (!asset.assetId) {
+  const assetId = asset.assetId;
+  if (!assetId) {
     return { code: 1, lines: ["The server stored the file but did not say what to call it."] };
   }
 
-  const attached = await deps.post(FINAL_PATH, {
-    runId,
-    assetId: asset.assetId,
-    durationSec,
-  });
+  const attaching = await withUploadRetry("attach", deps, () =>
+    deps.post(FINAL_PATH, {
+      runId,
+      assetId,
+      durationSec,
+    }),
+  );
+  if (!attaching.ok) return uploadRetryResult(attaching, json);
+  const attached = attaching.value;
   if (!attached.ok) return errorResult(attached, json);
   const final = attached.data as { finalWatchUrl?: string };
   const finalWatchUrl = final.finalWatchUrl ?? `${deps.dashboardUrl}/video?ad=${runId}`;
@@ -1227,7 +1427,7 @@ export async function uploadFlow(
   if (json) {
     return {
       code: 0,
-      lines: [JSON.stringify({ ok: true, runId, assetId: asset.assetId, durationSec, finalWatchUrl })],
+      lines: [JSON.stringify({ ok: true, runId, assetId, durationSec, finalWatchUrl })],
     };
   }
   return {

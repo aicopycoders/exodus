@@ -41,6 +41,7 @@ export type ArtifactSubset = {
     sceneIndex?: number;
     audioUrl?: string;
     durationSec?: number;
+    words?: ClipWord[];
 } | {
     type: "text" | "primer" | "session" | "document";
 };
@@ -129,12 +130,16 @@ export type RunStop = {
 } | {
     at: "failed";
     error?: string;
+    repair?: true;
+    nodeId?: string;
+    step?: string;
 } | {
     at: "finished";
     status: string;
 };
 export declare function classifyRun(run: VideoRun): RunStop;
 export declare function stageWord(stage: string): string;
+export declare function stepName(kind: string | undefined): string;
 export declare function stopLines(stop: RunStop, runId: string, dashboardUrl: string): string[];
 export interface PullDownload {
     file: string;
@@ -149,6 +154,7 @@ export interface ManifestScene {
     durationSec: number | null;
     clip: string | null;
     words: string | null;
+    wordsFrom: "clip" | "voice" | null;
     voice: string | null;
     keyframe: string | null;
     qc: ClipQc | null;
@@ -208,6 +214,7 @@ export declare function flagFlow(runId: string, note: string, json: boolean, dep
 export declare function pullFlow(runId: string, dir: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parseMvhdDurationSec(bytes: Uint8Array): number | null;
 export declare const NO_DURATION_MESSAGE: string;
+export declare function describeFetchFailure(err: unknown): string;
 export declare function uploadFlow(runId: string, filePath: string, durationFlag: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parsePositional(args?: string[]): string[];
 export declare function run(flags: Record<string, string | boolean>): Promise<void>;

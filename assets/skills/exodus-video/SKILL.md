@@ -117,7 +117,9 @@ scene-NN.keyframe.<ext>  the picture for scene NN
 scene-NN.voice.<ext>     the voice track for scene NN, when one was delivered
                          (a Show whose voices live inside the clips delivers none)
 scene-NN.<ext>           the clip for scene NN, usually .mp4, voice included
-scene-NN.words.json      [{w, s, e}] word timings inside that clip, for captions
+scene-NN.words.json      [{w, s, e}] word timings for the speech in that scene, from
+                         the clip's own dialogue or, on a narrated scene, from the
+                         voice track (seconds from the start of that file)
 music.<ext>              the music bed, composed to the clips' total length
 manifest.json            the index below
 ```
@@ -130,6 +132,8 @@ storyboard, reference, music         filenames, or null when not delivered
 scenes[]                             one per scene, in order
   sceneIndex, durationSec            the run's number and the clip's real length
   clip, voice, keyframe, words       filenames, or null
+  wordsFrom                          clip | voice, which file the word times are
+                                     timed against; null when none came
   clipStatus                         done | failed | running | pending | missing
   error                              why the clip failed, when it did
   flagged, findings[]                QC verdict: {check, code, severity: fail|warn, detail}
@@ -185,6 +189,9 @@ the same words grouped into short subtitle lines. `--out v2.mp4` names them
 
 The times are on the finished ad's timeline, so a word's time is where you hear
 it in the MP4. Cutaways contribute nothing, because their audio never plays. A
+narrated scene counts even when it is only a picture and a voice track: its word
+times come from the voice track, and `manifest.json` says `wordsFrom: "clip"` or
+`"voice"` per scene so you can tell which file a scene's times were read off. A
 scene that came with no word times leaves a gap, and the report names it. When no
 scene delivered word times the script writes neither file and says so. Tell the
 user the two files exist and that they are what the editor imports for captions.

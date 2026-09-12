@@ -181,6 +181,17 @@ export function classifyRun(run) {
     if (run.isTerminal)
         return { at: "finished", status: run.status };
     if (isAwaitingApproval(run.status)) {
+        if (run.pauseReason === "repair") {
+            const deadNode = run.nodes.find((n) => n.status === "failed");
+            const why = deadNode?.error ?? run.error;
+            return {
+                at: "failed",
+                repair: true,
+                nodeId: deadNode?.nodeId ?? run.pausedNodeId,
+                ...(deadNode?.kind ? { step: deadNode.kind } : {}),
+                ...(why ? { error: why } : {}),
+            };
+        }
         const pausedNode = run.nodes.find((n) => n.nodeId === run.pausedNodeId);
         if (pausedNode && parkedAtStoryboardGate(run, pausedNode)) {
             return { at: "storyboard-gate", nodeId: pausedNode.nodeId };
@@ -204,6 +215,19 @@ const STAGE_WORDS = {
 export function stageWord(stage) {
     return STAGE_WORDS[stage] ?? stage;
 }
+const STEP_NAMES = {
+    brief: "The script read",
+    storyboard: "The storyboard",
+    reference: "The reference still",
+    "scene-frames": "The scene pictures",
+    voiceover: "The voices",
+    video: "The clips",
+};
+export function stepName(kind) {
+    if (!kind)
+        return "A step in this run";
+    return STEP_NAMES[kind] ?? `The ${kind} step`;
+}
 export function stopLines(stop, runId, dashboardUrl) {
     if (stop.at === "storyboard-gate") {
         return [
@@ -221,6 +245,13 @@ export function stopLines(stop, runId, dashboardUrl) {
         ];
     }
     if (stop.at === "failed") {
+        if (stop.repair) {
+            return [
+                `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
+                `Try that step again: exodus workflow repair ${runId} retry`,
+                `Or open the run:     ${dashboardUrl}/video?ad=${runId}`,
+            ];
+        }
         return [
             `This run failed${stop.error ? `: ${stop.error}` : "."}`,
             `See how far it got: exodus video status ${runId}`,
@@ -305,8 +336,11 @@ export function planPull(run, items, opts) {
         if (!artifact.audioUrl)
             continue;
         voiceByScene.set(artifact.sceneIndex, {
-            file: `${scenePrefix(artifact.sceneIndex)}.voice.${extFor(artifact.audioUrl, "audio")}`,
-            url: artifact.audioUrl,
+            download: {
+                file: `${scenePrefix(artifact.sceneIndex)}.voice.${extFor(artifact.audioUrl, "audio")}`,
+                url: artifact.audioUrl,
+            },
+            words: artifact.words ?? null,
         });
     }
     const clipByScene = new Map();
@@ -345,18 +379,30 @@ export function planPull(run, items, opts) {
     ].sort((a, b) => a - b);
     const scenes = sceneIndexes.map((sceneIndex) => {
         const clip = clipByScene.get(sceneIndex);
+        const voice = voiceByScene.get(sceneIndex);
         const item = clipItemByScene.get(sceneIndex);
-        let words = null;
+        let source = null;
+        let wordsFrom = null;
         if (clip?.words && clip.words.length > 0) {
+            source = clip.words;
+            wordsFrom = "clip";
+        }
+        else if (voice?.words && voice.words.length > 0) {
+            source = voice.words;
+            wordsFrom = "voice";
+        }
+        let words = null;
+        if (source) {
             words = `${scenePrefix(sceneIndex)}.words.json`;
-            texts.push({ file: words, body: `${JSON.stringify(clip.words, null, 2)}\n` });
+            texts.push({ file: words, body: `${JSON.stringify(source, null, 2)}\n` });
         }
         return {
             sceneIndex,
             durationSec: clip?.durationSec ?? null,
             clip: clip?.download.file ?? null,
             words,
-            voice: voiceByScene.get(sceneIndex)?.file ?? null,
+            wordsFrom,
+            voice: voice?.download.file ?? null,
             keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
             qc: clip?.qc ?? null,
             clipStatus: item?.status ?? "missing",
@@ -368,7 +414,7 @@ export function planPull(run, items, opts) {
     const downloads = [
         ...(reference ? [reference] : []),
         ...keyframeByScene.values(),
-        ...voiceByScene.values(),
+        ...[...voiceByScene.values()].map((v) => v.download),
         ...[...clipByScene.values()].map((c) => c.download),
         ...(music ? [music] : []),
     ];
@@ -396,14 +442,18 @@ export function markPullFailure(manifest, failure) {
     if (manifest.music === failure.file)
         manifest.music = null;
     for (const scene of manifest.scenes) {
+        const lostWordsSource = (scene.clip === failure.file && scene.wordsFrom === "clip") ||
+            (scene.voice === failure.file && scene.wordsFrom === "voice");
         if (scene.clip === failure.file)
             scene.clip = null;
         if (scene.voice === failure.file)
             scene.voice = null;
         if (scene.keyframe === failure.file)
             scene.keyframe = null;
-        if (scene.words === failure.file)
+        if (scene.words === failure.file || lostWordsSource) {
             scene.words = null;
+            scene.wordsFrom = null;
+        }
     }
 }
 const PULL_CONCURRENCY = 4;
@@ -607,7 +657,10 @@ export async function statusFlow(runId, json, deps) {
         row[item.itemKind] = item;
         byScene.set(item.sceneIndex, row);
     }
-    const lines = [`Ad run ${runId} — ${displayRunStatus(run.status)}`, ...stopLines(stop, runId, deps.dashboardUrl)];
+    const headline = stop.at === "failed" && stop.repair
+        ? `Ad run ${runId} — Stopped, a step failed`
+        : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
+    const lines = [headline, ...stopLines(stop, runId, deps.dashboardUrl)];
     if (byScene.size === 0) {
         lines.push("", "No scenes yet — this run hasn't made anything to look at.");
     }
@@ -848,6 +901,70 @@ export function parseMvhdDurationSec(bytes) {
 export const NO_DURATION_MESSAGE = "Can't tell how long this cut is.\n" +
     "Install ffmpeg (which brings ffprobe), or pass the length yourself: --duration <seconds>";
 const MB = 1024 * 1024;
+const UPLOAD_ATTEMPTS = 3;
+const UPLOAD_BACKOFF_MS = [500, 1500];
+const UPLOAD_STEP_LABEL = {
+    mint: "asking the server for an upload slot",
+    store: "sending the file to storage",
+    register: "registering the uploaded file",
+    attach: "attaching the cut to the run",
+};
+export function describeFetchFailure(err) {
+    if (!(err instanceof Error))
+        return String(err);
+    const parts = [];
+    let cause = err.cause;
+    for (let depth = 0; depth < 2 && cause && typeof cause === "object"; depth++) {
+        const level = cause;
+        const code = typeof level.code === "string" && level.code ? level.code : undefined;
+        const message = typeof level.message === "string" && level.message ? level.message : undefined;
+        if (code && message)
+            parts.push(`${code}: ${message}`);
+        else if (code)
+            parts.push(code);
+        else if (message)
+            parts.push(message);
+        cause = level.cause;
+    }
+    return parts.length > 0 ? `${err.message} (${parts.join("; ")})` : err.message;
+}
+async function withUploadRetry(step, deps, fn) {
+    let cause = "";
+    for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt++) {
+        try {
+            return { ok: true, value: await fn() };
+        }
+        catch (e) {
+            cause = describeFetchFailure(e);
+            const wait = UPLOAD_BACKOFF_MS[attempt - 1];
+            if (attempt < UPLOAD_ATTEMPTS && wait !== undefined)
+                await deps.sleep(wait);
+        }
+    }
+    return { ok: false, step, attempts: UPLOAD_ATTEMPTS, cause };
+}
+function uploadRetryResult(failed, json) {
+    if (json) {
+        return {
+            code: 1,
+            lines: [
+                JSON.stringify({
+                    ok: false,
+                    step: failed.step,
+                    attempts: failed.attempts,
+                    error: failed.cause,
+                }),
+            ],
+        };
+    }
+    return {
+        code: 1,
+        lines: [
+            `Upload failed while ${UPLOAD_STEP_LABEL[failed.step]} (${failed.attempts} tries): ${failed.cause}`,
+            "Check your connection and run the same command again.",
+        ],
+    };
+}
 export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
     const stat = deps.statFile(filePath);
     if (!stat)
@@ -890,34 +1007,50 @@ export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
     const durationSec = asked ?? deps.probeDurationSec(filePath) ?? parseMvhdDurationSec(bytes);
     if (durationSec === null)
         return { code: 1, lines: [NO_DURATION_MESSAGE] };
-    const mint = await deps.post(ASSET_UPLOAD_URL_PATH, {});
+    const minting = await withUploadRetry("mint", deps, () => deps.post(ASSET_UPLOAD_URL_PATH, {}));
+    if (!minting.ok)
+        return uploadRetryResult(minting, json);
+    const mint = minting.value;
     if (!mint.ok)
         return errorResult(mint, json);
     const minted = mint.data;
-    if (!minted.uploadUrl || !minted.receiptId) {
+    const uploadUrl = minted.uploadUrl;
+    const receiptId = minted.receiptId;
+    if (!uploadUrl || !receiptId) {
         return { code: 1, lines: ["The server did not hand back a place to upload to."] };
     }
-    const put = await deps.uploadBytes(minted.uploadUrl, mime, bytes);
+    const storing = await withUploadRetry("store", deps, () => deps.uploadBytes(uploadUrl, mime, bytes));
+    if (!storing.ok)
+        return uploadRetryResult(storing, json);
+    const put = storing.value;
     if (!put.ok || !put.storageId) {
         const detail = put.body ? `: ${put.body.slice(0, 200)}` : "";
         return { code: 1, lines: [`Upload failed (HTTP ${put.status})${detail}`] };
     }
-    const registered = await deps.post(ASSETS_PATH, {
-        storageId: put.storageId,
-        receiptId: minted.receiptId,
+    const storageId = put.storageId;
+    const registering = await withUploadRetry("register", deps, () => deps.post(ASSETS_PATH, {
+        storageId,
+        receiptId,
         filename: path.basename(filePath),
-    });
+    }));
+    if (!registering.ok)
+        return uploadRetryResult(registering, json);
+    const registered = registering.value;
     if (!registered.ok)
         return errorResult(registered, json);
     const asset = registered.data;
-    if (!asset.assetId) {
+    const assetId = asset.assetId;
+    if (!assetId) {
         return { code: 1, lines: ["The server stored the file but did not say what to call it."] };
     }
-    const attached = await deps.post(FINAL_PATH, {
+    const attaching = await withUploadRetry("attach", deps, () => deps.post(FINAL_PATH, {
         runId,
-        assetId: asset.assetId,
+        assetId,
         durationSec,
-    });
+    }));
+    if (!attaching.ok)
+        return uploadRetryResult(attaching, json);
+    const attached = attaching.value;
     if (!attached.ok)
         return errorResult(attached, json);
     const final = attached.data;
@@ -925,7 +1058,7 @@ export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
     if (json) {
         return {
             code: 0,
-            lines: [JSON.stringify({ ok: true, runId, assetId: asset.assetId, durationSec, finalWatchUrl })],
+            lines: [JSON.stringify({ ok: true, runId, assetId, durationSec, finalWatchUrl })],
         };
     }
     return {
