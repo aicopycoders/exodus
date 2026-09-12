@@ -144,6 +144,9 @@ failed[]                             files that did not download: {file, url, er
 How to read it before cutting:
 
 - `clipStatus: "done"` and a `clip` filename: the scene is cuttable.
+- `wordsFrom: "voice"` (or narration in the storyboard with no on-camera line):
+  a narrated scene. Its clip is picture only; the voice track is the sound.
+  Never cut a narrated scene with the clip's own audio.
 - `flagged: true` is a warning, not a block. The clip was delivered anyway; the
   findings say what the QC model saw (`wrong-character`, `eyeline-off`,
   `set-drift`, `speech-cutoff`, `framing-off`). Tell the user which scenes are
@@ -163,10 +166,15 @@ How to read it before cutting:
 
 Use the bundled script. It reads the manifest, puts every A-roll scene in order
 as the spine, lays each cutaway over the spine at the moment its line is spoken,
-normalizes everything to 1080x1920 at 24 fps, fills a silent clip with the
-scene's voice track, lays the music bed underneath at a low level, and writes one
-MP4 with faststart for upload. The path is from the workspace root; from a brand
-subfolder, prefix `../`:
+normalizes everything to 1080x1920 at 24 fps, and writes one MP4 with faststart
+for upload. The audio track comes first: a narrated scene (narration in the
+storyboard, no on-camera line) plays its voice track and nothing the clip
+recorded, and the picture is fitted to the voice (a longer clip is trimmed, a
+longer voice is sped up to at most 1.26x and then the last frame holds). A
+dialogue scene keeps the line it performed. Every segment is loudness-normalized
+to -16 LUFS, a continuous room-tone bed runs under the whole ad so the joins do
+not read as dead air, and the music bed sits underneath at a low level. The path
+is from the workspace root; from a brand subfolder, prefix `../`:
 
 ```
 node .claude/skills/exodus-video/scripts/first-cut.mjs ./ad-<runId>
