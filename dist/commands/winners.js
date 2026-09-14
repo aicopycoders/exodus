@@ -3,7 +3,6 @@ import path from "node:path";
 import { apiGet, apiPost } from "../lib/client.js";
 import { displayRunStatus, formatError, tickerRunStatus } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
-import { accountLine, accountRequiredLines, count as formatCount, dateOrDash, errorCode, } from "../lib/meta-ads.js";
 export const helpText = `
 exodus winners — Import your own brand's winning ads as generative fuel
 
@@ -17,14 +16,6 @@ Usage:
   exodus winners import <file.json | ->        Push a winner package (- reads stdin)
   exodus winners status <importId>             Re-poll an import later
   exodus winners list                          Winners Exodus already holds
-  exodus winners definition [--account act_…]  What THIS brand means by "a winner"
-
-Definition flags:
-  --account <id>  Which connected ad account, e.g. act_1234567890. Required
-                  only when the brand has more than one connected — a
-                  definition read off the wrong account is a wrong answer that
-                  looks right.
-  --json          Machine-readable JSON output
 
 Import flags:
   --dry-run      Local schema check + server dry-run: reports would-create vs
@@ -34,10 +25,6 @@ Import flags:
 
 Notes:
   • Scopes to your active brand's workspace (exodus brand current).
-  • \`definition\` reads the answers a human already gave on the dashboard — it
-    never writes, and it never shows a machine guess nobody has confirmed. A
-    brand with a Meta integration keeps its definition there, not in a local
-    file. Its ads read back with \`exodus ads list\`.
   • Requires your Scrape Creators API key (Settings → Keys) — the own-page
     match scrape bills your account.
   • Re-pushing the same file is safe: no duplicate rows, the verdict snapshot
@@ -51,8 +38,6 @@ Examples:
   cat winners.json | exodus winners import -
   exodus winners status k97abc...
   exodus winners list
-  exodus winners definition
-  exodus winners definition --account act_1234567890 --json
 `.trim();
 export function validatePackageLocally(pkg) {
     const errors = [];
@@ -131,8 +116,6 @@ export async function run(flags) {
         return runStatus(rest, flags);
     if (sub === "list")
         return runList(flags);
-    if (sub === "definition")
-        return runDefinition(flags);
     if (!sub) {
         console.log(helpText);
         return;
@@ -141,24 +124,8 @@ export async function run(flags) {
     console.log(helpText);
     process.exit(1);
 }
-export const VALUE_FLAGS = new Set(["account"]);
-export function parsePositional(args = process.argv.slice(3)) {
-    const out = [];
-    let i = 0;
-    while (i < args.length) {
-        const arg = args[i];
-        if (arg.startsWith("--")) {
-            const key = arg.slice(2).split("=", 1)[0] ?? "";
-            if (!arg.includes("=") && VALUE_FLAGS.has(key))
-                i += 2;
-            else
-                i++;
-            continue;
-        }
-        out.push(arg);
-        i++;
-    }
-    return out;
+function parsePositional() {
+    return process.argv.slice(3).filter((a) => !a.startsWith("--"));
 }
 async function runImport(positional, flags) {
     const json = !!flags["json"];
@@ -441,144 +408,4 @@ async function runList(flags) {
         console.log(`  ${w.sourceAdId ?? w.id}  [${w.format}]  ${status}  designated=${when}`);
         console.log(`    ${w.verdictSentence}`);
     }
-}
-const RULE_VARIANTS = {
-    standard: "standard — the smallest set of creatives that together carry most of a result group's results",
-    efficiency: "efficiency — the creatives with the best cost per result in each group",
-    "ignore-campaigns": "standard, with some campaigns deliberately left out of the count",
-    other: "written out in the brand's own words (below)",
-};
-export function roleTally(map) {
-    const entries = map && typeof map === "object" ? Object.values(map) : [];
-    const counts = new Map();
-    for (const role of entries) {
-        if (typeof role !== "string" || !role.trim())
-            continue;
-        const key = role.trim();
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    const order = ["testing", "scaling", "other"];
-    const parts = [...counts.entries()]
-        .sort((a, b) => {
-        const ai = order.indexOf(a[0]);
-        const bi = order.indexOf(b[0]);
-        return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
-    })
-        .map(([role, n]) => `${n} ${role}`);
-    return { total: entries.length, line: parts.join(" · ") || "none confirmed yet" };
-}
-export function sharePercent(value) {
-    if (typeof value !== "number" || !Number.isFinite(value))
-        return "—";
-    const pct = value <= 1 ? value * 100 : value;
-    return `${Math.round(pct)}%`;
-}
-export function summaryLines(summary) {
-    if (!summary) {
-        return ["Last run", "  (the rule has not been run over this account yet)"];
-    }
-    const lines = [`Last run — ${dateOrDash(summary.computedAt)}`];
-    lines.push(`  ${formatCount(summary.instanceCount)} ad instances → ${formatCount(summary.creativeCount)} distinct creatives · ${formatCount(summary.winnerCount)} winners`);
-    const groups = Array.isArray(summary.groups) ? summary.groups : [];
-    for (const group of groups) {
-        const label = group.resultLabel?.trim() || group.objective?.trim() || "(unlabelled group)";
-        lines.push(`  ${label}: ${formatCount(group.winnerCount)} of ${formatCount(group.creativeCount)} creatives carry ${sharePercent(group.winnerShare)} of ${formatCount(group.totalResults)} results (${formatCount(group.videoWinners)} video / ${formatCount(group.imageWinners)} image)`);
-        if (group.flatCurve) {
-            lines.push("    flat curve — results spread evenly, so there is no clean winner set here; treat these as top contributors, not outliers.");
-        }
-    }
-    if (typeof summary.ignoredCampaignCount === "number" && summary.ignoredCampaignCount > 0) {
-        lines.push(`  ${summary.ignoredCampaignCount} campaign(s) were left out of the count.`);
-    }
-    return lines;
-}
-export function formatDefinition(data) {
-    const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-    const account = data.account ?? null;
-    const definition = data.definition ?? null;
-    if (!account) {
-        if (accounts.length === 0) {
-            return [
-                "No Meta ad account is connected to this brand.",
-                "Connect one on the dashboard (Settings → Meta) — then the daily sync fills in the ads and this definition.",
-            ];
-        }
-        const lines = ["Pick which ad account you mean:", ...accounts.map(accountLine)];
-        const first = accounts[0]?.accountId;
-        if (first) {
-            lines.push("");
-            lines.push(`  exodus winners definition --account ${first}`);
-        }
-        return lines;
-    }
-    const label = account.name?.trim()
-        ? `${account.name.trim()} (${account.accountId ?? "?"})`
-        : String(account.accountId ?? "?");
-    if (!definition) {
-        return [
-            `No winner definition for ${label} yet.`,
-            "Someone has to say what a winner means for this account before the rule can run — that happens on the dashboard (Settings → Meta → winner setup).",
-        ];
-    }
-    const lines = [];
-    lines.push(`Winner definition — ${label}`);
-    lines.push(`  setup:      ${definition.setupCompletedAt ? `confirmed ${dateOrDash(definition.setupCompletedAt)}` : "not finished yet"}`);
-    const variant = definition.ruleVariant?.trim() ?? "";
-    lines.push(`  rule:       ${RULE_VARIANTS[variant] ?? (variant || "—")}`);
-    const defaults = definition.defaults ?? {};
-    lines.push(`  dials:      window ${defaults.window ?? "—"} · results floor ${formatCount(defaults.resultsFloor)} · contribution line ${sharePercent(defaults.contributionLine)}`);
-    const roles = roleTally(definition.campaignRoleMap);
-    lines.push(`  campaigns:  ${roles.total} with a confirmed role — ${roles.line}`);
-    const ignored = Array.isArray(definition.ignoredCampaignIds) ? definition.ignoredCampaignIds : [];
-    if (ignored.length > 0) {
-        lines.push(`  ignored:    ${ignored.length} campaign(s) left out of the rule`);
-    }
-    if (definition.lastAppliedAt) {
-        lines.push(`  last run:   ${dateOrDash(definition.lastAppliedAt)}`);
-    }
-    if (definition.otherDefinition?.trim()) {
-        lines.push("");
-        lines.push("In the brand's own words");
-        for (const line of definition.otherDefinition.trim().split("\n"))
-            lines.push(`  ${line}`);
-    }
-    lines.push("");
-    lines.push(...summaryLines(definition.summary));
-    if (accounts.length > 1) {
-        lines.push("");
-        lines.push(`This brand has ${accounts.length} connected accounts — each keeps its own definition (--account).`);
-    }
-    return lines;
-}
-async function runDefinition(flags) {
-    const json = !!flags["json"];
-    const accountRaw = flags["account"];
-    if (accountRaw !== undefined && (typeof accountRaw !== "string" || !accountRaw.trim())) {
-        console.error("Error: --account needs an ad account id, e.g. act_1234567890");
-        console.log("Usage: exodus winners definition [--account act_…] [--json]");
-        process.exit(1);
-    }
-    const account = typeof accountRaw === "string" ? accountRaw.trim() : undefined;
-    const query = account ? `?account=${encodeURIComponent(account)}` : "";
-    const res = await apiGet(`/api/v2/winners/definition${query}`);
-    if (!res.ok) {
-        if (json) {
-            console.log(JSON.stringify({ ok: false, status: res.status, data: res.data }));
-            process.exit(1);
-        }
-        if (res.status === 400 && errorCode(res.data) === "ACCOUNT_REQUIRED") {
-            for (const line of accountRequiredLines(res, (id) => `exodus winners definition --account ${id}`)) {
-                console.log(line);
-            }
-            process.exit(1);
-        }
-        console.log(formatError(res));
-        process.exit(1);
-    }
-    if (json) {
-        console.log(JSON.stringify({ ok: true, ...res.data }));
-        return;
-    }
-    for (const line of formatDefinition(res.data))
-        console.log(line);
 }

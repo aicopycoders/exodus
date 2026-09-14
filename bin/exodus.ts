@@ -33,10 +33,6 @@ const OTHER_COMMANDS = new Set([
   "session",
   "bank",
   "hooks",
-  // Read-only windows on the brand's own synced Meta ads (#1627). They read
-  // stored data rather than generating anything, so they belong beside `hooks`.
-  "ads",
-  "comments",
 ]);
 
 // Commands kept runnable (back-compat / power users) but hidden from the
@@ -48,14 +44,11 @@ const OTHER_COMMANDS = new Set([
 // "write from a source other than a brief" surface — only brief-mode writing
 // ships today, so they stay runnable for power users but are unadvertised
 // until that layer is production-ready.
-// `video` is admin-only (#958), so listing it would offer members a door they
-// can never open.
 const HIDDEN_COMMANDS = new Set([
   "creative",
   "template",
   "idea",
   "swipe",
-  "video",
 ]);
 
 // Curated examples; each is shown only if its leading command is installed.
@@ -70,8 +63,6 @@ const EXAMPLES = [
   'exodus meme run --brief "grounding sheets reduce inflammation" --formats \'[...]\'',
   'exodus browse',
   'exodus hooks list --min-score 10',
-  'exodus ads list --sort cost-per-result',
-  'exodus comments list --ad <adId>',
   'exodus status --id <runId> --type genesis',
 ];
 

@@ -307,14 +307,7 @@ async function runBrandsAdd(positional, flags) {
         console.log(formatError(res));
         process.exit(1);
     }
-    if (res.data.researching) {
-        console.log(`Added "${name}". Finding its Ad Library page and mining its ads now.`);
-    }
-    else {
-        console.log(`Added "${name}".`);
-        if (res.data.warning)
-            console.log(`  ${res.data.warning}`);
-    }
+    console.log(`Added "${name}".`);
 }
 async function runBrandsRemove(positional) {
     const id = positional[0];

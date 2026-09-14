@@ -1,6 +1,6 @@
 ---
 name: exodus-winners
-description: Mine the member's OWN Meta ad account for its winning ads and import them into Exodus as generative fuel. There are two ways in and the skill checks which first: a brand whose Meta ad account is CONNECTED on the dashboard needs no Meta MCP at all — its ads, numbers, comments and winner definition are already synced into Exodus and read back with `npx @aicopycoders/exodus ads`, `comments` and `winners definition`; a brand without an integration uses the official Meta Ads MCP (their Facebook login, their machine) alongside the Exodus CLI. Either way this skill orchestrates the whole journey — pick one ad account, settle what a winner means (read the confirmed definition from the server, or run a NO-NUMBERS interview), gather the account's ads, confirm each pick visually, then push a winner-package JSON with `npx @aicopycoders/exodus winners import` and run the two-phase video gap-filler. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("exodus, import my winning ads", "exodus winners", "exodus, mine my ad account for winners", "exodus, which of my own ads are winners"), named this skill or /exodus-winners, ran an `npx @aicopycoders/exodus winners` command, or the `exodus` hub skill routed here. Never claim generic asks ("what are my best ads", "pull my Meta ads", "analyze my Facebook ads") without Exodus context — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. This is the member's OWN account's winners, NOT competitor swipes — competitor swipe mining lives on the dashboard's Swipe Mining surfaces, not here. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus.
+description: Mine the member's OWN Meta ad account for its winning ads and import them into Exodus as generative fuel. The member's Claude Code session holds BOTH the official Meta Ads MCP (their Facebook login, their machine) and the Exodus CLI; this skill orchestrates the whole journey — point them at the Meta MCP, pick one ad account, run a NO-NUMBERS winner-definition interview, mine the account via the MCP, confirm each pick visually, then push a winner-package JSON with `npx @aicopycoders/exodus winners import` and run the two-phase video gap-filler. Only invoke when the user has explicitly invoked Exodus: they said "exodus" in the request ("exodus, import my winning ads", "exodus winners", "exodus, mine my ad account for winners", "exodus, which of my own ads are winners"), named this skill or /exodus-winners, ran an `npx @aicopycoders/exodus winners` command, or the `exodus` hub skill routed here. Never claim generic asks ("what are my best ads", "pull my Meta ads", "analyze my Facebook ads") without Exodus context — in shared folders those may belong to the user's other tools; if the user did not say exodus, this skill is not for them. This is the member's OWN account's winners, NOT competitor swipes — competitor swipe mining lives on the dashboard's Swipe Mining surfaces, not here. The bare word "Genesis" without "exodus" refers to the member's own Genesis API key and personal bot recipes, NOT to Exodus.
 ---
 
 ```operator-guide
@@ -8,7 +8,6 @@ Subcommands:
   exodus winners import <file.json | ->  [--dry-run] [--no-wait] [--json]   Push a winner package (- reads stdin)
   exodus winners status <importId>       [--json]                           Re-poll an import later
   exodus winners list                    [--json]                           Winners Exodus already holds
-  exodus winners definition              [--account act_…] [--json]         What THIS brand means by "a winner"
 
 Key flags:
   --dry-run   Local schema check + server dry-run: would-create vs would-update per winner,
@@ -24,49 +23,27 @@ Facts baked into the CLI:
     upgrade in place; winners absent from a re-push are untouched. It DOES re-run the
     billed match scrape + enrichment — push updates, don't push as a retry reflex.
 
-Meta side — CONDITIONAL (§0), check before you plan the journey:
-  • Brand WITH a Meta integration (`exodus winners definition` answers, or `exodus ads list`
-    returns ads): NO MCP. Ads + numbers come from `exodus ads list` / `ads show`, comments from
-    `exodus comments list`, the definition from `exodus winners definition` (read-only — the
-    definition lives on the server, never in state/own-brand-winners.json).
-  • Brand WITHOUT one: the official Meta Ads MCP (https://mcp.facebook.com/ads) supplies all
-    account data, exactly as §1–§5 describe.
-Either way this skill NEVER calls the Meta Graph API directly and NEVER calls ads_library_search.
+Meta side: the official Meta Ads MCP (https://mcp.facebook.com/ads) supplies all account data.
+This skill NEVER calls the Meta Graph API directly and NEVER calls ads_library_search.
 ```
 
 # Winners — Mine Your Own Ad Account and Import the Champions
 
-This is the agent-side journey for **Own-Brand Winners**: turn the member's real Meta ad account into a set of designated winners that Exodus stores as generative fuel. Where the account data comes from depends on the brand (§0): a **connected** brand's ads are already synced into Exodus and read with the `exodus ads` family; an **unconnected** brand's come from the member's **own Meta Ads MCP** (their Facebook OAuth) sitting alongside the Exodus CLI.
+This is the agent-side journey for **Own-Brand Winners**: turn the member's real Meta ad account into a set of designated winners that Exodus stores as generative fuel. The session holds the member's **own Meta Ads MCP** (their Facebook OAuth) alongside the Exodus CLI — you drive both.
 
 The member is a **creative strategist, not a media buyer**. This entire journey is data *collection and preparation* — the analysis happens later, server-side, on the stored winners. So the interview **never asks a single numeric question**: no budgets, no ROAS targets, no thresholds, no "top how many?". You infer the mechanics and confirm in plain language. Make that rule impossible to break — if you catch yourself about to ask for a number, stop and infer it instead.
 
-The arc, in order: **integration check (§0) → pick one account → settle the winner definition → gather the account's ads → 30k-foot view → visual confirmation → write the package → dry-run → import → video gap-filler.** A connected brand reads the definition and the ads off the server and skips the MCP mechanics in §3 entirely; an unconnected one runs the interview and mines via the MCP. Either way, re-running re-asks nothing already settled.
+The arc, in order: **MCP check → pick one account → winner-definition interview → mine via MCP → 30k-foot view → visual confirmation → write the package → dry-run → import → video gap-filler.** Persist the definition so re-mining re-asks nothing already settled.
 
-## 0. First: does this brand have a Meta integration?
+## 0. Meta Ads MCP must be connected
 
-There are now **two ways in**, and the first question is which one this brand is on. Ask the server, not the user:
-
-```bash
-npx @aicopycoders/exodus winners definition
-npx @aicopycoders/exodus ads list --limit 5
-```
-
-**If either answers with real data — a definition, or ads — this brand has a Meta integration. Skip the MCP entirely.** The dashboard already syncs this account daily, so everything §1–§5 mines by hand is already sitting in Exodus:
-
-- **Ads and numbers** come from `npx @aicopycoders/exodus ads list` / `ads show <adId>` (the `exodus-ads` skill has the full surface). No `ads_get_ad_entities` paging, no campaign-by-campaign loop, no 500-avoidance mechanics — none of §3 applies.
-- **The winner definition** comes from `npx @aicopycoders/exodus winners definition`. Do **not** re-run the interview: a human already answered it on the dashboard, and asking again invites two different answers for one account.
-- **Comments** come from `npx @aicopycoders/exodus comments list`.
-- The Meta Ads MCP may still sit alongside for extras (a live preview image, today's numbers before tomorrow's sync). It is **not required**, and you must not ask the user to connect it just to read their own ads.
-
-**If neither answers — no integration — this brand keeps the MCP path below, exactly as written.** Everything here reads from the **official Meta Ads MCP**: a remote MCP server at `https://mcp.facebook.com/ads`, OAuth'd in the user's browser with their own Facebook login. We don't own that flow; there is exactly one setup pointer and no troubleshooting beyond it.
+Everything here reads from the **official Meta Ads MCP** — a remote MCP server at `https://mcp.facebook.com/ads`, OAuth'd in the user's browser with their own Facebook login. We don't own that flow; there is exactly one setup pointer and no troubleshooting beyond it.
 
 **If the `ads_*` Meta tools are not present in this session, stop.** Tell the user to add `https://mcp.facebook.com/ads` as a remote MCP server and complete the browser OAuth, then come back. Do not attempt any workaround, any Graph API call, or any other connection method.
 
 ## 1. Account selection — the required first step, pinned forever
 
-**Connected brand (§0):** the accounts are already known — `npx @aicopycoders/exodus ads list` names the one it used, and lists the others when there is more than one. Pick from that list with `--account`, and skip the rest of this section.
-
-**Unconnected brand:** call `ads_get_ad_accounts`. It returns **every** account the login can touch — often a dozen-plus across several businesses. For each: `ad_account_id`, `ad_account_name`, `business_name`, `is_queryable`, `not_queryable_reason`, currency.
+Call `ads_get_ad_accounts`. It returns **every** account the login can touch — often a dozen-plus across several businesses. For each: `ad_account_id`, `ad_account_name`, `business_name`, `is_queryable`, `not_queryable_reason`, currency.
 
 - Show only **queryable** accounts (`is_queryable: true`). For any flagged one, surface its `not_queryable_reason` so the user understands why it's absent — don't silently drop it.
 - **Account names can be empty strings** — fall back to the id and business name so the list is still legible.
@@ -78,15 +55,7 @@ You are not collecting preferences here so much as confirming inferences. Four t
 
 **a) Objective → metric is invisible.** Ads group by their **self-labeled result type** (within objective — §2c); each group's success metric is the account's own label — Meta hands it to you already labeled (`results: {"value": "98 (Website appointments scheduled)"}`, `cost_per_result: {"value": "$91.64 USD (Website appointments scheduled)"}` — the string lives under `.value`). **Never ask the user to pick a metric.** The account already declared it. Offer one free-text escape hatch only — *"If your definition of a winner is different from 'the ads that drove the most results,' tell me in your own words."* — and record whatever they say **verbatim** as `customDefinition`, applied agent-side. Do not turn their words into a number.
 
-**b) Campaign roles are infer-then-confirm.** Propose, per campaign, what the campaign is **for** — one of exactly three roles:
-
-- **testing** — where new creative goes to be tried. Small budgets, many near-duplicate ads, short lives.
-- **scaling** — where proven creative goes to be spent behind. Fewer ads, bigger budgets, longer lives.
-- **other** — retargeting, retention, brand, anything that is neither of the above.
-
-Infer each one from the campaign objective plus the campaign/adset **names** (naming is read-only creative context; see §6). Present the whole proposed map **once** for a single confirm/adjust pass, then save it. On a re-mine, only **new** campaigns get proposed; already-confirmed ones stay put.
-
-Why roles and not awareness levels: a testing campaign and a scaling campaign are **not comparable**, and the winner rule has to know which is which before it ranks anything — an ad that "won" a test at 30 results is not the same object as an ad carrying a scaling budget. This is also the exact question the dashboard's winner setup asks, in the same three words, so the CLI and the dashboard can never propose different winners for one account. **A brand with a Meta integration has already answered it** — read the confirmed map from `npx @aicopycoders/exodus winners definition` (§0) instead of asking again.
+**b) Funnel mapping is infer-then-confirm.** Propose, per campaign, an **awareness level** from the Schwartz five — `unaware` / `problem-aware` / `solution-aware` / `product-aware` / `most-aware` — inferred from the campaign objective plus the campaign/adset **names** (naming is read-only creative context; see §6). Present the whole proposed map **once** for a single confirm/adjust pass, then save it. On a re-mine, only **new** campaigns get proposed; already-mapped ones stay put.
 
 **c) The winner rule is fixed — volume over efficiency, all-time, no caps.** State it, don't negotiate it:
 
@@ -103,9 +72,7 @@ The defaults behind this rule (`window: "maximum"`, `resultsFloor: 10`, `contrib
 
 ## 3. Mining mechanics — the MCP facts that make or break this
 
-**Connected brand (§0): skip this whole section.** The daily sync already did it. `npx @aicopycoders/exodus ads list --sort spend --limit 200 --json` gives you every synced ad with its copy, format, campaign/ad set, and both windows' numbers in one call — no paging, no 500s, no compact-tuple discipline to hold. Apply §2c's rule to those rows and go to §4.
-
-**Unconnected brand:** mine on `ads_get_ad_entities`. These are hard-won live-probe facts; encode them into how you call, not into a doc you can look up later:
+Mine on `ads_get_ad_entities`. These are hard-won live-probe facts; encode them into how you call, not into a doc you can look up later:
 
 - **Never mine account-wide — scope every metrics pull to one campaign.** Account-wide ad-level pulls that include `results` **500 consistently** on real accounts (mixed objectives, thousands of near-duplicate test ads) — no limit, no sort tweak, and no retry unsticks them, and `results` 500s at campaign level too. Enumerate campaigns first (attributes, `objective`, and spend all work fine at campaign level), then pull ads **campaign-by-campaign** with `results` over `date_preset: "maximum"` and aggregate agent-side into result-type groups (ads carry `campaign_id`; join `objective` from the campaign pull).
 - **Sort server-side, tally compactly — never hold full blobs, and never floor raw rows.** Metric *filtering* on `ads_get_ad_entities` consistently **500s** — never filter by a metric. Metric *sorting* works. Per campaign: sort by **results descending**, page through, and retain one **compact tuple per result-bearing ad** — ad id, ad name, campaign id, creative id, created time, results, spend — discarding zero-result rows (they can't move any sum) and every other field. **The 10-result floor does NOT apply while paging**: sub-floor instances of one post can sum to a winner (§2c), so no row is ever dropped for being small. A creative-testing account runs 100+ near-duplicate ads per campaign; compact tuples keep the whole account to a few hundred short lines, where retaining or printing whole per-campaign blobs burns the session's context before the winner rule ever runs.
@@ -137,7 +104,7 @@ The instance-to-creative collapse, the format skew, the count of winners, the sh
 
 ## 5. Visual confirmation — the human gate
 
-This is a HITL gate; treat it like one. For each proposed winner, show the actual creative: on a **connected** brand, `npx @aicopycoders/exodus ads show <adId>` prints fetchable image/video/poster links (fetch them, don't save the URL — they expire); on an **unconnected** one, render it with **`ads_get_ad_preview`** (an actual in-context creative image). The strategist:
+This is a HITL gate; treat it like one. For each proposed winner, render it with **`ads_get_ad_preview`** (an actual in-context creative image) and show it. The strategist:
 
 - **strikes** picks that don't belong,
 - **adds** any obvious winner the rule missed,
@@ -147,7 +114,7 @@ Their edits win over the algorithm. Don't argue the rule against their eyes — 
 
 ## 6. Naming is read-only
 
-Campaign / adset / ad names feed two things: your **campaign-role inference** (§2b) and the winner's `sourceNames` as creative context. That's all. **No naming-conventions guidance** — nobody is asked to rename anything, and the account's naming hygiene is not your concern.
+Campaign / adset / ad names feed two things: your **awareness inference** (§2b) and the winner's `sourceNames` as creative context. That's all. **No naming-conventions guidance** — nobody is asked to rename anything, and the account's naming hygiene is not your concern.
 
 ## 7. The verdict snapshot & the winner-package JSON
 
@@ -185,7 +152,7 @@ Every winner carries a **verdict snapshot** composed to the schema below. Single
         "costPerResult": "$18.20",
         "asOf": "2026-07-14",
         "objective": "OUTCOME_SALES",
-        "awarenessLevel": "product-aware",       // optional — read off the AD'S OWN COPY, or omit
+        "awarenessLevel": "product-aware",       // from the confirmed mapping (§2b)
         "selectionBasis": ["overall", "top-video"],  // which cut(s) it cleared
         "strategistNote": "…"         // optional, from §5
       },
@@ -235,25 +202,12 @@ Any winner the user can't supply a file for **stays amber and visible** in `exod
 
 **5. Re-push safety** (from the CLI itself): re-pushing never duplicates rows — verdict snapshots replace wholesale, gap-filled rows upgrade in place, winners absent from a re-push are left untouched. But it is not free: every push re-uploads referenced assets, re-runs enrichment, and re-fires the Scrape Creators match scrape (billed to the member) — so re-push when there's something to update, not as a retry reflex.
 
-## 9. Definition persistence — server first, local file only without an integration
+## 9. Definition persistence
 
-**Which of the two applies is settled in §0**, and the two must never both hold a definition for the same account.
-
-**Brand WITH a Meta integration — the definition lives on the server. Full stop.**
-
-```bash
-npx @aicopycoders/exodus winners definition            # one connected account
-npx @aicopycoders/exodus winners definition --account act_1234567890
-```
-
-That command reads the confirmed answers a human gave on the dashboard: the pinned account, the campaign-role map (§2b), the rule variant, the dials, and the last run's summary. It is **read-only, and there is no CLI write** — you do not create, patch, or mirror `state/own-brand-winners.json` for these brands, and you never re-run the §2 interview to "fill in" anything. Changes are made on the dashboard (Settings → Meta → winner setup); a second copy in a local file is exactly how the CLI and the dashboard would drift into two different answers for one account.
-
-If it answers with a list of accounts instead of a definition, the brand has several connected — ask which one the member means and pass `--account`. If it says no definition exists yet, point them at the dashboard's winner setup; don't improvise one locally.
-
-**Brand WITHOUT an integration — the local file, exactly as before.** Persist the interview to `state/own-brand-winners.json`, keyed by **brand slug** (`state/` survives skill refreshes). It holds:
+Persist the interview to `state/own-brand-winners.json`, keyed by **brand slug** (`state/` survives skill refreshes). It holds:
 
 - pinned `adAccountId` + name (§1),
-- `campaignRoleMap` (§2b — `testing` / `scaling` / `other` per campaign id),
+- `campaignAwarenessMap` (§2b),
 - editable `defaults` — `{ "window": "maximum", "resultsFloor": 10, "contributionLine": 0.80 }`,
 - `customDefinition` (the §2a escape-hatch text, verbatim),
 - `lastMinedAt`.
@@ -262,9 +216,7 @@ Re-running re-asks **nothing already pinned** — only genuinely new campaigns g
 
 ## Failure handling
 
-- **Meta `ads_*` tools not in the session** — first check §0: if the brand has a Meta integration you don't need them at all. Only a brand WITHOUT one needs the MCP; then stop and point at `https://mcp.facebook.com/ads`. No other workaround exists.
-- **`exodus winners definition` lists ad accounts instead of a definition** — the brand has several connected. Ask which one, then re-run with `--account act_…`. Never pick for them silently.
-- **`exodus winners definition` says no definition exists** — nobody has finished winner setup for that account. Point at the dashboard (Settings → Meta → winner setup); do not build a local one for an integrated brand (§9).
+- **Meta `ads_*` tools not in the session** — stop and point at `https://mcp.facebook.com/ads` (§0). No workaround exists here.
 - **`ads_get_ad_entities` 500 with a metric `filtering`** — that's the known filter bug, not a transient. Drop the filter, sort instead, threshold agent-side (§3).
 - **`ads_get_ad_entities` 500 on an account-wide (or campaign-level) `results` pull** — structural, not transient; retries never help. Scope to one campaign per call and aggregate agent-side (§3).
 - **Any tool 500s once on a scoped call** — retry the identical call once before reporting it.
