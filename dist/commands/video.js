@@ -362,12 +362,19 @@ export function planPull(run, items, opts) {
             durationSec: artifact.durationSec ?? null,
             qc: artifact.qc ?? null,
             words: artifact.words ?? null,
+            revoiced: artifact.revoiced === true,
+            speechTrimmed: artifact.speechTrimmed === true,
         });
     }
     const clipItemByScene = new Map();
+    const frameItemByScene = new Map();
+    const sceneFrameNodeIds = new Set(run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId));
     for (const item of items) {
         if (item.itemKind === "clip")
             clipItemByScene.set(item.sceneIndex, item);
+        if (item.itemKind === "frame" && sceneFrameNodeIds.has(item.nodeId)) {
+            frameItemByScene.set(item.sceneIndex, item);
+        }
     }
     const sceneIndexes = [
         ...new Set([
@@ -375,12 +382,14 @@ export function planPull(run, items, opts) {
             ...voiceByScene.keys(),
             ...keyframeByScene.keys(),
             ...clipItemByScene.keys(),
+            ...frameItemByScene.keys(),
         ]),
     ].sort((a, b) => a - b);
     const scenes = sceneIndexes.map((sceneIndex) => {
         const clip = clipByScene.get(sceneIndex);
         const voice = voiceByScene.get(sceneIndex);
         const item = clipItemByScene.get(sceneIndex);
+        const frameItem = frameItemByScene.get(sceneIndex);
         let source = null;
         let wordsFrom = null;
         if (clip?.words && clip.words.length > 0) {
@@ -405,10 +414,13 @@ export function planPull(run, items, opts) {
             voice: voice?.download.file ?? null,
             keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
             qc: clip?.qc ?? null,
+            revoiced: clip ? clip.revoiced : null,
+            speechTrimmed: clip ? clip.speechTrimmed : null,
             clipStatus: item?.status ?? "missing",
             error: item?.error ?? null,
             flagged: item?.flagged === true,
             findings: item?.findings ?? [],
+            keyframeFindings: frameItem?.findings ?? [],
         };
     });
     const downloads = [
@@ -444,8 +456,11 @@ export function markPullFailure(manifest, failure) {
     for (const scene of manifest.scenes) {
         const lostWordsSource = (scene.clip === failure.file && scene.wordsFrom === "clip") ||
             (scene.voice === failure.file && scene.wordsFrom === "voice");
-        if (scene.clip === failure.file)
+        if (scene.clip === failure.file) {
             scene.clip = null;
+            scene.revoiced = null;
+            scene.speechTrimmed = null;
+        }
         if (scene.voice === failure.file)
             scene.voice = null;
         if (scene.keyframe === failure.file)
@@ -648,11 +663,20 @@ export async function statusFlow(runId, json, deps) {
     if (json) {
         return { code: 0, lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal })] };
     }
+    const revoicedByScene = new Set();
+    for (const artifact of outputsOfNodeKind(run, "video")) {
+        if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
+            revoicedByScene.add(artifact.sceneIndex);
+        }
+    }
     const byScene = new Map();
+    const sceneFrameNodeIds = new Set(run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId));
     for (const item of items) {
         if (item.itemKind !== "clip" && item.itemKind !== "voiceover" && item.itemKind !== "frame") {
             continue;
         }
+        if (item.itemKind === "frame" && !sceneFrameNodeIds.has(item.nodeId))
+            continue;
         const row = byScene.get(item.sceneIndex) ?? {};
         row[item.itemKind] = item;
         byScene.set(item.sceneIndex, row);
@@ -674,6 +698,11 @@ export async function statusFlow(runId, json, deps) {
             }
             if (row.clip?.error)
                 lines.push(`       ${row.clip.error}`);
+            if (revoicedByScene.has(sceneIndex))
+                lines.push("       voice: cast voice applied");
+            for (const finding of row.frame?.findings ?? []) {
+                lines.push(`       picture: ${finding.code} (${finding.severity}): ${finding.detail}`);
+            }
         }
     }
     lines.push("", hasFinal && stop.at === "finished"

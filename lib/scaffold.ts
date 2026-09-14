@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { skillsDir, referencesDir, docsDir } from "./assets.js";
+import { skillsDir, referencesDir, docsDir, templatesDir } from "./assets.js";
 import { getChannel, stampChannel, type Channel } from "./channel.js";
 
 // Comment-only .env — never ships a secret. The dashboard's "Copy .env block"
@@ -109,6 +109,28 @@ export function writeDocs(
     names.push(entry.name);
   }
   return names.sort();
+}
+
+// The member's own taste file, seeded from the bundled template. Written once
+// and never refreshed — unlike the docs above, everything in it is hand-written
+// by the member, so a refresh would erase the work.
+export function writeStandards(
+  root: string,
+  srcOverride?: string,
+  channel: Channel = getChannel(),
+): { created: boolean } {
+  const dest = path.join(root, "STANDARDS.md");
+  if (fs.existsSync(dest)) return { created: false };
+  let src: string;
+  try {
+    src = templatesDir(srcOverride);
+  } catch {
+    return { created: false }; // no bundled templates
+  }
+  const template = path.join(src, "STANDARDS.md");
+  if (!fs.existsSync(template)) return { created: false };
+  fs.writeFileSync(dest, stampChannel(fs.readFileSync(template, "utf8"), channel));
+  return { created: true };
 }
 
 export function ensureBaseDirs(root: string): void {

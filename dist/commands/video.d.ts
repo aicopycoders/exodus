@@ -8,6 +8,7 @@ export interface ClipWord {
 export interface ClipQc {
     verdict: "pass" | "fail";
     attempts: number;
+    neighbours?: number[];
 }
 export interface ClipFinding {
     check: string;
@@ -36,6 +37,8 @@ export type ArtifactSubset = {
     words?: ClipWord[];
     qc?: ClipQc;
     final?: boolean;
+    revoiced?: boolean;
+    speechTrimmed?: boolean;
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -158,10 +161,13 @@ export interface ManifestScene {
     voice: string | null;
     keyframe: string | null;
     qc: ClipQc | null;
+    revoiced: boolean | null;
+    speechTrimmed: boolean | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;
     findings: ClipFinding[];
+    keyframeFindings: ClipFinding[];
 }
 export interface PullFailure {
     file: string;

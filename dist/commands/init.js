@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { writeEnvScaffold, ensureGitignore, writeSkills, writeReferences, writeDocs, ensureBaseDirs, } from "../lib/scaffold.js";
+import { writeEnvScaffold, ensureGitignore, writeSkills, writeReferences, writeDocs, writeStandards, ensureBaseDirs, } from "../lib/scaffold.js";
 import { loadWorkspaceEnv } from "../lib/load-env.js";
 import { ensureBrandDir } from "../lib/layout.js";
 import { pkgRef } from "../lib/channel.js";
@@ -14,9 +14,10 @@ Usage:
   npx ${pkgRef()} init --root <dir>   Target a specific folder
 
 Run this in a fresh, empty folder. It creates the workspace layout, writes the
-Exodus + Genesis skills into .claude/skills/, scaffolds a comment-only .env, and
-prints the dashboard paste step. Safe to re-run: it never overwrites your .env
-or brand folders — re-running refreshes the skills and catches up new brands.
+Exodus + Genesis skills into .claude/skills/, scaffolds a comment-only .env,
+creates STANDARDS.md (your taste file) the first time, and prints the dashboard
+paste step. Safe to re-run: it never overwrites your .env, your STANDARDS.md or
+your brand folders — re-running refreshes the skills and catches up new brands.
 `.trim();
 export function scaffoldInit(root) {
     const existing = fs.existsSync(path.join(root, ".env"));
@@ -26,8 +27,9 @@ export function scaffoldInit(root) {
     const skills = writeSkills(root);
     writeReferences(root);
     const docs = writeDocs(root);
+    const { created: standardsCreated } = writeStandards(root);
     setScaffoldVersion(getVersion(), root);
-    return { existing, envCreated, skills, docs };
+    return { existing, envCreated, skills, docs, standardsCreated };
 }
 export async function syncBrands(root) {
     loadWorkspaceEnv(root);
@@ -55,6 +57,9 @@ export async function run(flags) {
     console.log(`  Installed ${r.skills.length} skills into .claude/skills/`);
     if (r.docs.length) {
         console.log(`  Installed workspace docs: ${r.docs.join(", ")}`);
+    }
+    if (r.standardsCreated) {
+        console.log("  Created STANDARDS.md — your taste, read by every skill before it produces");
     }
     const brands = await syncBrands(root);
     if ("synced" in brands && brands.synced.length) {

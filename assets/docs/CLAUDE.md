@@ -4,7 +4,7 @@
 
 This is a creative-strategy workspace operated by the **exodus** CLI. It is brand-agnostic infrastructure serving **all of the account's brands**: each brand has its own subfolder here (marked by a `.exodus-brand.json` file) holding that brand's `state/` and `output/`. Which brand you're working on resolves **folder first, pointer second**: commands run from inside a brand's subfolder target that brand automatically; otherwise the `npx @aicopycoders/exodus brand use <slug>` pointer applies. (Older single-brand installs keep `state/` and `output/` at this root — same rules, one brand.)
 
-**How to engage the system:** every skill here is namespaced `exodus-*`, and a front-door `exodus` hub skill routes generic asks. Members say "exodus" to engage ("exodus, write me some ads") or invoke a specific skill with `/exodus-<name>` (e.g. `/exodus-write`). This namespacing is deliberate: it lets these skills coexist with other skill packs (like the workshop pack) installed in the same folder, and it keeps the bare word "Genesis" unambiguous — on its own, "Genesis" always means the member's own Genesis API key/recipes, never Exodus. CLI commands are unchanged (`npx @aicopycoders/exodus genesis`, `npx @aicopycoders/exodus brand use`, etc.).
+**How to engage the system:** two families of skills live here. The pipeline skills are namespaced `exodus-*`, and a front-door `exodus` hub skill routes generic asks. The method skills (Luke's thinking as skills: `odf`, `mechanism`, `copy-instincts`, and the rest, listed under **Method skills** below) carry plain names and fire on what the user is trying to do. Members say "exodus" to engage ("exodus, write me some ads") or invoke a specific skill with `/exodus-<name>` (e.g. `/exodus-write`). This namespacing is deliberate: it lets these skills coexist with other skill packs (like the workshop pack) installed in the same folder, and it keeps the bare word "Genesis" unambiguous — on its own, "Genesis" always means the member's own Genesis API key/recipes, never Exodus. CLI commands are unchanged (`npx @aicopycoders/exodus genesis`, `npx @aicopycoders/exodus brand use`, etc.).
 
 The strategist persona, the Luke Mills / Genesis frameworks, the operating rules and creative principles, and the operating discipline all live in **one skill** plus its references:
 
@@ -68,6 +68,27 @@ These are the **Exodus** pipelines — the automatic system that drives the Gene
 | **Winners** | `exodus-winners` | Mine your own Meta ad account for winning ads and import them into Exodus as generative fuel — interview, visual confirmation, `npx @aicopycoders/exodus winners import`. A brand whose Meta account is connected reads its ads and its winner definition straight from Exodus; only an unconnected brand needs the Meta Ads MCP. |
 
 For the operator-facing quick reference on how to invoke these in Claude Code, see `PIPELINES.md` in the workspace root.
+
+### Method skills (Luke's thinking, in Claude Code)
+
+These are not pipelines. They are Luke's methods written as skills, so the thinking that happens *before* a pipeline runs (who to sell to, what the mechanism is, which competitors matter, what patterns the account shows) happens with the same discipline every time. They run as a conversation with whatever data the user has; some push results into Exodus through the CLI. Anything they write lands inside the active brand's subfolder (`<brand>/state/` for decided artifacts, `<brand>/inputs/` for research), so run `brand current` first. Invoke one by name (`/odf`) or just describe the job.
+
+| Skill | When to Use |
+|-------|-------------|
+| `thinking-vs-build` | Load first whenever a session does method work (positioning, research, critique). The two modes (think: short lists, one axis per message, propose then the user cuts; build: the full thing, no check-ins) and how to tell which one a message is in. |
+| `positioning-spiral` | Positioning a product before any ads: cycles through features, targets, research, catalog, and thinking until segments, mechanisms, and story hang together. Calls the four station skills below. |
+| `odf` | Who to sell to. Outcome × Demographic × Facet, one axis at a time. MAP (build the grid), PERSONAS (named humans that live in Exodus), HORIZONTAL (aim a winner at a new segment). Pushes with `npx @aicopycoders/exodus segment`. |
+| `mechanism` | The product's unique mechanism of the problem and of the solution, per segment. Uses the Genesis mechanism bots for breadth (needs `GENESIS_API_KEY` plus a provider key), works as a conversation without them. |
+| `find-competitors` | Who is actually strong in a niche, on Meta first and Amazon second. Ranked competitor sheet and a watch list. Optional scripts for Atria and the Meta Ad Library via Apify (each needs its own key; they bill per result and say the plan back before spending). |
+| `patterns-and-gaps` | What repeats and matters across own ads, competitor ads, organic content, and research, read layer by layer, and the three kinds of gap. |
+| `anatomy-of-ads` | The parts list of an ad (Messaging × Creative). Write a brief, dissect any ad into the same parts, tag a batch so patterns can be counted. Also the vocabulary the other skills use. |
+| `copy-instincts` | See, Attract, Make. Run on a draft that already exists (hook, ad, mechanism paragraph) to take it from good to great. |
+| `bot-builder` | Build a custom bot the way Luke and Mario build the Genesis bots (SEAK), and put it where it runs: an Exodus workflow Prompt node, a Genesis bot, or a skill. |
+| `remember-that` | Bank one reaction mid-session ("remember that", "never do X") into `STANDARDS.md`, and push approved winning lines to the matching Exodus bank. |
+| `handoff` | End a session: scrape the chat into `workflow/sessions/`, propose standards, write a resume prompt, update the one-page workflow. "handoff review" reads the sessions back. |
+| `segment-grid` | The earlier segment-grid kit. Superseded by `odf`; kept for existing hand-off docs. |
+
+**Standards and handoff.** `STANDARDS.md` at the workspace root is the user's taste, written where the system always reads it. Every method skill reads it before producing anything and grades its draft against it. The install creates it once from a template and never overwrites it. Mid-session, "remember that" banks a reaction through `remember-that`. At the end of a session, "handoff" scrapes the chat and proposes standards; nothing is written without a yes. At the start of a session, check the newest file in `workflow/sessions/` (if the folder exists); when it has a **Resume** section, offer to continue from it.
 
 ### Genesis bots (manual)
 

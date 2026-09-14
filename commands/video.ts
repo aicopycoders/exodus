@@ -100,6 +100,9 @@ export interface ClipWord {
 export interface ClipQc {
   verdict: "pass" | "fail";
   attempts: number;
+  /** #1711: the accepted neighbour scenes this take was judged against for
+   *  continuity. Present only on a set-locked identity reroll. */
+  neighbours?: number[];
 }
 
 export interface ClipFinding {
@@ -123,6 +126,10 @@ export type ArtifactSubset =
       words?: ClipWord[];
       qc?: ClipQc;
       final?: boolean;
+      /** #1708: the cast voice was applied over the generated voice. */
+      revoiced?: boolean;
+      /** #1708: the clip was trimmed to its spoken words. */
+      speechTrimmed?: boolean;
     }
   | {
       type: "audio";
@@ -452,12 +459,19 @@ export interface ManifestScene {
   voice: string | null;
   keyframe: string | null;
   qc: ClipQc | null;
+  /** #1708: true when the cast voice was applied over the clip's generated voice,
+   *  false when the clip kept it, null when there is no clip. */
+  revoiced: boolean | null;
+  /** #1708: true when the clip was trimmed to its spoken words; null without a clip. */
+  speechTrimmed: boolean | null;
   /** The clip ledger row's status (pending/running/done/failed), or "missing"
    *  when the run never wrote one. */
   clipStatus: string;
   error: string | null;
   flagged: boolean;
   findings: ClipFinding[];
+  /** #1708: what the picture check found on the scene's keyframe (its frame row). */
+  keyframeFindings: ClipFinding[];
 }
 
 export interface PullFailure {
@@ -576,6 +590,8 @@ export function planPull(
       durationSec: number | null;
       qc: ClipQc | null;
       words: ClipWord[] | null;
+      revoiced: boolean;
+      speechTrimmed: boolean;
     }
   >();
   let music: PullDownload | null = null;
@@ -594,12 +610,23 @@ export function planPull(
       durationSec: artifact.durationSec ?? null,
       qc: artifact.qc ?? null,
       words: artifact.words ?? null,
+      revoiced: artifact.revoiced === true,
+      speechTrimmed: artifact.speechTrimmed === true,
     });
   }
 
   const clipItemByScene = new Map<number, NodeItem>();
+  const frameItemByScene = new Map<number, NodeItem>();
+  // The reference node also writes a "frame" row (scene 0); only the scene-frames
+  // node's rows are scene keyframes.
+  const sceneFrameNodeIds = new Set(
+    run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId),
+  );
   for (const item of items) {
     if (item.itemKind === "clip") clipItemByScene.set(item.sceneIndex, item);
+    if (item.itemKind === "frame" && sceneFrameNodeIds.has(item.nodeId)) {
+      frameItemByScene.set(item.sceneIndex, item);
+    }
   }
 
   const sceneIndexes = [
@@ -608,6 +635,7 @@ export function planPull(
       ...voiceByScene.keys(),
       ...keyframeByScene.keys(),
       ...clipItemByScene.keys(),
+      ...frameItemByScene.keys(),
     ]),
   ].sort((a, b) => a - b);
 
@@ -615,6 +643,7 @@ export function planPull(
     const clip = clipByScene.get(sceneIndex);
     const voice = voiceByScene.get(sceneIndex);
     const item = clipItemByScene.get(sceneIndex);
+    const frameItem = frameItemByScene.get(sceneIndex);
     // #1689: a narrated scene's timings ride on its voice track. The clip wins
     // when both exist, because a clip with its own dialogue is what plays; the
     // voice track only fills a silent clip.
@@ -641,10 +670,13 @@ export function planPull(
       voice: voice?.download.file ?? null,
       keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
       qc: clip?.qc ?? null,
+      revoiced: clip ? clip.revoiced : null,
+      speechTrimmed: clip ? clip.speechTrimmed : null,
       clipStatus: item?.status ?? "missing",
       error: item?.error ?? null,
       flagged: item?.flagged === true,
       findings: item?.findings ?? [],
+      keyframeFindings: frameItem?.findings ?? [],
     };
   });
 
@@ -684,7 +716,11 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
     const lostWordsSource =
       (scene.clip === failure.file && scene.wordsFrom === "clip") ||
       (scene.voice === failure.file && scene.wordsFrom === "voice");
-    if (scene.clip === failure.file) scene.clip = null;
+    if (scene.clip === failure.file) {
+      scene.clip = null;
+      scene.revoiced = null;
+      scene.speechTrimmed = null;
+    }
     if (scene.voice === failure.file) scene.voice = null;
     if (scene.keyframe === failure.file) scene.keyframe = null;
     if (scene.words === failure.file || lostWordsSource) {
@@ -916,11 +952,22 @@ export async function statusFlow(
     return { code: 0, lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal })] };
   }
 
+  const revoicedByScene = new Set<number>();
+  for (const artifact of outputsOfNodeKind(run, "video")) {
+    if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
+      revoicedByScene.add(artifact.sceneIndex);
+    }
+  }
+
   const byScene = new Map<number, { clip?: NodeItem; voiceover?: NodeItem; frame?: NodeItem }>();
+  const sceneFrameNodeIds = new Set(
+    run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId),
+  );
   for (const item of items) {
     if (item.itemKind !== "clip" && item.itemKind !== "voiceover" && item.itemKind !== "frame") {
       continue;
     }
+    if (item.itemKind === "frame" && !sceneFrameNodeIds.has(item.nodeId)) continue;
     const row = byScene.get(item.sceneIndex) ?? {};
     row[item.itemKind] = item;
     byScene.set(item.sceneIndex, row);
@@ -948,6 +995,11 @@ export async function statusFlow(
         lines.push(`       ${finding.code} (${finding.severity}): ${finding.detail}`);
       }
       if (row.clip?.error) lines.push(`       ${row.clip.error}`);
+      // #1708: the cast voice applied, and what the picture check found.
+      if (revoicedByScene.has(sceneIndex)) lines.push("       voice: cast voice applied");
+      for (const finding of row.frame?.findings ?? []) {
+        lines.push(`       picture: ${finding.code} (${finding.severity}): ${finding.detail}`);
+      }
     }
   }
 

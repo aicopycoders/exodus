@@ -24,3 +24,6 @@ export function referencesDir(override) {
 export function docsDir(override) {
     return path.join(assetsRoot(override), "docs");
 }
+export function templatesDir(override) {
+    return path.join(assetsRoot(override), "templates");
+}

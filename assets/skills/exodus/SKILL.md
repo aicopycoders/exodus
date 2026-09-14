@@ -30,9 +30,18 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Open or create Google Docs/Sheets | `exodus-drive` |
 | Read their OWN live Meta ads and their numbers — "what are my cheapest ads", "where is my spend going", "show me that ad", "what are people saying in the comments on my ads" (`exodus ads` / `exodus comments`) | `exodus-ads` (read-only; already synced by the dashboard, no Meta MCP needed) |
 | Import their OWN winning ads from their Meta ad account ("import my winners", "mine my ad account for winners", "exodus winners") | `exodus-winners` (it checks first whether the brand's Meta account is connected — if it is, it reads `exodus ads` and `exodus winners definition` instead of a Meta MCP) |
+| Figure out WHO to sell to, segments, personas, "map the market" | `odf` (or `positioning-spiral` when no coherent positioning exists yet) |
+| The product's mechanism, "why does this work", "which ingredient leads" | `mechanism` |
+| Who the real competitors are, a watch list | `find-competitors` |
+| What patterns the ads show, what competitors do that we don't | `patterns-and-gaps` |
+| Break an ad down, tag a batch, write a brief | `anatomy-of-ads` |
+| Make an existing draft hit harder, "what's wrong with this ad" | `copy-instincts` |
+| Build a bot or a workflow prompt node | `bot-builder` |
+| "remember that", "never do that again" | `remember-that` |
+| "handoff", "wrap up", "what did we do today" | `handoff` |
 | Update the CLI + skills ("update exodus", "run an exodus update") | run `npx @aicopycoders/exodus@latest update` — the ONLY command that refreshes skills; `doctor` checks health but never rewrites them |
 
-If a custom pipeline skill is installed in this folder (any additional `exodus-*` directory under `.claude/skills/`), it routes the same way — match the user's words to that skill's description.
+The method skills above are Luke's thinking as skills; they run as a conversation and are listed in `CLAUDE.md` under **Method skills**. If a custom pipeline skill is installed in this folder (any additional `exodus-*` directory under `.claude/skills/`), it routes the same way — match the user's words to that skill's description.
 
 For any creative judgment along the way (awareness calls, hook critique, which pipeline fits), `exodus-strategist` is the operating persona — it activates with the work.
 

@@ -13,7 +13,7 @@ exodus update — refresh this workspace from the installed CLI (alias of init)
 
 Re-runs the init refresh: rewrites .claude/skills/, the workspace docs
 (CLAUDE.md, PIPELINES.md), and syncs brand folders from the package you
-invoked. Your .env, state/, and outputs are left untouched.
+invoked. Your .env, your STANDARDS.md, state/, and outputs are left untouched.
 
 Usage:
   exodus update

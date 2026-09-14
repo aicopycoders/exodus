@@ -20,11 +20,13 @@ const docSrcs = [
   join(repoRoot, "workspace", "CLAUDE.md"),
   join(repoRoot, "workspace", "PIPELINES.md"),
 ];
+const standardsSrc = join(repoRoot, "workspace", "STANDARDS.md");
 
 const assetsDir = join(exodusDir, "assets");
 const skillsDest = join(assetsDir, "skills");
 const refsDest = join(assetsDir, "references");
 const docsDest = join(assetsDir, "docs");
+const templatesDest = join(assetsDir, "templates");
 
 // ── Forbidden patterns (client-name leak-check) ───────────────────────────
 const FORBIDDEN = [/grounding co\b/i, /grounding company/i, /matt beard/i];
@@ -98,6 +100,11 @@ if (!existsSync(skillsSrc)) {
   mkdirSync(docsDest, { recursive: true });
   for (const docSrc of docSrcs) {
     if (existsSync(docSrc)) cpSync(docSrc, join(docsDest, basename(docSrc)));
+  }
+
+  if (existsSync(standardsSrc)) {
+    mkdirSync(templatesDest, { recursive: true });
+    cpSync(standardsSrc, join(templatesDest, "STANDARDS.md"));
   }
 
   console.log(`bundle-assets: copied skills + docs -> ${assetsDir}`);

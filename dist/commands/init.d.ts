@@ -4,6 +4,7 @@ export interface InitResult {
     envCreated: boolean;
     skills: string[];
     docs: string[];
+    standardsCreated: boolean;
 }
 export declare function scaffoldInit(root: string): InitResult;
 export declare function syncBrands(root: string): Promise<{

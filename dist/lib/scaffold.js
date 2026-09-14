@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { skillsDir, referencesDir, docsDir } from "./assets.js";
+import { skillsDir, referencesDir, docsDir, templatesDir } from "./assets.js";
 import { getChannel, stampChannel } from "./channel.js";
 export const ENV_SCAFFOLD = `# Exodus config — paste your dashboard .env block below this line.
 # Get it from your Exodus dashboard -> Settings -> Claude Code -> "Copy .env block".
@@ -90,6 +90,23 @@ export function writeDocs(root, srcOverride, channel = getChannel()) {
         names.push(entry.name);
     }
     return names.sort();
+}
+export function writeStandards(root, srcOverride, channel = getChannel()) {
+    const dest = path.join(root, "STANDARDS.md");
+    if (fs.existsSync(dest))
+        return { created: false };
+    let src;
+    try {
+        src = templatesDir(srcOverride);
+    }
+    catch {
+        return { created: false };
+    }
+    const template = path.join(src, "STANDARDS.md");
+    if (!fs.existsSync(template))
+        return { created: false };
+    fs.writeFileSync(dest, stampChannel(fs.readFileSync(template, "utf8"), channel));
+    return { created: true };
 }
 export function ensureBaseDirs(root) {
     const out = path.join(root, "output");

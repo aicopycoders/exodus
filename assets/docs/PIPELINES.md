@@ -23,6 +23,26 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 
 ---
 
+## Method skills (Luke's thinking)
+
+Not pipelines. These run as a conversation and shape the thinking before a pipeline fires. Call one by name or describe the job.
+
+| Skill | Say things like |
+|-------|-----------------|
+| thinking-vs-build | (loads at session start) "let's think", "basic list", "just the outcomes" vs "build it", "let it rip" |
+| positioning-spiral | "who do we sell this to and what's the story", "are we positioned right" |
+| odf | "map the segments", "build personas from the comments", "aim this winner at a new segment" |
+| mechanism | "what's the mechanism", "which ingredient leads", "name the problem" |
+| find-competitors | "who's scaling in this niche", "build me a watch list" |
+| patterns-and-gaps | "what patterns do you see", "what are they doing that we aren't" |
+| anatomy-of-ads | "break this ad down", "tag these ads", "write me a brief" |
+| copy-instincts | "make this hit harder", "what's wrong with this ad", "find the big idea" |
+| bot-builder | "build me a bot that…", "turn this into a prompt", "make a node for the workflow" |
+| remember-that | "remember that", "never do that again", "lock that in" |
+| handoff | "handoff", "wrap up", "what did we do today", "handoff review" |
+
+They read `STANDARDS.md` (your taste, at the workspace root) before producing anything. `remember-that` adds to it mid-session; `handoff` proposes additions at the end and writes session files to `workflow/sessions/`.
+
 ## exodus-write (start here)
 
 **What it does:** The guided front door for copywriting. You don't need to know which command to run — say "exodus" plus what you want and the exodus-write flow figures out where you are, helps shape the brief, sets up your foundation if needed, runs Genesis, and hands back the Google Doc.

@@ -34,3 +34,7 @@ export function referencesDir(override?: string): string {
 export function docsDir(override?: string): string {
   return path.join(assetsRoot(override), "docs");
 }
+
+export function templatesDir(override?: string): string {
+  return path.join(assetsRoot(override), "templates");
+}

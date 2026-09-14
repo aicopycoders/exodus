@@ -7,4 +7,7 @@ export declare function ensureGitignore(root: string): void;
 export declare function writeSkills(root: string, srcOverride?: string, channel?: Channel): string[];
 export declare function writeReferences(root: string, srcOverride?: string, channel?: Channel): void;
 export declare function writeDocs(root: string, srcOverride?: string, channel?: Channel): string[];
+export declare function writeStandards(root: string, srcOverride?: string, channel?: Channel): {
+    created: boolean;
+};
 export declare function ensureBaseDirs(root: string): void;
