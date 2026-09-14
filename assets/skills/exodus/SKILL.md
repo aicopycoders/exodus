@@ -39,6 +39,7 @@ This skill ROUTES. Read what the user wants, name the destination skill, and han
 | Build a bot or a workflow prompt node | `bot-builder` |
 | "remember that", "never do that again" | `remember-that` |
 | "handoff", "wrap up", "what did we do today" | `handoff` |
+| Add competitors to the Mining page / watch list, see who is on it ("add these brands to mining", "put Brace Direct on the watch list") | run `npx @aicopycoders/exodus swipe brands bulk-import <csv>` (one brand: `swipe brands add "<Name>" --fb <pageId>`; `swipe brands list` to see the list). There is no `competitors` verb. |
 | Update the CLI + skills ("update exodus", "run an exodus update") | run `npx @aicopycoders/exodus@latest update` — the ONLY command that refreshes skills; `doctor` checks health but never rewrites them |
 
 The method skills above are Luke's thinking as skills; they run as a conversation and are listed in `CLAUDE.md` under **Method skills**. If a custom pipeline skill is installed in this folder (any additional `exodus-*` directory under `.claude/skills/`), it routes the same way — match the user's words to that skill's description.

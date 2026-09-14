@@ -64,9 +64,9 @@ def get(path, params, tries=5):
 
 def search_brand(name):
     items = get("/brand-library/search", {"keyword": name, "page_size": 8}).get("items", [])
-    first = name.lower().split()[0]
-    exact = [i for i in items if i.get("name", "").lower() == name.lower()]
-    close = [i for i in items if first in i.get("name", "").lower()]
+    want = name.lower().strip()
+    exact = [i for i in items if i.get("name", "").lower().strip() == want]
+    close = [i for i in items if want in i.get("name", "").lower()]
     if exact or close:
         return (exact or close)[:1]
     # no name match: do not guess. Report what Atria returned so the user can pick.
@@ -151,6 +151,8 @@ def main():
         time.sleep(1.0)
     order = {"FOLLOW": 0, "WATCH": 1, "SKIP": 2}
     rows.sort(key=lambda r: (order.get(r.get("verdict"), 3), -(r.get("active_total") or 0)))
+    for target in [a.out, a.json]:
+        if target and os.path.dirname(target): os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(a.out, "w") as f:
         f.write(f"# Competitor sheet ({dt.date.today()})\n\nVerdict: FOLLOW = 3+ strong signals · WATCH = 2 · SKIP = 0–1. Thresholds: {STRONG}\n\n")
         f.write("| Brand | Verdict | Active | Longest (d) | Launches 30d | Reuse | Offer | Strong on | Longest-running ad |\n|---|---|---|---|---|---|---|---|---|\n")

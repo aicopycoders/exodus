@@ -11,6 +11,7 @@ lanes.txt: one query per line (the outcome × mechanism × ingredient grid, see 
 
 Needs APIFY_API_TOKEN in .env. Cost: the apify~facebook-ads-scraper actor bills per result; 30 lanes × 150
 results is a few dollars. Without --yes the script prints the plan and stops; say it back, get a go, rerun with --yes.
+A lane that already has a JSON file is skipped, so a rerun after failures only bills the failed lanes.
 
 Output:
   <outdir>/<lane>.json          raw ads per lane
@@ -37,15 +38,22 @@ def run(kw, outdir, limit, country, tok):
     u = ("https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=" + country +
          "&q=" + urllib.parse.quote(kw) + "&search_type=keyword_unordered&media_type=all")
     path = os.path.join(outdir, kw.replace(" ", "_").replace("/", "-") + ".json")
+    if os.path.exists(path):
+        print(f"{kw:<40} already swept, skipped (delete the file to redo)", flush=True)
+        return True
     try:
         r = requests.post(f"https://api.apify.com/v2/acts/apify~facebook-ads-scraper/run-sync-get-dataset-items?token={tok}&timeout=600",
                           json={"startUrls": [{"url": u}], "resultsLimit": limit}, timeout=(30, 660))
-        d = r.json() if r.status_code == 200 else []
-        if not isinstance(d, list): d = []
+        r.raise_for_status()
+        d = r.json()
+        if not isinstance(d, list):
+            raise ValueError(f"unexpected response shape: {type(d).__name__}")
         json.dump(d, open(path, "w"))
         print(f"{kw:<40} {r.status_code} {len(d)} ads", flush=True)
+        return True
     except Exception as e:
-        print(kw, "ERR", e, flush=True)
+        print(f"{kw:<40} FAILED {e}", flush=True)
+        return False
 
 
 def aggregate(outdir):
@@ -75,7 +83,7 @@ def aggregate(outdir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--keywords", required=True)
+    ap.add_argument("--keywords", help="one query per line; required unless --aggregate-only")
     ap.add_argument("--outdir", default="adlib")
     ap.add_argument("--limit", type=int, default=150)
     ap.add_argument("--country", default="US")
@@ -85,6 +93,7 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     if not a.aggregate_only:
+        if not a.keywords: sys.exit("--keywords <file> is required for a sweep")
         tok = os.environ.get("APIFY_API_TOKEN") or sys.exit("APIFY_API_TOKEN not found in .env or environment")
         lanes = [l.strip() for l in open(a.keywords) if l.strip() and not l.startswith("#")]
         if not a.yes:
@@ -92,7 +101,13 @@ def main():
             print(f"Outputs land in {a.outdir}/. Nothing was run. Say the plan back, get a go, then rerun with --yes.")
             sys.exit(2)
         with ThreadPoolExecutor(a.workers) as ex:
-            list(ex.map(lambda k: run(k, a.outdir, a.limit, a.country, tok), lanes))
+            ok = list(ex.map(lambda k: run(k, a.outdir, a.limit, a.country, tok), lanes))
+        failed = [k for k, good in zip(lanes, ok) if not good]
+        if failed:
+            print(f"\n{len(failed)} of {len(lanes)} lanes failed; not aggregating an incomplete sweep.")
+            print("Rerun the same command with --yes: finished lanes are skipped, only the failed ones are billed again.")
+            print("Failed: " + ", ".join(failed))
+            sys.exit(1)
     aggregate(a.outdir)
 
 

@@ -79,7 +79,10 @@ if (!existsSync(skillsSrc)) {
   rmSync(assetsDir, { recursive: true, force: true });
   mkdirSync(assetsDir, { recursive: true });
 
-  cpSync(skillsSrc, skillsDest, { recursive: true });
+  cpSync(skillsSrc, skillsDest, {
+    recursive: true,
+    filter: (src) => !/__pycache__|\.pyc$/.test(src),
+  });
   if (existsSync(refsSrc)) {
     mkdirSync(refsDest, { recursive: true });
     const skipped = [];
@@ -108,6 +111,13 @@ if (!existsSync(skillsSrc)) {
   }
 
   console.log(`bundle-assets: copied skills + docs -> ${assetsDir}`);
+}
+
+if (!existsSync(join(templatesDest, "STANDARDS.md"))) {
+  console.error(
+    "bundle-assets: assets/templates/STANDARDS.md is missing — members would get no taste file (source: workspace/STANDARDS.md)"
+  );
+  process.exit(1);
 }
 
 // ── Leak-check: scan every file in assetsDir ────────────────────────────

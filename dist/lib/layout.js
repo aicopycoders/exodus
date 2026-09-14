@@ -97,6 +97,7 @@ export function ensureBrandDir(root, brand) {
     const created = !fs.existsSync(path.join(dir, BRAND_MARKER_FILE));
     fs.mkdirSync(path.join(dir, "state"), { recursive: true });
     fs.mkdirSync(path.join(dir, "output"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "inputs"), { recursive: true });
     const marker = { slug: brand.slug, name: brand.name ?? brand.slug };
     const markerPath = path.join(dir, BRAND_MARKER_FILE);
     const existing = readBrandMarker(dir);

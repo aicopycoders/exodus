@@ -139,6 +139,7 @@ export function ensureBaseDirs(root: string): void {
   const keep = path.join(out, ".gitkeep");
   if (!fs.existsSync(keep)) fs.writeFileSync(keep, "");
   fs.mkdirSync(path.join(root, "state"), { recursive: true });
+  fs.mkdirSync(path.join(root, "inputs"), { recursive: true });
   const exodusDir = path.join(root, ".exodus");
   fs.mkdirSync(exodusDir, { recursive: true });
   const statePath = path.join(exodusDir, "state.json");

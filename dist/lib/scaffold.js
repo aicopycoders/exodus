@@ -115,6 +115,7 @@ export function ensureBaseDirs(root) {
     if (!fs.existsSync(keep))
         fs.writeFileSync(keep, "");
     fs.mkdirSync(path.join(root, "state"), { recursive: true });
+    fs.mkdirSync(path.join(root, "inputs"), { recursive: true });
     const exodusDir = path.join(root, ".exodus");
     fs.mkdirSync(exodusDir, { recursive: true });
     const statePath = path.join(exodusDir, "state.json");
