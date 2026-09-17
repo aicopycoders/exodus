@@ -128,7 +128,7 @@ Thresholds used: <…>. Verdict: FOLLOW 3+ · WATCH 2 · SKIP 0–1.
 
 The sheet lives in the folder. The FOLLOW rows become the watch list: an Ad Library page link per brand (the shape above) saved as a links file the rip can consume, and the brands added to Atria's followed list by hand in the app. When the brand is set up in Exodus, the Scout feed covers the Instagram side.
 
-**Push the watch list into Exodus (the Mining page).** The CLI verb is `npx @aicopycoders/exodus swipe brands`, not `competitors`. Write the FOLLOW rows as a CSV (`name,igHandle,fbPageId,category[,website][,youtubeHandle]`; the Ad Library `view_all_page_id` is the `fbPageId`) and run `npx @aicopycoders/exodus swipe brands bulk-import <file.csv>`: it checks each brand's page on the member's own Scrape Creators key and starts collecting its ads. `swipe brands add "<Name>" --fb <pageId>` adds one brand but does not start the research yet (open issue #1366), so prefer the CSV route even for one brand. `swipe brands list` shows what is on the page.
+**Push the watch list into Exodus (the Mining page).** The CLI verb is `npx @aicopycoders/exodus swipe brands`, not `competitors`. Write the FOLLOW rows as a CSV (`name,igHandle,fbPageId,category[,website][,youtubeHandle]`; the Ad Library `view_all_page_id` is the `fbPageId`) and run `npx @aicopycoders/exodus swipe brands bulk-import <file.csv>`: it checks each brand's page on the member's own Scrape Creators key and starts collecting its ads. `swipe brands add "<Name>" --fb <pageId>` adds one brand and starts the same check on it; the CSV route is only for lists. `swipe brands list` shows what is on the page.
 
 ## Hand-offs
 

@@ -354,15 +354,25 @@ async function runBrandsAdd(
   if (cat) body.category = cat;
   if (yt) body.youtubeHandle = yt.replace(/^@/, "");
 
-  const res = await apiPost<{ ok?: boolean; added?: number; error?: string }>(
-    "/api/v2/brands",
-    body,
-  );
+  const res = await apiPost<{
+    ok?: boolean;
+    added?: number;
+    // #1366 — whether the server started looking the brand up (BYOK research
+    // on the caller's own Scrape Creators key) and, when it didn't, why.
+    researching?: boolean;
+    warning?: string;
+    error?: string;
+  }>("/api/v2/brands", body);
   if (!res.ok) {
     console.log(formatError(res));
     process.exit(1);
   }
-  console.log(`Added "${name}".`);
+  if (res.data.researching) {
+    console.log(`Added "${name}". Finding its Ad Library page and mining its ads now.`);
+  } else {
+    console.log(`Added "${name}".`);
+    if (res.data.warning) console.log(`  ${res.data.warning}`);
+  }
 }
 
 async function runBrandsRemove(positional: string[]): Promise<void> {
