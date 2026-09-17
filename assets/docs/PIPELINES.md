@@ -16,7 +16,7 @@ In Claude Code you don't click buttons. You say **"exodus"** plus what you want 
 | exodus-meme | Meme Ad Generator — recommend formats, one batched server-side run |
 | exodus-workflow | Run/build saved multi-node workflows, resolve inbox gate/repair parks, continue sessions, fire triggers, read banks + promote winners |
 | exodus-hooks | Read the Scout library of hook cards — composable filters, one-card detail, pattern matches, CSV export (read-only) |
-| exodus-video | Make a video ad from a Show — start, storyboard gate, pull every piece + manifest, first cut, upload, approve (admin-only) |
+| exodus-video | Make a video ad from a Show — start, storyboard gate, pull every piece + manifest, cut it in whatever editor you use, upload, approve (admin-only) |
 | exodus-browse | View History and Surface the Right Run |
 | exodus-drive | Google Drive, Docs, Sheets via the Dashboard's OAuth |
 | exodus-winners | Mine your own Meta ad account for winners (needs the Meta Ads MCP) and import them into Exodus |
@@ -245,21 +245,25 @@ Returns: a table, --json data, or an exported CSV/JSON file
 
 ## exodus-video
 
-**What it does:** Makes a video ad from a locked Show, in pieces. The run writes the storyboard, draws a picture per scene, records a voice per scene, renders a clip per scene and composes a music bed, then parks for a cut. The CLI pulls the pieces to a folder with a `manifest.json`, the bundled script makes a plain cut, and the upload attaches it for approval. Admin-only.
+**What it does:** Makes a video ad from a script, in pieces. Main path is a saved video workflow with no Show (`exodus workflow run <name> --input <field>=@script.txt`); a locked Show (`exodus video start --show`) is the other way in and is the only route with `video flag`. On the workflow route the run stops for your cut only if its video node sets `finalWatch: true` (defaults to off — check with `exodus workflow export`, not `describe`), and video gates are approved with `exodus video approve`, not `workflow checkpoint approve`. Either way the run writes the storyboard, draws a picture per scene, records the voice, renders a clip per scene and generates a music bed, then parks for a cut. The CLI pulls the pieces to a folder with a `manifest.json`; you cut them in whatever editor you use; the upload attaches the cut for approval. Admin-only.
 
 ```operator-guide
-Commands:
+Start (workflow route, no Show):
+  exodus workflow list / describe <name>                               find it and see what it needs
+  exodus workflow run <workflowId|name> --input <field>=@script.txt [--wait]   start it; --wait stops at the storyboard gate
+Start (Show route):
   exodus video shows [--json]                                          Shows and whether each is ready
-  exodus video start --show <id> --script <file> [--wait] [--json]     start an ad run; --wait parks at the storyboard gate
+  exodus video start --show <id> --script <file> [--wait] [--json]     start an ad run; --wait stops at the storyboard gate
+Then, on either route:
   exodus video storyboard <runId> [--json]                             the scene cards
   exodus video approve <runId> [--json]                                approve the storyboard, or the uploaded cut
-  exodus video flag <runId> --note "<what is wrong>" [--json]          send the storyboard back
+  exodus video flag <runId> --note "<what is wrong>" [--json]          send the storyboard back — SHOW RUNS ONLY
   exodus video status <runId> [--json]                                 the park and each scene's clip/voice/picture
   exodus video pull <runId> --out <dir> [--json]                       every piece + manifest.json
   exodus video upload <runId> --file <cut.mp4> [--duration <s>] [--json]   attach the cut (MP4/MOV/WebM, 200 MB)
-Cut:
+Cut: your choice of tool — Exodus does not stitch or mix. One option ships with the skill:
   node .claude/skills/exodus-video/scripts/first-cut.mjs <dir> [--skip n,m] [--no-music] [--out f]
-Returns: park lines with the exact next command; pull writes files + manifest.json
+Returns: park lines with the exact next command (--wait ends on either video park, exit 0); pull writes files + manifest.json
 ```
 
 ---

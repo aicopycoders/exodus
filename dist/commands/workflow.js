@@ -9,6 +9,7 @@ import { runVerdict } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
+import { asVideoRun, classifyRun, stopLines } from "./video.js";
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
 
@@ -90,6 +91,13 @@ Flags:
                          person's verdict. This is a choice you make for ONE
                          launch — it is never a setting on the workflow itself.
   --wait                 Poll until the workflow run reaches a terminal status.
+                         A video workflow's storyboard gate and final watch END
+                         the wait too (exit 0): the run is parked on a decision
+                         only you can make, so the command prints the same
+                         "Parked: …" block and next commands "exodus video
+                         status" prints. A Checkpoint / repair / slots park
+                         prints its pause notice once and keeps polling so a
+                         resolve from another shell carries the run on.
                          (checkpoint retry) Re-runs the step feeding the
                          Checkpoint box and waits until its fresh output is
                          ready and the run parks again — that IS its finish
@@ -1796,30 +1804,36 @@ export async function runFlow(workflowRef, opts, deps) {
     return { code: waited.code, lines: [...lines, ...waited.lines] };
 }
 const WAIT_TERMINAL_STATUSES = TERMINAL_RUN_STATUSES.flatMap((s) => storedWorkflowStatusForms(s));
+function isParkedSnapshot(raw) {
+    const status = raw["status"];
+    return typeof status === "string" && normalizeRunStatus(status) === "awaiting-approval";
+}
+function videoParkStop(raw) {
+    if (!isParkedSnapshot(raw))
+        return undefined;
+    const stop = classifyRun(asVideoRun(raw));
+    return stop.at === "storyboard-gate" || stop.at === "final-watch" ? stop : undefined;
+}
 async function waitForRun(runId, opts, deps) {
     const seen = new Map();
     let pausedNotified = false;
     const landOnPark = opts.landOnPark;
+    const isLandingPark = (raw) => (landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason) ||
+        videoParkStop(raw) !== undefined;
     const pollResult = await deps.poll({
         path: `${STATUS_PATH}?runId=${encodeURIComponent(runId)}`,
         intervalMs: 3_000,
         timeoutMs: 60 * 60 * 1000,
-        terminalStatuses: landOnPark
-            ? [...WAIT_TERMINAL_STATUSES, ...storedWorkflowStatusForms("awaiting-approval")]
-            : WAIT_TERMINAL_STATUSES,
-        ...(landOnPark
-            ? {
-                isDone: (raw) => !(typeof raw["status"] === "string" &&
-                    normalizeRunStatus(raw["status"]) === "awaiting-approval") || raw["pauseReason"] === landOnPark.pauseReason,
-            }
-            : {}),
+        terminalStatuses: [
+            ...WAIT_TERMINAL_STATUSES,
+            ...storedWorkflowStatusForms("awaiting-approval"),
+        ],
+        isDone: (raw) => !isParkedSnapshot(raw) || isLandingPark(raw),
         onProgress: (raw) => {
             if (opts.json || !opts.onProgressLine)
                 return;
-            const rawStatus = raw["status"];
-            const parked = typeof rawStatus === "string" &&
-                normalizeRunStatus(rawStatus) === "awaiting-approval";
-            const isLanding = landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason;
+            const parked = isParkedSnapshot(raw);
+            const isLanding = isLandingPark(raw);
             if (parked && !pausedNotified && !isLanding) {
                 pausedNotified = true;
                 const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
@@ -1848,6 +1862,9 @@ async function waitForRun(runId, opts, deps) {
     const saved = opts.out !== undefined && terminalRun
         ? await saveDeliveries(terminalRun, opts.out, deps)
         : undefined;
+    const videoStop = !pollResult.timedOut && isRecord(pollResult.data)
+        ? videoParkStop(pollResult.data)
+        : undefined;
     if (opts.json) {
         return {
             code: pollResult.ok ? 0 : 1,
@@ -1856,6 +1873,7 @@ async function waitForRun(runId, opts, deps) {
                     ...opts.jsonBase,
                     result: pollResult.data,
                     timedOut: pollResult.timedOut,
+                    ...(videoStop ? { stop: videoStop } : {}),
                     ...(saved ? { saved: saved.paths } : {}),
                 }),
             ],
@@ -1883,6 +1901,9 @@ async function waitForRun(runId, opts, deps) {
         pollResult.data["pauseReason"] === landOnPark.pauseReason) {
         const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
         lines.push("", landOnPark.headline, ...formatPauseNotice(landOnPark.pauseReason, runId, dashboardUrl).slice(1));
+    }
+    if (videoStop) {
+        lines.push("", ...stopLines(videoStop, runId, deps.dashboardUrl ?? getDashboardUrl()));
     }
     return { code: pollResult.ok ? 0 : 1, lines };
 }

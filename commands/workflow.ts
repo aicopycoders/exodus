@@ -25,6 +25,12 @@ import { runVerdict, type RunDeliverySummary } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel, type Channel } from "../lib/channel.js";
+// #1788: the video park classifier and its next-step lines, so `--wait` stops
+// at a storyboard gate / final watch with the SAME words `exodus video status`
+// prints. video.ts imports ASSET_UPLOAD_POLICY from this module in return; both
+// sides only touch the other's exports inside function bodies, so the ESM
+// cycle never reads a binding before it is initialised.
+import { asVideoRun, classifyRun, stopLines, type RunStop } from "./video.js";
 
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
@@ -107,6 +113,13 @@ Flags:
                          person's verdict. This is a choice you make for ONE
                          launch — it is never a setting on the workflow itself.
   --wait                 Poll until the workflow run reaches a terminal status.
+                         A video workflow's storyboard gate and final watch END
+                         the wait too (exit 0): the run is parked on a decision
+                         only you can make, so the command prints the same
+                         "Parked: …" block and next commands "exodus video
+                         status" prints. A Checkpoint / repair / slots park
+                         prints its pause notice once and keeps polling so a
+                         resolve from another shell carries the run on.
                          (checkpoint retry) Re-runs the step feeding the
                          Checkpoint box and waits until its fresh output is
                          ready and the run parks again — that IS its finish
@@ -3498,6 +3511,9 @@ export async function runFlow(
  * the run parks straight back at the same checkpoint with fresh output. For those, that park IS the
  * success, so it must stop the loop (opt-in only: without this option every
  * `awaiting-review` stays non-terminal exactly as before).
+ *
+ * #1788: one exception applies to EVERY caller — a video run parked at its
+ * storyboard gate or final watch ends the wait (see videoParkStop below).
  */
 /**
  * The statuses `--wait` treats as the end of the run, spelled in BOTH
@@ -3509,6 +3525,35 @@ export async function runFlow(
 const WAIT_TERMINAL_STATUSES: string[] = TERMINAL_RUN_STATUSES.flatMap((s) =>
   storedWorkflowStatusForms(s),
 );
+
+/** A run snapshot parked at awaiting-approval, in either wire vocabulary (#994). */
+function isParkedSnapshot(raw: Record<string, unknown>): boolean {
+  const status = raw["status"];
+  return typeof status === "string" && normalizeRunStatus(status) === "awaiting-approval";
+}
+
+type VideoParkStop = Extract<RunStop, { at: "storyboard-gate" | "final-watch" }>;
+
+/**
+ * #1788: the two parks EVERY `--wait` ends on, whichever verb is waiting. A
+ * video run parks at its storyboard gate and again at the final watch with no
+ * `pauseReason` at all — the builder vocabulary (checkpoint / repair / slots /
+ * call) never describes them — and both are decisions only the caller can
+ * make: nothing resumes the run until someone approves or flags the
+ * storyboard, or uploads a cut. Polling through them meant an agent driving
+ * `workflow run --wait` was never told the run had parked and burned to the
+ * 60-minute cap. Classified by the same `classifyRun` that `exodus video
+ * status` / `video wait` use, so the stop and its next-step lines are one
+ * vocabulary on both routes. Every other park is NOT a stop here: a Checkpoint
+ * / repair / slots park prints its banner once and the loop keeps polling so a
+ * resolve from another shell or the app carries the run on to its finish, and
+ * a "call" park (a parent waiting on its child run) resumes on its own.
+ */
+function videoParkStop(raw: Record<string, unknown>): VideoParkStop | undefined {
+  if (!isParkedSnapshot(raw)) return undefined;
+  const stop = classifyRun(asVideoRun(raw));
+  return stop.at === "storyboard-gate" || stop.at === "final-watch" ? stop : undefined;
+}
 
 async function waitForRun(
   runId: string,
@@ -3535,46 +3580,40 @@ async function waitForRun(
   const seen = new Map<string, string>();
   let pausedNotified = false;
   const landOnPark = opts.landOnPark;
+  // The park this wait ENDS on: the one `landOnPark` names (#998), or a video
+  // storyboard-gate / final-watch park (#1788). Any other park keeps polling.
+  const isLandingPark = (raw: Record<string, unknown>): boolean =>
+    (landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason) ||
+    videoParkStop(raw) !== undefined;
   const pollResult = await deps.poll({
     path: `${STATUS_PATH}?runId=${encodeURIComponent(runId)}`,
     intervalMs: 3_000,
     timeoutMs: 60 * 60 * 1000,
     // A cancelled run is terminal (#539) so a web-cancelled run stops the wait
-    // instead of polling to timeout. A run awaiting approval stays NONterminal —
-    // it resumes after a web approval — but we surface it once (below) so the
-    // operator knows to go approve.
+    // instead of polling to timeout. A run awaiting approval stays NONterminal
+    // by default — it resumes after a web approval — but we surface it once
+    // (below) so the operator knows to go approve.
     // #994: spell the terminal set in BOTH vocabularies. A published CLI polls
     // pre-rename backends (completed/partial/canceled) and renamed ones
     // (succeeded/succeeded-with-warnings/cancelled) alike; poll.ts already
     // normalizes, and passing them explicitly keeps the wire contract visible.
-    // #998: with landOnPark, the awaiting-approval forms join the terminal set
-    // and the isDone guard below narrows the stop to the ONE park kind this
-    // verb lands on. (pollUntilDone requires BOTH the status check and isDone
-    // to agree, so the guard must pass every non-park terminal status straight
-    // through.)
-    terminalStatuses: landOnPark
-      ? [...WAIT_TERMINAL_STATUSES, ...storedWorkflowStatusForms("awaiting-approval")]
-      : WAIT_TERMINAL_STATUSES,
-    ...(landOnPark
-      ? {
-          isDone: (raw: Record<string, unknown>) =>
-            !(
-              typeof raw["status"] === "string" &&
-              normalizeRunStatus(raw["status"]) === "awaiting-approval"
-            ) || raw["pauseReason"] === landOnPark.pauseReason,
-        }
-      : {}),
+    // #998/#1788: the awaiting-approval forms join the terminal set and the
+    // isDone guard below narrows the stop to the parks this wait lands on —
+    // the one `landOnPark` names, and a video gate / final watch. (pollUntilDone
+    // requires BOTH the status check and isDone to agree, so the guard must
+    // pass every non-park terminal status straight through.)
+    terminalStatuses: [
+      ...WAIT_TERMINAL_STATUSES,
+      ...storedWorkflowStatusForms("awaiting-approval"),
+    ],
+    isDone: (raw: Record<string, unknown>) => !isParkedSnapshot(raw) || isLandingPark(raw),
     onProgress: (raw) => {
       if (opts.json || !opts.onProgressLine) return;
-      const rawStatus = raw["status"];
-      const parked =
-        typeof rawStatus === "string" &&
-        normalizeRunStatus(rawStatus) === "awaiting-approval";
-      // #998: when THIS park is the landing this verb promised, the closing
-      // render below announces it — don't also fire the "you've been
-      // interrupted" banner mid-poll.
-      const isLanding =
-        landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason;
+      const parked = isParkedSnapshot(raw);
+      // #998/#1788: when THIS park is the landing, the closing render below
+      // announces it — don't also fire the "you've been interrupted" banner
+      // mid-poll.
+      const isLanding = isLandingPark(raw);
       if (parked && !pausedNotified && !isLanding) {
         pausedNotified = true;
         // #891: dispatch the pause banner on WHY the run parked. The dashboard
@@ -3625,6 +3664,15 @@ async function waitForRun(
       ? await saveDeliveries(terminalRun, opts.out, deps)
       : undefined;
 
+  // #1788: landed on a video storyboard gate / final watch. `stop` rides the
+  // --json line (additive, only on this landing) in the same shape `exodus
+  // video status --json` and `video wait --json` already use, so an agent can
+  // branch on `stop.at` instead of re-deriving the park from the raw run.
+  const videoStop =
+    !pollResult.timedOut && isRecord(pollResult.data)
+      ? videoParkStop(pollResult.data)
+      : undefined;
+
   if (opts.json) {
     return {
       code: pollResult.ok ? 0 : 1,
@@ -3633,6 +3681,7 @@ async function waitForRun(
           ...opts.jsonBase,
           result: pollResult.data,
           timedOut: pollResult.timedOut,
+          ...(videoStop ? { stop: videoStop } : {}),
           // Additive, and only when --out was passed: the paths that landed.
           ...(saved ? { saved: saved.paths } : {}),
         }),
@@ -3671,6 +3720,13 @@ async function waitForRun(
       landOnPark.headline,
       ...formatPauseNotice(landOnPark.pauseReason, runId, dashboardUrl).slice(1),
     );
+  }
+
+  // #1788: landed on a video storyboard gate / final watch — close with the
+  // exact "Parked: …" block `exodus video status` prints for that stop, so the
+  // next command is named right here instead of the loop polling to timeout.
+  if (videoStop) {
+    lines.push("", ...stopLines(videoStop, runId, deps.dashboardUrl ?? getDashboardUrl()));
   }
 
   return { code: pollResult.ok ? 0 : 1, lines };
