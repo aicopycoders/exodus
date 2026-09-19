@@ -6,7 +6,7 @@ import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import type { FlagOccurrence } from "../lib/args.js";
-import { ASSET_UPLOAD_POLICY } from "./workflow.js";
+import { ASSET_UPLOAD_POLICY, type RunProvenance } from "./workflow.js";
 
 export const helpText = `
 exodus video — make an ad from a Show, pull every piece, upload your cut
@@ -255,6 +255,13 @@ export interface VideoRun {
   pausedNodeId?: string;
   nodes: VideoRunNode[];
   castLock?: PullCastLock | null;
+  /**
+   * #1869: whose saved format rules this run followed (`runProvenance`). Read
+   * as-is and written straight into the pull manifest — it is names, ids and a
+   * version, never the rules themselves. Absent on a run that followed none and
+   * on every backend older than #1869.
+   */
+  provenance?: RunProvenance;
   /** The saved workflow this run executed (`projectRun`, convex/workflows.ts). */
   workflowId?: string;
   /** #1851: set only when the run's workflow row is module-owned, which is what
@@ -636,6 +643,9 @@ export interface ManifestCastRef {
    *  clips keep the voice the video model invents. */
   voiceId: string | null;
   voiceLabel: string | null;
+  /** #1869: how this character is meant to SOUND, in words, on a run whose video
+   *  model speaks the lines itself. Null when nobody wrote one. */
+  voiceDescription: string | null;
 }
 
 export interface VideoManifest {
@@ -650,6 +660,11 @@ export interface VideoManifest {
   narration: { file: string; timing: string } | null;
   scenes: ManifestScene[];
   failed: PullFailure[];
+  /**
+   * #1869: the record of which rulebook made this cut. Written only when the
+   * run carried one, so a manifest from a run that followed none is unchanged.
+   */
+  provenance?: RunProvenance;
 }
 
 export const CAST_LEDGER_BASE = 910000;
@@ -732,14 +747,22 @@ function reservedCastFrames(items: NodeItem[]): Map<number, NodeItem> {
   return byIndex;
 }
 
-/** #1845: the voice pinned to each character, keyed by character id. The pins
- *  live on the storyboard envelope's `cast[]` (convex/lib/workflow/castVoices.ts),
- *  not on the cast lock, so they are read off the storyboard artifact the pull
- *  already has. A storyboard that never carried a cast yields nothing. */
+/** What one character's voice is, as the storyboard records it: the #1845
+ *  pinned ElevenLabs voice, the #1869 written one, or both. */
+interface CastVoiceRecord {
+  voiceId: string | null;
+  voiceLabel: string | null;
+  voiceDescription: string | null;
+}
+
+/** #1845/#1869: each character's voice, keyed by character id. It lives on the
+ *  storyboard envelope's `cast[]` (convex/lib/workflow/castVoices.ts), not on
+ *  the cast lock, so it is read off the storyboard artifact the pull already
+ *  has. A storyboard that never carried a cast yields nothing. */
 function castVoicePins(
   artifact: Extract<ArtifactSubset, { type: "storyboard" }> | undefined,
-): Map<string, { voiceId: string; voiceLabel: string | null }> {
-  const pins = new Map<string, { voiceId: string; voiceLabel: string | null }>();
+): Map<string, CastVoiceRecord> {
+  const pins = new Map<string, CastVoiceRecord>();
   let envelope: unknown = artifact?.storyboard;
   if (envelope === undefined && typeof artifact?.storyboardJson === "string") {
     try {
@@ -753,9 +776,15 @@ function castVoicePins(
   for (const member of cast as Array<Record<string, unknown>>) {
     const characterId = typeof member.characterId === "string" ? member.characterId.trim() : "";
     const voiceId = typeof member.voiceId === "string" ? member.voiceId.trim() : "";
-    if (!characterId || !voiceId) continue;
+    const description =
+      typeof member.voiceDescription === "string" ? member.voiceDescription.trim() : "";
+    if (!characterId || (!voiceId && !description)) continue;
     const label = typeof member.voiceLabel === "string" ? member.voiceLabel.trim() : "";
-    pins.set(characterId, { voiceId, voiceLabel: label ? label : null });
+    pins.set(characterId, {
+      voiceId: voiceId ? voiceId : null,
+      voiceLabel: voiceId && label ? label : null,
+      voiceDescription: description ? description : null,
+    });
   }
   return pins;
 }
@@ -763,7 +792,7 @@ function castVoicePins(
 function planCastRefs(
   run: VideoRun,
   items: NodeItem[],
-  pins: Map<string, { voiceId: string; voiceLabel: string | null }>,
+  pins: Map<string, CastVoiceRecord>,
 ): { cast: ManifestCastRef[]; downloads: PullDownload[] } {
   const ledger = reservedCastFrames(items);
   const ledgerRows = [...ledger.entries()].sort(([a], [b]) => a - b);
@@ -848,6 +877,7 @@ function planCastRefs(
       error: row.error,
       voiceId: pin?.voiceId ?? null,
       voiceLabel: pin?.voiceLabel ?? null,
+      voiceDescription: pin?.voiceDescription ?? null,
     });
     if (file && row.url) downloads.push({ file, url: row.url });
   }
@@ -1090,6 +1120,9 @@ export function planPull(
         : null,
       scenes,
       failed: [],
+      ...(run.provenance?.format || run.provenance?.voice
+        ? { provenance: run.provenance }
+        : {}),
     },
   };
 }
@@ -2032,6 +2065,9 @@ export interface CastVoiceRow {
     | { state: "available"; providerName: string }
     | { state: "missing" }
     | { state: "not-checked"; why: string };
+  /** #1869: this character's WRITTEN voice, on a run whose video model speaks
+   *  the lines itself. Absent when nobody wrote one. */
+  description?: string;
   spokenScenes: number;
   spokenSeconds: number;
 }
@@ -2043,6 +2079,20 @@ export interface CastVoiceSheet {
   cast: CastVoiceRow[];
   narrator: { voiceId: string; label?: string } | null;
   treatment: {
+    /**
+     * #1869: what happens to a pinned voice, and which setting decided. Both
+     * optional to READ — a backend older than #1869 sends neither `path` nor,
+     * before it, `kind`, and the sheet then prints only the summary sentence.
+     */
+    kind?: string;
+    path?: string | null;
+    /**
+     * #1869: whether ANYTHING on this run still goes to ElevenLabs. A run whose
+     * cast is voiced by the video model can still have its narration recorded
+     * there, and that is the bill. Optional to READ: a backend older than #1869
+     * sends nothing and the cost line prints as it always did.
+     */
+    usesElevenLabs?: boolean;
     summary: string;
     provider: string;
     model: string;
@@ -2138,7 +2188,9 @@ export async function voicesFlow(
 }
 
 function availabilityWords(row: CastVoiceRow): string {
-  if (!row.voice) return "no voice yet";
+  // #1869: a character with a written voice HAS a voice — it is just not one
+  // ElevenLabs holds, so "no voice yet" would be flatly wrong.
+  if (!row.voice) return row.description ? "voice written below" : "no voice yet";
   switch (row.availability?.state) {
     case "available":
       return "ElevenLabs has it";
@@ -2181,6 +2233,10 @@ function voiceSummaryLines(cast: CastVoiceRow[], notices: string[]): string[] {
 
 export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
   const lines = [`Voices for run ${sheet.runId}`];
+  // #1869: name the way this run makes its voices, when the server says which.
+  if (typeof sheet.treatment.path === "string" && sheet.treatment.path !== "") {
+    lines.push(`  Treatment: ${sheet.treatment.path}`);
+  }
   if (sheet.cast.length === 0) lines.push("  Nobody is in this ad yet.");
   for (const row of sheet.cast) {
     const voice = voiceWords(row);
@@ -2188,6 +2244,9 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
       `  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
         `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`,
     );
+    // #1869: a written voice is the whole answer on a described run, so it gets
+    // its own line rather than being squeezed into the row above.
+    if (row.description) lines.push(`      written voice: ${row.description}`);
   }
   if (sheet.narrator) {
     const label = sheet.narrator.label ? `${sheet.narrator.label} ` : "";
@@ -2201,11 +2260,24 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
     );
   }
   lines.push(`How voices are applied: ${sheet.treatment.summary}${sheet.treatment.speedChange ? "" : " No speed change."}`);
-  lines.push(
-    `Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
-      `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
-      `${sheet.treatment.usage.clips} clips will be converted.`,
-  );
+  // #1869: `usage` counts the clips the CONVERSION leg re-performs, and a run
+  // whose voices the render owns converts none of them — so on a described run
+  // those counters are zero and printing them would read as "this costs
+  // nothing" next to a narration bill that is very real. An older backend sends
+  // neither field, and then this prints exactly as it always did.
+  const rendersOwnVoice = sheet.treatment.kind === "render-owns-voice";
+  if (!rendersOwnVoice || sheet.treatment.usesElevenLabs === undefined) {
+    lines.push(
+      `Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
+        `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
+        `${sheet.treatment.usage.clips} clips will be converted.`,
+    );
+  } else if (sheet.treatment.usesElevenLabs) {
+    lines.push(
+      "Cost: the narration on this run is voiced by ElevenLabs and billed to your own key. " +
+        `${sheet.treatment.costNote} The clips themselves are not converted.`,
+    );
+  }
   for (const notice of sheet.notices) lines.push(notice);
   lines.push(
     sheet.canChange

@@ -215,6 +215,13 @@ Representative commands:
   exodus session list | show | chat
   exodus bank list | show <key> | promote <key>
 Every workflow/session/bank verb takes --json — that output is the machine API.
+
+A video workflow whose Rig box points at a rig with saved format rules follows
+them — how many speakers the script may have, which checks run, how the cast is
+built. The start receipt and `workflow status` name the rulebook and its version;
+`video pull` writes the same facts into manifest.json. Every Rig box in the
+workflow has to point at the same saved rig, or the launch refuses and nothing
+is spent.
 ```
 
 ---
@@ -247,10 +254,14 @@ Returns: a table, --json data, or an exported CSV/JSON file
 
 **What it does:** Makes a video ad from a script, in pieces. Main path is a saved video workflow with no Show (`exodus workflow run <name> --input <field>=@script.txt`); a locked Show (`exodus video start --show`) is the other way in and is the only route with `video flag`. On the workflow route the run stops for your cut only if its video node sets `finalWatch: true` (defaults to off — check with `exodus workflow export`, not `describe`), and video gates are approved with `exodus video approve`, not `workflow checkpoint approve`. Either way the run writes the storyboard, draws a picture per scene, records the voice, renders a clip per scene and generates a music bed, then parks for a cut. The CLI pulls the pieces to a folder with a `manifest.json`; you cut them in whatever editor you use; the upload attaches the cut for approval. Admin-only.
 
+**Voices, on the workflow route.** Two separate choices, both made when the run starts and both refused before the run is created if anything is wrong, so a mistake costs nothing. `--voices @voices.json` says WHICH ElevenLabs voice each speaker gets, keyed by the names the script uses (`HOST 1`) — the same file `exodus video voices <run> --from` reads at the review, so one file per brand serves both moments. `--voice-treatment` says HOW the voices are made: a name on its own for a way of working that plays a voice you picked, or a `voice-treatment.json` shaped `{"path": "...", "describe": {"HOST 1": "Dry, tired baritone."}}` for the ways where the video model speaks the CAST's lines itself in voices you WROTE. A written voice needs one description per speaker, and it cannot be changed at the storyboard review — that is what the flag at launch is for. The two never combine: written voices plus `--voices` is refused, because those ElevenLabs voices would be paid for and never heard. A written voice covers the CAST's lines only: a narrated scene is still recorded by ElevenLabs on the member's own key, so a script with `NARRATOR:` turns still needs the key and still costs ElevenLabs money. Ways of working beyond the two shipped ones are switched on only on the test stack while they are being tried out.
+
 ```operator-guide
 Start (workflow route, no Show):
   exodus workflow list / describe <name>                               find it and see what it needs
   exodus workflow run <workflowId|name> --input <field>=@script.txt [--wait]   start it; --wait stops at the storyboard gate
+  exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voices.json   ... and give each speaker an ElevenLabs voice up front
+  exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json   ... or have the video model speak voices you WROTE
 Start (Show route):
   exodus video shows [--json]                                          Shows and whether each is ready
   exodus video start --show <id> --script <file> [--wait] [--json]     start an ad run; --wait stops at the storyboard gate

@@ -20,7 +20,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--voice-treatment <name|json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--json]
   exodus workflow status --id <runId> [--out <dir>] [--json]
   exodus workflow cancel <runId> [--reason "..."] [--json]
@@ -102,6 +102,29 @@ Flags:
                          <run>" at the storyboard review instead. Voice ids
                          belong to the brand's own folder — never put them in a
                          shared workflow or template.
+  --voice-treatment <v>  (run) Say HOW this run makes its voices. Two kinds of
+                         answer. A name on its own picks a way of working that
+                         uses voices you already have:
+                           --voice-treatment sts-revoice
+                           --voice-treatment lipsync-retarget --voices @voices.json
+                         The other kind has the video model speak the lines
+                         itself, in a voice you WRITE instead of one you pick.
+                         Those need a description for every speaker in your
+                         script, so they take a JSON object, or @path to a .json
+                         file holding one:
+                           --voice-treatment @voice-treatment.json
+                           --voice-treatment '{"path":"native-prompt","describe":{"HOST 1":"Dry, tired baritone."}}'
+                         Written voices and --voices are never used together:
+                         the video model owns the voice on those runs, so
+                         ElevenLabs voices would be paid for and never heard,
+                         and asking for both stops the launch. Anything the run
+                         could not actually do — a treatment this stack has not
+                         switched on, a Video step on a model that cannot do it,
+                         a missing key, a rig that shows every line as on-screen
+                         text — stops the launch before the run is created, and
+                         the message says which. Descriptions are chosen HERE,
+                         at the start: "exodus video voices <run>" shows them at
+                         the review but cannot change them.
   --auto-approve         (run) Deliberately unattended launch: every Checkpoint
                          box this run stops at is approved automatically, with
                          whatever it was holding left exactly as it is, and the
@@ -194,6 +217,7 @@ Examples:
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
   exodus workflow run "Podcast Ad" --input script=@script.txt --voices @voices.json --wait
+  exodus workflow run "Podcast Ad" --input script=@script.txt --voice-treatment @voice-treatment.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status                      # recent runs + their ids
   exodus workflow status --id wr_123
@@ -268,6 +292,20 @@ Notes:
   no speaker names to key on at the start, so it is refused with a pointer at
   the review-time command. Keep voice ids in the brand's own folder, never in a
   shared workflow or template. (#1846)
+  "workflow run --voice-treatment" says HOW a run makes its voices. Some ways of
+  working play a voice you picked (that is today's behaviour, and it still takes
+  --voices); others have the video model speak the CAST's lines itself, in voices
+  you describe in words. A described voice needs one description per speaker,
+  because a speaker nobody described gets a voice the model invents afresh on
+  every clip, and the drift only shows up once the clips are paid for. Written
+  voices and --voices are refused together, since the ElevenLabs voices would
+  never be heard. Everything the run could not do — a way of working this stack
+  has not switched on, a Video step whose model cannot do it, a missing key, a
+  rig that shows every line as on-screen text — stops the launch before the run
+  is created. The ways of working beyond the two shipped ones are switched on
+  only on the test stack while they are being tried out, so a live run refuses
+  them by name. Both the launch receipt and "workflow status" say which way a
+  run took, and "exodus video voices <run>" shows each written voice. (#1869)
   workflow triggers are addressed by 1-based position — a trigger carries no id,
   so the CLI reads the live list from the export contract and sends a fingerprint
   of the trigger's fields as the guard; a concurrent edit fails loud rather than
@@ -310,6 +348,24 @@ Notes:
   ids it wants). The "gate" verbs retired in 2.0 along with the Gate node — the
   command now prints a pointer at "checkpoint" and exits 1.
 `.trim();
+export function formatRulesLine(provenance) {
+    const format = provenance?.format;
+    if (!format || typeof format !== "object")
+        return undefined;
+    const { rigName, specVersion, nodeId, rulesFrom } = format;
+    if (typeof rigName !== "string" || rigName === "")
+        return undefined;
+    const version = typeof specVersion === "string" && specVersion !== ""
+        ? `, version ${specVersion}`
+        : "";
+    const where = typeof nodeId === "string" && nodeId !== ""
+        ? ` (from the "${nodeId}" Rig box)`
+        : " (from the Show's rig)";
+    const borrowed = rulesFrom && typeof rulesFrom.rigName === "string"
+        ? ` The rules come from "${rulesFrom.rigName}".`
+        : "";
+    return `Format rules: ${rigName}${version}${where}.${borrowed}`;
+}
 const LIST_PATH = "/api/v2/workflows";
 const RUN_PATH = "/api/v2/workflows/run";
 const STATUS_PATH = "/api/v2/workflow";
@@ -354,6 +410,7 @@ const VALUE_FLAGS = new Set([
     "reject",
     "rig-overrides",
     "voices",
+    "voice-treatment",
     "note",
 ]);
 function defaultMkdirp(dir) {
@@ -976,6 +1033,57 @@ export function parseVoicesFlag(occurrences, readFile) {
     }
     return parsed;
 }
+export function parseVoiceTreatmentFlag(occurrences, readFile) {
+    const usage = "--voice-treatment requires a treatment name, JSON, or @path/to/voice-treatment.json";
+    let raw;
+    for (const { flag, value } of occurrences) {
+        if (flag !== "voice-treatment")
+            continue;
+        if (value === undefined || value.startsWith("--"))
+            throw new Error(usage);
+        raw = value;
+    }
+    if (raw === undefined)
+        return undefined;
+    let text = raw.trim();
+    if (!text)
+        throw new Error(usage);
+    let fromFile = false;
+    if (text.startsWith("@@")) {
+        text = text.slice(1);
+    }
+    else if (text.startsWith("@")) {
+        const filePath = text.slice(1);
+        if (!filePath) {
+            throw new Error("--voice-treatment @<file> needs a file path after \"@\"");
+        }
+        if (!readFile) {
+            throw new Error(`--voice-treatment: cannot load @${filePath} here (no file access)`);
+        }
+        try {
+            text = readFile(filePath);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`--voice-treatment: could not read file "${filePath}": ${msg}`);
+        }
+        fromFile = true;
+    }
+    if (!fromFile && !text.startsWith("{"))
+        return { path: text };
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`--voice-treatment is not valid JSON: ${msg}`);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error('--voice-treatment must be a treatment name, or a JSON object like {"path":"native-prompt","describe":{"HOST 1":"..."}}');
+    }
+    return parsed;
+}
 export function parseFillFlag(occurrences) {
     let name;
     for (const { flag, value } of occurrences) {
@@ -1095,6 +1203,12 @@ export function formatWorkflowRun(run) {
     lines.push(`status:       ${runVerdict(run)}${counts ? ` (${counts})` : ""}`);
     if (run.isTerminal)
         lines.push("terminal:     yes");
+    const rulesLine = formatRulesLine(run.provenance);
+    if (rulesLine)
+        lines.push(rulesLine);
+    const treatmentLine = voiceTreatmentLine(run.provenance);
+    if (treatmentLine)
+        lines.push(treatmentLine);
     if (run.error)
         lines.push(`error:        ${run.error}`);
     if (Object.keys(run.inputs ?? {}).length > 0) {
@@ -1786,6 +1900,23 @@ function launchVoicesLine(attached) {
     }
     return said.length > 0 ? `Voices: ${said.join(", ")}` : undefined;
 }
+export function voiceTreatmentLine(provenance) {
+    const voice = provenance?.voice;
+    if (!voice || typeof voice !== "object")
+        return undefined;
+    if (voice.source === "unreadable") {
+        return ("Voice treatment: the setting saved when this run started cannot be read, so no " +
+            "clip will be made. Start the run again.");
+    }
+    const path = voice.path;
+    if (typeof path !== "string" || path === "")
+        return undefined;
+    const where = voice.source === "show" ? "from its Show" : "chosen at launch";
+    const described = voice.source === "launch" && Array.isArray(voice.descriptions) && voice.descriptions.length > 0
+        ? `. Written voices: ${voice.descriptions.map((d) => d.speaker).join(", ")}`
+        : "";
+    return `Voice treatment: ${path} (${where})${described}`;
+}
 export async function runFlow(workflowRef, opts, deps) {
     let workflowId;
     try {
@@ -1829,6 +1960,7 @@ export async function runFlow(workflowRef, opts, deps) {
         ...(opts.autoApprove === true ? { autoApprove: true } : {}),
         ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
         ...(opts.voices ? { voices: opts.voices } : {}),
+        ...(opts.voiceTreatment ? { voiceTreatment: opts.voiceTreatment } : {}),
         launchedVia: "cli",
     };
     const start = await deps.post(RUN_PATH, body);
@@ -1843,6 +1975,12 @@ export async function runFlow(workflowRef, opts, deps) {
     if (opts.json && !opts.wait)
         return { code: 0, lines: [JSON.stringify(base)] };
     const voicesLine = launchVoicesLine(data?.launchVoices);
+    const provenance = { format: data?.format ?? null, voice: data?.voice ?? null };
+    const rulesLine = formatRulesLine(provenance);
+    const treatmentLine = voiceTreatmentLine(provenance);
+    const advisories = Array.isArray(data?.advisories)
+        ? data.advisories.filter((line) => typeof line === "string")
+        : [];
     const lines = opts.json
         ? []
         : [
@@ -1850,7 +1988,10 @@ export async function runFlow(workflowRef, opts, deps) {
             "Workflow run started.",
             `runId:        ${data.runId}`,
             `triggerRunId: ${data.triggerRunId}`,
+            ...(rulesLine ? [rulesLine] : []),
+            ...advisories,
             ...(voicesLine ? [voicesLine] : []),
+            ...(treatmentLine ? [treatmentLine] : []),
             `Poll: exodus workflow status --id ${data.runId}`,
         ];
     if (!opts.wait) {
@@ -2957,7 +3098,7 @@ export async function run(flags, occurrences) {
         const workflowRef = rest[0];
         if (!workflowRef) {
             console.error("Error: workflow run requires <workflowId|name>.");
-            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--json]");
+            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--voice-treatment <name|json|@file>] [--auto-approve] [--wait] [--json]");
             process.exit(1);
         }
         let inputs;
@@ -2965,6 +3106,7 @@ export async function run(flags, occurrences) {
         let autoApprove;
         let imageRigOverrides;
         let voices;
+        let voiceTreatment;
         try {
             inputs = parseRawInputFlags(occurrences);
             rejectTerminalFlag(occurrences);
@@ -2972,6 +3114,7 @@ export async function run(flags, occurrences) {
             autoApprove = parseAutoApproveFlag(process.argv.slice(3));
             imageRigOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
             voices = parseVoicesFlag(occurrences, defaultDeps.readFile);
+            voiceTreatment = parseVoiceTreatmentFlag(occurrences, defaultDeps.readFile);
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -2983,6 +3126,7 @@ export async function run(flags, occurrences) {
             autoApprove,
             imageRigOverrides,
             voices,
+            voiceTreatment,
             wait: flags["wait"] === true,
             json,
             out: flagString(flags, "out"),

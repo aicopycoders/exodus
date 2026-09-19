@@ -8,7 +8,7 @@ Core — discover & run:
   exodus workflow list [--json]                              List the brand's saved workflows
   exodus workflow describe <workflowId|name> [--json]        Inputs, prerequisites, outputs
   exodus workflow bots [--category <cat>] [--slug <slug>] [--json]   Bot catalog / one bot's spec
-  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
+  exodus workflow run <workflowId|name> [--input key=value ...] [--fill <name>] [--voices <json|@file>] [--voice-treatment <name|json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]   Run it
   exodus workflow status [--id <runId>] [--out <dir>] [--json]   Poll a run / read its outputs (no --id → the brand's 25 newest runs + their ids)
   exodus workflow cancel <runId> [--reason "..."] [--json]   Stop a run that hasn't finished — queued, running, or parked
   exodus workflow export <workflowId|name> [--version <n>] [--out <file>] [--json]   Dump the contract (YAML)
@@ -51,6 +51,24 @@ Flag notes that add agent-level guidance (everything else is in --help):
                        earlier upload is relayed as-is. Accepted: image PNG/JPEG/
                        WebP/GIF ≤15MB, video MP4/MOV/WebM ≤200MB, audio MP3/M4A/
                        WAV/OGG ≤50MB, document PDF/TXT/MD/DOC/DOCX ≤25MB.
+  --voices <v>         (run, video workflows) Give each speaker in the script an
+                       ElevenLabs voice from the moment the run starts, instead
+                       of at the storyboard review. A JSON object keyed by the
+                       names the SCRIPT uses ("HOST 1"), or @path to a file
+                       holding one — the same voices.json "exodus video voices
+                       <run> --from" reads, so a brand keeps one file for both.
+  --voice-treatment <v>  (run, video workflows) Say HOW the run makes its voices.
+                       A name on its own picks a way of working that plays a
+                       voice you already have (and still takes --voices); a JSON
+                       object, or @path to one, shaped {"path": "...",
+                       "describe": {"HOST 1": "..."}} has the video model speak
+                       the lines itself in a voice you WROTE, one description per
+                       speaker. Written voices and --voices are refused together:
+                       the ElevenLabs voices would be paid for and never heard.
+                       Chosen at launch only — the storyboard review can show a
+                       written voice but cannot change it. Anything the run could
+                       not do stops the launch before the run exists. The full
+                       flow is in the exodus-video skill.
   --auto-approve       (run) Send this ONE run off unattended: every Checkpoint it
                        reaches is approved for you, exactly as it stands, and the
                        run records that nobody looked. Without it a Checkpoint
@@ -144,6 +162,20 @@ Accepts a workflow id **or** a name. It reports three things:
 Fill every required input. For a free-text brief you can compose a **bespoke brief from in-session research** — the winning angle you just worked out, the swipe you analyzed — and pass it inline (`--input brief="..."`) or, if it's long, write it to a project file and pass it with `@file` (see Chain, below). For URL/swipe sources, pass the value the source expects.
 
 **A brief wired straight into a Storyboard is a script, not a prompt.** On a video workflow whose Storyboard takes its `script` port from a Brief node, the text you pass for that brief boards VERBATIM, the same way a Show ad's pasted script does: one speaker per scene, every line rendered once in order, long lines split across clips, narrated lines rendered silent under the voice track. So it must be in the script form the `exodus-video` skill documents (an optional `CAST:` block of `NAME — description` lines, then `NAME:` turns, then a `CTA:` block; `NARRATOR:` lines only for Narrated Story and Explainer). A brief that is not a script, or one that does not fit the wired rig's family, is refused at launch with the parser's own message and nothing is spent. Write the script to a file and pass it with `--input script=@script.txt`. A Storyboard fed by a bot is unaffected.
+
+**A saved rig can bring a rulebook with it.** Some saved rigs carry saved format rules: how many speakers the script may have, which checks run on the clips, how the cast is built. Point a Rig box at one of those rigs and the run follows its rules — an ensemble rig seats more speakers than the usual three, a talking-head rig seats one. The start receipt says which rulebook ran:
+
+```
+Format rules: Ensemble Talking Head, version ensemble-e1-provisional-2026-07 (from the "rig_1" Rig box).
+```
+
+`workflow status` says the same line later, and `video pull` writes the same facts into `manifest.json` under `provenance`. Nothing prints the rules themselves — they are the house's, not the brand's — only whose they were and which version ran.
+
+Three things to know before you wire one:
+
+- **One run, one rulebook.** If any Rig box's rig carries rules, every Rig box in the workflow has to point at that same saved rig. A second box on a different rig, or a box with its knobs set in place, refuses the launch with a sentence naming every box. Nothing is spent.
+- **Some rulebooks aren't released yet.** A rig that is still being built refuses a member's launch and names itself. Only an admin can start a run on one. Duplicating that rig doesn't get around it — the copy still reads the original's rules, so the answer is the same.
+- **The rig's video model is advice, not a change.** When the rig is normally filmed with a different video model than the one your Video step is set to, the receipt says so in one line and the run uses YOUR setting. Change the Video step yourself if you want the rig's.
 
 For an **`asset` (file) input, pass the path to a local file** and the CLI does the uploading for you — mint, push the bytes, register, then start the run with the stored asset:
 

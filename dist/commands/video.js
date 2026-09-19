@@ -407,10 +407,15 @@ function castVoicePins(artifact) {
     for (const member of cast) {
         const characterId = typeof member.characterId === "string" ? member.characterId.trim() : "";
         const voiceId = typeof member.voiceId === "string" ? member.voiceId.trim() : "";
-        if (!characterId || !voiceId)
+        const description = typeof member.voiceDescription === "string" ? member.voiceDescription.trim() : "";
+        if (!characterId || (!voiceId && !description))
             continue;
         const label = typeof member.voiceLabel === "string" ? member.voiceLabel.trim() : "";
-        pins.set(characterId, { voiceId, voiceLabel: label ? label : null });
+        pins.set(characterId, {
+            voiceId: voiceId ? voiceId : null,
+            voiceLabel: voiceId && label ? label : null,
+            voiceDescription: description ? description : null,
+        });
     }
     return pins;
 }
@@ -487,6 +492,7 @@ function planCastRefs(run, items, pins) {
             error: row.error,
             voiceId: pin?.voiceId ?? null,
             voiceLabel: pin?.voiceLabel ?? null,
+            voiceDescription: pin?.voiceDescription ?? null,
         });
         if (file && row.url)
             downloads.push({ file, url: row.url });
@@ -701,6 +707,9 @@ export function planPull(run, items, opts) {
                 : null,
             scenes,
             failed: [],
+            ...(run.provenance?.format || run.provenance?.voice
+                ? { provenance: run.provenance }
+                : {}),
         },
     };
 }
@@ -1500,7 +1509,7 @@ export async function voicesFlow(runId, voices, json, deps) {
 }
 function availabilityWords(row) {
     if (!row.voice)
-        return "no voice yet";
+        return row.description ? "voice written below" : "no voice yet";
     switch (row.availability?.state) {
         case "available":
             return "ElevenLabs has it";
@@ -1534,12 +1543,17 @@ function voiceSummaryLines(cast, notices) {
 }
 export function voiceSheetLines(sheet) {
     const lines = [`Voices for run ${sheet.runId}`];
+    if (typeof sheet.treatment.path === "string" && sheet.treatment.path !== "") {
+        lines.push(`  Treatment: ${sheet.treatment.path}`);
+    }
     if (sheet.cast.length === 0)
         lines.push("  Nobody is in this ad yet.");
     for (const row of sheet.cast) {
         const voice = voiceWords(row);
         lines.push(`  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
             `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`);
+        if (row.description)
+            lines.push(`      written voice: ${row.description}`);
     }
     if (sheet.narrator) {
         const label = sheet.narrator.label ? `${sheet.narrator.label} ` : "";
@@ -1551,9 +1565,16 @@ export function voiceSheetLines(sheet) {
             : "Nothing changed — those voices were already set. Pictures and script were not touched.");
     }
     lines.push(`How voices are applied: ${sheet.treatment.summary}${sheet.treatment.speedChange ? "" : " No speed change."}`);
-    lines.push(`Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
-        `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
-        `${sheet.treatment.usage.clips} clips will be converted.`);
+    const rendersOwnVoice = sheet.treatment.kind === "render-owns-voice";
+    if (!rendersOwnVoice || sheet.treatment.usesElevenLabs === undefined) {
+        lines.push(`Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
+            `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
+            `${sheet.treatment.usage.clips} clips will be converted.`);
+    }
+    else if (sheet.treatment.usesElevenLabs) {
+        lines.push("Cost: the narration on this run is voiced by ElevenLabs and billed to your own key. " +
+            `${sheet.treatment.costNote} The clips themselves are not converted.`);
+    }
     for (const notice of sheet.notices)
         lines.push(notice);
     lines.push(sheet.canChange

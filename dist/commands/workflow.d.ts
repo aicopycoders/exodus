@@ -290,6 +290,11 @@ export interface WorkflowRunOutput {
     durationSec?: number;
     sceneIndex?: number;
     final?: boolean;
+    words?: Array<{
+        w: string;
+        s: number;
+        e: number;
+    }>;
     frames?: Array<{
         sceneIndex: number;
         imageUrl?: string;
@@ -347,6 +352,36 @@ export interface WorkflowPendingSlot {
     value?: string;
     hint?: string;
 }
+export interface RunFormatProvenance {
+    via: "show" | "rig-node";
+    nodeId?: string;
+    rigId: string;
+    rigName: string;
+    rulesFrom?: {
+        rigId: string;
+        rigName: string;
+    };
+    specVersion: string | null;
+}
+export type VoicePath = "sts-revoice" | "lipsync-retarget" | "native-prompt" | "omni-audio-ids" | "gemini-direct";
+export type RunVoiceProvenance = {
+    source: "show";
+    path: VoicePath;
+} | {
+    source: "launch";
+    path: VoicePath;
+    descriptions: {
+        speaker: string;
+        description: string;
+    }[];
+} | {
+    source: "unreadable";
+};
+export interface RunProvenance {
+    format: RunFormatProvenance | null;
+    voice: RunVoiceProvenance | null;
+}
+export declare function formatRulesLine(provenance: unknown): string | undefined;
 export interface WorkflowRun {
     _id: string;
     workflowId: string;
@@ -372,6 +407,7 @@ export interface WorkflowRun {
         nodeId: string;
         approvedAt: number;
     }[];
+    provenance?: RunProvenance;
 }
 export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & {
     nodes?: never;
@@ -410,6 +446,7 @@ interface RunFlowOptions {
     autoApprove?: boolean;
     imageRigOverrides?: Record<string, unknown>;
     voices?: VoiceMap;
+    voiceTreatment?: VoiceTreatmentBody;
     wait: boolean;
     json: boolean;
     out?: string;
@@ -431,6 +468,11 @@ export declare function rejectTerminalFlag(occurrences: FlagOccurrence[]): void;
 export declare function parseAutoApproveFlag(args: string[]): boolean;
 export declare function parseRigOverridesFlag(occurrences: FlagOccurrence[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
 export declare function parseVoicesFlag(occurrences: FlagOccurrence[], readFile?: (path: string) => string): VoiceMap | undefined;
+export interface VoiceTreatmentBody {
+    path: string;
+    describe?: Record<string, string>;
+}
+export declare function parseVoiceTreatmentFlag(occurrences: FlagOccurrence[], readFile?: (path: string) => string): VoiceTreatmentBody | undefined;
 export declare function parseFillFlag(occurrences: FlagOccurrence[]): string | undefined;
 export declare function formatWorkflowList(workflows: WorkflowListItem[]): string;
 export declare function formatRecentRuns(runs: WorkflowRunProjection[]): string;
@@ -464,6 +506,7 @@ export declare function botsFlow(opts: {
     slug?: string;
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
+export declare function voiceTreatmentLine(provenance: unknown): string | undefined;
 export declare function runFlow(workflowRef: string, opts: RunFlowOptions, deps: WorkflowRunDeps): Promise<FlowResult>;
 export declare function statusFlow(opts: {
     id?: string;

@@ -1,5 +1,6 @@
 import { type ApiResponse } from "../lib/client.js";
 import type { FlagOccurrence } from "../lib/args.js";
+import { type RunProvenance } from "./workflow.js";
 export declare const helpText: string;
 export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
@@ -100,6 +101,7 @@ export interface VideoRun {
     pausedNodeId?: string;
     nodes: VideoRunNode[];
     castLock?: PullCastLock | null;
+    provenance?: RunProvenance;
     workflowId?: string;
     moduleOwned?: boolean;
 }
@@ -225,6 +227,7 @@ export interface ManifestCastRef {
     error: string | null;
     voiceId: string | null;
     voiceLabel: string | null;
+    voiceDescription: string | null;
 }
 export interface VideoManifest {
     runId: string;
@@ -240,6 +243,7 @@ export interface VideoManifest {
     } | null;
     scenes: ManifestScene[];
     failed: PullFailure[];
+    provenance?: RunProvenance;
 }
 export declare const CAST_LEDGER_BASE = 910000;
 export interface PullPlan {
@@ -314,6 +318,7 @@ export interface CastVoiceRow {
         state: "not-checked";
         why: string;
     };
+    description?: string;
     spokenScenes: number;
     spokenSeconds: number;
 }
@@ -327,6 +332,9 @@ export interface CastVoiceSheet {
         label?: string;
     } | null;
     treatment: {
+        kind?: string;
+        path?: string | null;
+        usesElevenLabs?: boolean;
         summary: string;
         provider: string;
         model: string;

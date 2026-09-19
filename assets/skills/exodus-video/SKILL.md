@@ -77,6 +77,8 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --wait
                                                           start, stop at the storyboard gate
 exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voices.json --wait
                                                           same, with the brand's voices already chosen
+exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json --wait
+                                                          same, with the video model speaking voices you WROTE
 exodus video status <runId>                               where it is, per scene
 ```
 
@@ -256,6 +258,13 @@ CTA:
 THE SOFTGEL: Tap below and give your eyes ClearBlink.
 ```
 
+**How many speakers you may have depends on the rig.** Three by default. A rig
+that carries saved format rules sets its own number: an ensemble rig seats more,
+a talking-head rig seats one. Over the number, the launch refuses before
+anything is spent and says both figures ("4 speakers — this format supports 3").
+The rulebook the run followed is on the start receipt, on `workflow status`, and
+in `manifest.json` under `provenance`.
+
 ## Reading the storyboard gate
 
 `storyboard <runId>` prints one card per scene on both routes: who speaks, the
@@ -357,6 +366,88 @@ written by a bot is refused with a pointer at the review-time command, because
 nobody knows the speaker names yet. When the storyboard arrives, the voices are
 already set and `exodus video voices <runId>` shows them.
 
+**Choosing how the voices are made.** `--voice-treatment` on `workflow run` says
+HOW a run makes its voices, and it is the only door on the workflow route. Two
+kinds of answer.
+
+A name on its own picks a way of working that plays a voice you already have,
+and still pairs with `--voices`:
+
+```
+exodus workflow run "Podcast Ad" --input script=@script.txt \
+  --voice-treatment lipsync-retarget --voices @voices.json
+```
+
+The other kind has the video model speak the CAST's lines itself, in voices you
+WRITE. Those take a `voice-treatment.json`, which is the whole request body:
+
+```json
+{
+  "path": "native-prompt",
+  "describe": {
+    "BUDGET": "Dry, tired middle-aged baritone. Slight rasp. Deadpan, unhurried.",
+    "PIGGY BANK": "Bright quick alto, a little smug, crisp consonants."
+  }
+}
+```
+
+```
+exodus workflow run "Podcast Ad" --input script=@script.txt \
+  --voice-treatment @voice-treatment.json
+```
+
+Every speaker in the script needs a description. One left out gets a voice the
+model invents afresh on every clip, and that drift only shows up once the clips
+are paid for, so the launch refuses instead.
+
+**The narration is not part of this.** A describing treatment changes how the
+CAST's lines are voiced. A scene with narration (`voText`) is still recorded by
+ElevenLabs on the member's own key by the Voiceover step, exactly as it always
+was — so a run with `NARRATOR:` turns still needs an ElevenLabs key, and still
+costs ElevenLabs money. `exodus video voices <runId>` says which of the two
+shapes a run is, and only claims nothing is sent to ElevenLabs when nothing is.
+
+**What refuses, all before the run is created, so nothing is spent.**
+
+- A treatment name that does not exist. The message lists the ones that do.
+- A describing treatment with a speaker undescribed, a speaker the script does
+  not have, the same speaker described twice, or an empty description.
+- Written voices plus `--voices`. The video model owns the voice on those runs,
+  so the ElevenLabs voices would be paid for and never heard.
+- Descriptions on a treatment that plays voices you picked instead.
+- A workflow whose script is written by a bot. Nobody knows the speaker names
+  yet, so there is nothing to describe.
+- A workflow with no Video step, a Video step whose model cannot do what was
+  asked, or a Video step with nothing wired into its voiceover port when the
+  treatment needs one.
+- No Google AI key on the account, for the treatment that renders through
+  Google directly.
+- A rig that shows every line on screen as text. No clip speaks, so there is no
+  voice to treat.
+
+**Still being tested.** Everything beyond the two shipped ways of working is
+switched on only on the test stack while it is being tried out. On the live
+stack those names refuse by name, and the message says which two to use
+instead. That is a property of the stack, not of the workflow, so the same
+saved workflow behaves differently on each — and a retry asks again rather than
+copying, so a run retried after a treatment was switched off refuses.
+
+**A sub-workflow chooses none of this.** When a Call box runs another workflow
+inside this one, the child run carries no voice treatment: it renders the
+shipped default, whatever the parent was started with. A treatment is a choice a
+person made at a keyboard for one run, and nobody made it for the sub-workflow.
+
+**Written voices cannot be changed at the review.** They are chosen when the run
+starts. `exodus video voices <runId>` on a described run names the treatment and
+prints each written voice, and says plainly that `--voice-treatment` at launch is
+what changes them. Do not tell anyone to create a Show for this, and do not set a
+voice path in node config — neither is a door.
+
+**Where it shows up afterwards.** The launch receipt and `exodus workflow status`
+both print one line naming the treatment and the speakers who got a written
+voice. `manifest.json` from `exodus video pull` carries the same under
+`provenance.voice`, and each cast entry carries its `voiceDescription`.
+
 **The JSON receipt** (`--json`), the same shape for reading and for setting:
 
 ```
@@ -365,12 +456,15 @@ runId
 changed[]             the characters whose voice actually moved (set only)
 canChange             false once the run has left the storyboard review
 whyNot                why, in one sentence, when canChange is false
+treatment.path        which way of making voices this run froze, or null
+treatment.kind        "performance-then-conversion" or "render-owns-voice"
 cast[]                one per character
   characterId, name
   voice               { voiceId, label }: the voice this character's clips are
                       converted to. null only when they have no voice of their
                       own AND the run has no default voice
   voiceFrom           "own-pin" or "run-default"; absent when voice is null
+  description         the WRITTEN voice, when the run was given one
   availability        { state: "available" | "missing" | "not-checked", … }
   spokenScenes        how many scenes this character speaks in
   spokenSeconds       those scenes' planned seconds — what ElevenLabs bills on
@@ -456,6 +550,15 @@ scenes[]                             one per scene, in order
                                      on record when the voice pass replaced the
                                      clip with a new file; null when the clip IS
                                      that file, or there is no clip
+provenance                           which saved rulebook this run followed:
+                                     {format: {via, nodeId, rigId, rigName,
+                                     rulesFrom, specVersion}}. Absent when the
+                                     run followed none. `nodeId` is the Rig box
+                                     that chose it (absent on a Show ad, which
+                                     has no box); `rulesFrom` names the rig the
+                                     rules were borrowed from when the picked
+                                     rig is a copy. Names, ids and a version
+                                     only — never the rules themselves
 failed[]                             files that did not download: {file, url, error}
 ```
 
@@ -504,13 +607,16 @@ own ElevenLabs render.
 **Which scenes carry their voice where.** A scene whose storyboard entry has a
 non-empty `voText` is a narrator scene: its clip is rendered silent and the
 voice arrives as a separate track. A scene with on-camera `dialogue[]` has the
-speech inside the clip — under the default voice path the video model's invented
-voice is then replaced, in place, with the cast member's pinned ElevenLabs voice
-(that is `revoiced: true`). Other voice paths leave the render owning its own
-audio, e.g. lip-sync retargeting a VO track onto the video. The path is frozen
-on the run — `--voice-path` on `video start` sets it on a Show run, the node
-config sets it on a workflow run. Read `wordsFrom` and `revoiced` per scene
-rather than assuming.
+speech inside the clip — under the default voice treatment the video model's
+invented voice is then replaced, in place, with the cast member's pinned
+ElevenLabs voice (that is `revoiced: true`). Other treatments leave the render
+owning its own audio, e.g. lip-sync retargeting a VO track onto the video. The
+treatment is frozen on the run when it starts, and there are exactly two doors
+that set one: `--voice-path` on `video start` for a Show run, and
+`--voice-treatment` on `workflow run` for a workflow run (see **Choosing how the
+voices are made**). Node config is never a door — nothing on the canvas sets a
+voice treatment, and a run that was given none renders the default. Read
+`wordsFrom` and `revoiced` per scene rather than assuming.
 
 **Word timings** (`scene-NN.words.json`). Seconds from the start of the file
 `wordsFrom` names, always. `wordsFrom: "clip"` is an ElevenLabs Scribe
