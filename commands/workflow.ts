@@ -30,7 +30,14 @@ import { getChannel, type Channel } from "../lib/channel.js";
 // prints. video.ts imports ASSET_UPLOAD_POLICY from this module in return; both
 // sides only touch the other's exports inside function bodies, so the ESM
 // cycle never reads a binding before it is initialised.
-import { asVideoRun, classifyRun, stopLines, type RunStop } from "./video.js";
+import {
+  asVideoRun,
+  classifyRun,
+  reviewUrl,
+  stopLines,
+  type RunStop,
+  type VoiceMap,
+} from "./video.js";
 
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
@@ -42,7 +49,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--json]
   exodus workflow status --id <runId> [--out <dir>] [--json]
   exodus workflow cancel <runId> [--reason "..."] [--json]
@@ -105,6 +112,25 @@ Flags:
                          before anything runs, and the error names it. On
                          "triggers fire" it REPLACES the schedule's own
                          overrides for that one test fire.
+  --voices <json>        (run) Give the ad's characters their voices at the
+                         moment the run starts, instead of at the storyboard
+                         review. Keyed by the names the SCRIPT uses for its
+                         speakers ("HOST 1") — the planner's character ids
+                         (C1, C2) do not exist yet when a run starts. Takes a
+                         JSON object, or @path to a .json file holding one:
+                           --voices @voices.json
+                           --voices '{"HOST 1":"<voiceId>"}'
+                         Same file "exodus video voices <run> --from" reads at
+                         the review, so a brand keeps ONE voices.json for both.
+                         A speaker the script does not have, the same speaker
+                         named twice, or a voice ElevenLabs does not have stops
+                         the launch before the run is created — nothing is
+                         spent, and the message says which one. A workflow whose
+                         script is written by a bot (so nobody knows the speaker
+                         names at the start) is told to use "exodus video voices
+                         <run>" at the storyboard review instead. Voice ids
+                         belong to the brand's own folder — never put them in a
+                         shared workflow or template.
   --auto-approve         (run) Deliberately unattended launch: every Checkpoint
                          box this run stops at is approved automatically, with
                          whatever it was holding left exactly as it is, and the
@@ -196,6 +222,7 @@ Examples:
   exodus workflow run "Launch Flow" --auto-approve --wait
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
+  exodus workflow run "Podcast Ad" --input script=@script.txt --voices @voices.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status                      # recent runs + their ids
   exodus workflow status --id wr_123
@@ -257,6 +284,19 @@ Notes:
   message says which key was wrong. A trigger can carry the same payload in its
   YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
   Friday one can fire the same workflow at different sizes.
+  "workflow run --voices" hands a video run its voices at the start, so a brand
+  that always uses the same hosts stops choosing them by hand on every run. The
+  file is keyed by the names the script uses for its speakers, because that is
+  all that exists before the planner has run — it is the SAME voices.json
+  "exodus video voices <run> --from" reads at the storyboard review, so one file
+  per brand serves both moments. A speaker the script does not have, the same
+  speaker named twice, or a voice ElevenLabs does not have stops the launch
+  before the run exists and nothing is spent. When the storyboard is planned,
+  each named speaker's character already has their voice, and "exodus video
+  voices <run>" shows them set. A workflow whose script is written by a bot has
+  no speaker names to key on at the start, so it is refused with a pointer at
+  the review-time command. Keep voice ids in the brand's own folder, never in a
+  shared workflow or template. (#1846)
   workflow triggers are addressed by 1-based position — a trigger carries no id,
   so the CLI reads the live list from the export contract and sends a fingerprint
   of the trigger's fields as the guard; a concurrent edit fails loud rather than
@@ -1068,6 +1108,12 @@ interface WorkflowRunStartResponse {
    * a warning already said is dropped — see serverWarningsToPrint.
    */
   warnings?: string[];
+  /**
+   * #1846: the voices the server actually attached to this run, echoed back so
+   * the launch receipt can say them. An array (not a map) because a speaker
+   * name is free text and need not be ASCII.
+   */
+  launchVoices?: Array<{ speaker: string; voiceId: string; label?: string }>;
 }
 
 export interface WorkflowRunDeps {
@@ -1146,6 +1192,13 @@ interface RunFlowOptions {
    * undefined sends nothing at all, so an ordinary run's body is unchanged.
    */
   imageRigOverrides?: Record<string, unknown>;
+  /**
+   * #1846: the voices this run starts with, keyed by the script's speaker names
+   * (the planner's C1/C2 ids don't exist yet at launch). Already parsed from
+   * `--voices` (JSON or @file) by the time it lands here; undefined sends
+   * nothing at all, so an ordinary run's body is unchanged.
+   */
+  voices?: VoiceMap;
   wait: boolean;
   json: boolean;
   // #1002: with --wait, save the terminal run's delivered outputs into this dir.
@@ -1231,6 +1284,8 @@ const VALUE_FLAGS = new Set([
   "reject",
   // #1084 (F2): `workflow run <ref> --rig-overrides <json|@file>` takes a value.
   "rig-overrides",
+  // #1846: `workflow run <ref> --voices <json|@voices.json>` takes a value.
+  "voices",
   // #1144: `workflow checkpoint <runId> retry --note "..."` takes a value.
   "note",
 ]);
@@ -2228,6 +2283,77 @@ export function parseRigOverridesFlag(
     );
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Read the `--voices <json|@voices.json>` flag (#1846) off the raw argv — the
+ * voices a run carries from the moment it starts, keyed by the names the script
+ * gives its speakers ("HOST 1"), because the planner's character ids (C1, C2)
+ * do not exist yet. Same file `exodus video voices <run> --from` reads at the
+ * storyboard review, so a brand keeps one voices.json for both.
+ *
+ * Parsed HERE, before anything is requested, for the `--rig-overrides` reason: a
+ * JSON typo should cost a shell error, not a round trip. WHICH speakers and
+ * voices are real is the server's call — it holds the script and the member's
+ * ElevenLabs account — so this only insists the text is an object.
+ */
+export function parseVoicesFlag(
+  args: string[],
+  readFile?: (path: string) => string,
+): VoiceMap | undefined {
+  let raw: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    let value: string | undefined;
+    if (arg === "--voices") {
+      value = args[i + 1];
+      i++;
+    } else if (arg.startsWith("--voices=")) {
+      value = arg.slice("--voices=".length);
+    } else {
+      continue;
+    }
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--voices requires JSON or @path/to/voices.json");
+    }
+    // Last one wins, matching how the shared flags map treats a repeated flag.
+    raw = value;
+  }
+  if (raw === undefined) return undefined;
+
+  let text = raw.trim();
+  if (!text) throw new Error("--voices requires JSON or @path/to/voices.json");
+  if (text.startsWith("@@")) {
+    text = text.slice(1);
+  } else if (text.startsWith("@")) {
+    const filePath = text.slice(1);
+    if (!filePath) {
+      throw new Error("--voices @<file> needs a file path after \"@\"");
+    }
+    if (!readFile) {
+      throw new Error(`--voices: cannot load @${filePath} here (no file access)`);
+    }
+    try {
+      text = readFile(filePath);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`--voices: could not read file "${filePath}": ${msg}`);
+    }
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`--voices is not valid JSON: ${msg}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      "--voices must be a JSON object keyed by the script's speaker names, e.g. {\"HOST 1\":\"<voiceId>\"}",
+    );
+  }
+  return parsed as VoiceMap;
 }
 
 export function parseFillFlag(args: string[]): string | undefined {
@@ -3368,6 +3494,24 @@ export async function botsFlow(
   return { code: 0, lines: [formatBotsList(catalog, opts.category)] };
 }
 
+/**
+ * #1846: the one line a launch receipt says about the voices it attached. The
+ * label comes first because that is the word the member wrote in voices.json;
+ * the id is all there is when the file gave only an id and ElevenLabs could not
+ * be reached to name it. Read defensively — an older backend sends nothing.
+ */
+function launchVoicesLine(attached: unknown): string | undefined {
+  if (!Array.isArray(attached)) return undefined;
+  const said: string[] = [];
+  for (const raw of attached) {
+    if (!raw || typeof raw !== "object") continue;
+    const { speaker, voiceId, label } = raw as Record<string, unknown>;
+    if (typeof speaker !== "string" || typeof voiceId !== "string") continue;
+    said.push(`${speaker} → ${typeof label === "string" && label !== "" ? label : voiceId}`);
+  }
+  return said.length > 0 ? `Voices: ${said.join(", ")}` : undefined;
+}
+
 export async function runFlow(
   workflowRef: string,
   opts: RunFlowOptions,
@@ -3439,6 +3583,12 @@ export async function runFlow(
     // byte-identical to pre-#1084. The server judges what it points at — it is
     // the only side holding the graph — and answers with the exact key path.
     ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
+    // #1846: the voices this run starts with. A SIBLING of `inputs` for the
+    // same reason the rig re-aim is one — inputs are clamped to strings — and
+    // omitted when --voices wasn't passed. The server judges the speaker names
+    // against the script and the voice ids against the member's ElevenLabs
+    // account, and refuses before the run row exists, so nothing is spent.
+    ...(opts.voices ? { voices: opts.voices } : {}),
     // #1089: name the SURFACE this run was fired from so the Runs board's
     // Launched-via filter can tell a terminal launch from a script hitting the
     // same v2 route. Sent unconditionally (unlike the flags above) because it
@@ -3461,6 +3611,7 @@ export async function runFlow(
   const base = { ...data, workflowId };
   if (opts.json && !opts.wait) return { code: 0, lines: [JSON.stringify(base)] };
 
+  const voicesLine = launchVoicesLine(data?.launchVoices);
   const lines = opts.json
     ? []
     : [
@@ -3468,6 +3619,7 @@ export async function runFlow(
         "Workflow run started.",
         `runId:        ${data.runId}`,
         `triggerRunId: ${data.triggerRunId}`,
+        ...(voicesLine ? [voicesLine] : []),
         `Poll: exodus workflow status --id ${data.runId}`,
       ];
 
@@ -3726,7 +3878,13 @@ async function waitForRun(
   // exact "Parked: …" block `exodus video status` prints for that stop, so the
   // next command is named right here instead of the loop polling to timeout.
   if (videoStop) {
-    lines.push("", ...stopLines(videoStop, runId, deps.dashboardUrl ?? getDashboardUrl()));
+    // #1851: the link belongs to this run, so it is composed from the run the
+    // poll just read rather than from the dashboard root alone.
+    const review = reviewUrl(
+      deps.dashboardUrl ?? getDashboardUrl(),
+      asVideoRun(pollResult.data),
+    );
+    lines.push("", ...stopLines(videoStop, runId, review));
   }
 
   return { code: pollResult.ok ? 0 : 1, lines };
@@ -5311,7 +5469,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     if (!workflowRef) {
       console.error("Error: workflow run requires <workflowId|name>.");
       console.log(
-        "Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--auto-approve] [--wait] [--json]",
+        "Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--json]",
       );
       process.exit(1);
     }
@@ -5319,6 +5477,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     let fill: string | undefined;
     let autoApprove: boolean;
     let imageRigOverrides: Record<string, unknown> | undefined;
+    let voices: VoiceMap | undefined;
     try {
       // Stage 3B: parse RAW. runFlow expands `@path` text inputs and uploads
       // file inputs once describe has said which fields are which.
@@ -5341,6 +5500,9 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
         process.argv.slice(3),
         defaultDeps.readFile,
       );
+      // #1846: --voices is parsed here for the same reason — a typo in the
+      // brand's voices.json must cost a shell error, not a run.
+      voices = parseVoicesFlag(process.argv.slice(3), defaultDeps.readFile);
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -5359,6 +5521,8 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
           autoApprove,
           // #1084 (F2): the per-run Image Rig re-aim, parsed above.
           imageRigOverrides,
+          // #1846: the voices this run starts with, parsed above.
+          voices,
           wait: flags["wait"] === true,
           json,
           // #1002: --out saves the finished run's deliverables (needs --wait).

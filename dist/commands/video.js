@@ -40,6 +40,10 @@ The whole loop, in order:
   7. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
 
+     exodus video retry-clip <runId> --scene <n>
+       Redo ONE finished clip while the run waits for the cut. Everything
+       else stays. A --note steers the motion, never the words.
+
   8. Make your cut from those files.
 
   9. exodus video upload <runId> --file cut.mp4
@@ -56,6 +60,7 @@ Usage:
   exodus video approve <runId> [--json]
   exodus video flag <runId> --note "<what is wrong>" [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
+  exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
@@ -72,9 +77,12 @@ Options:
   --duration <sec>     How long your cut is, in seconds. Only needed when the
                        length can't be read off the file itself
   --note "<text>"      What is wrong with the storyboard (flag), or how to
-                       steer one frame redo (retry-frame)
-  --node <nodeId>      Which scene-frames node holds the still (retry-frame)
-  --scene <n>          Which scene's frame to redo. One scene only (retry-frame)
+                       steer one redo (retry-frame, retry-clip)
+  --node <nodeId>      Which scene-frames node holds the still (retry-frame).
+                       Which video step holds the clip, when a scene has one on
+                       more than one step (retry-clip)
+  --scene <n>          Which scene to redo. One scene only, a whole number
+                       (retry-frame, retry-clip)
   --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
                        character by its ID or by the name your script uses.
                        Repeat it once per character
@@ -93,6 +101,7 @@ Examples:
   exodus video storyboard run_123
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2
+  exodus video retry-clip run_123 --scene 3 --note "keep the handshake in frame"
   exodus video voices run_123
   exodus video voices run_123 --set C1=abc123voiceid --set "HOST 2=def456voiceid"
   exodus video voices run_123 --from voices.json
@@ -260,7 +269,14 @@ export function stepName(kind) {
         return "A step in this run";
     return STEP_NAMES[kind] ?? `The ${kind} step`;
 }
-export function stopLines(stop, runId, dashboardUrl) {
+export function reviewUrl(dashboardUrl, run) {
+    if (run.moduleOwned === true)
+        return `${dashboardUrl}/video?ad=${run._id}`;
+    if (run.workflowId)
+        return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
+    return `${dashboardUrl}/runs/${run._id}`;
+}
+export function stopLines(stop, runId, runUrl) {
     if (stop.at === "storyboard-gate") {
         const lines = [
             "Parked: the storyboard is waiting for your yes.",
@@ -278,6 +294,8 @@ export function stopLines(stop, runId, dashboardUrl) {
             "Parked: every piece is made and the run is waiting for a cut.",
             `Pull the pieces: exodus video pull ${runId} --out ./ad-${runId}`,
             `Then upload:     exodus video upload ${runId} --file cut.mp4`,
+            `Redo one clip:   exodus video retry-clip ${runId} --scene <n>`,
+            `Watch it here:   ${runUrl}`,
         ];
     }
     if (stop.at === "failed") {
@@ -285,7 +303,7 @@ export function stopLines(stop, runId, dashboardUrl) {
             return [
                 `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
                 `Try that step again: exodus workflow repair ${runId} retry`,
-                `Or open the run:     ${dashboardUrl}/video?ad=${runId}`,
+                `Or open the run:     ${runUrl}`,
             ];
         }
         return [
@@ -302,7 +320,7 @@ export function stopLines(stop, runId, dashboardUrl) {
     if (stop.at === "paused") {
         return [
             `Parked: this run is waiting on someone${stop.reason ? ` (${stop.reason})` : ""}.`,
-            `Open it: ${dashboardUrl}/video?ad=${runId}`,
+            `Open it: ${runUrl}`,
         ];
     }
     return [`Working: ${stageWord(stop.stage)}.`];
@@ -358,7 +376,31 @@ function reservedCastFrames(items) {
     }
     return byIndex;
 }
-function planCastRefs(run, items) {
+function castVoicePins(artifact) {
+    const pins = new Map();
+    let envelope = artifact?.storyboard;
+    if (envelope === undefined && typeof artifact?.storyboardJson === "string") {
+        try {
+            envelope = JSON.parse(artifact.storyboardJson);
+        }
+        catch {
+            return pins;
+        }
+    }
+    const cast = envelope?.cast;
+    if (!Array.isArray(cast))
+        return pins;
+    for (const member of cast) {
+        const characterId = typeof member.characterId === "string" ? member.characterId.trim() : "";
+        const voiceId = typeof member.voiceId === "string" ? member.voiceId.trim() : "";
+        if (!characterId || !voiceId)
+            continue;
+        const label = typeof member.voiceLabel === "string" ? member.voiceLabel.trim() : "";
+        pins.set(characterId, { voiceId, voiceLabel: label ? label : null });
+    }
+    return pins;
+}
+function planCastRefs(run, items, pins) {
     const ledger = reservedCastFrames(items);
     const ledgerRows = [...ledger.entries()].sort(([a], [b]) => a - b);
     const locked = run.castLock?.cast;
@@ -422,12 +464,15 @@ function planCastRefs(run, items) {
     const downloads = [];
     for (const row of rows) {
         const file = row.url ? `${row.stem}.${extFor(row.url, "image")}` : null;
+        const pin = row.characterId ? pins.get(row.characterId) : undefined;
         cast.push({
             characterId: row.characterId,
             name: row.name,
             file,
             status: row.status,
             error: row.error,
+            voiceId: pin?.voiceId ?? null,
+            voiceLabel: pin?.voiceLabel ?? null,
         });
         if (file && row.url)
             downloads.push({ file, url: row.url });
@@ -598,6 +643,11 @@ export function planPull(run, items, opts) {
             clip: clip?.download.file ?? null,
             words,
             wordsFrom,
+            wordsDescribe: wordsFrom === null
+                ? null
+                : clip?.revoiced === true && wordsFrom === "clip"
+                    ? "original-performance"
+                    : "this-file",
             voice: voice?.download.file ?? null,
             keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
             qc: clip?.qc ?? null,
@@ -610,7 +660,7 @@ export function planPull(run, items, opts) {
             keyframeFindings: frameItem?.findings?.map(withoutJudgeFields) ?? null,
         };
     });
-    const { cast, downloads: castDownloads } = planCastRefs(run, items);
+    const { cast, downloads: castDownloads } = planCastRefs(run, items, castVoicePins(storyboardArtifact));
     const downloads = [
         ...(reference ? [reference] : []),
         ...keyframeByScene.values(),
@@ -626,7 +676,7 @@ export function planPull(run, items, opts) {
         manifest: {
             runId: run._id,
             pulledAt: opts.pulledAt,
-            dashboardUrl: `${opts.dashboardUrl}/video?ad=${run._id}`,
+            dashboardUrl: reviewUrl(opts.dashboardUrl, run),
             storyboard,
             reference: reference?.file ?? null,
             music: music?.file ?? null,
@@ -668,6 +718,7 @@ export function markPullFailure(manifest, failure) {
         if (scene.words === failure.file || lostWordsSource) {
             scene.words = null;
             scene.wordsFrom = null;
+            scene.wordsDescribe = null;
         }
     }
 }
@@ -773,7 +824,7 @@ export async function startFlow(opts, deps) {
         return { code: 1, lines: ["The server started the ad but did not say which run it is."] };
     }
     const runId = started.runId;
-    const url = started.url ?? `${deps.dashboardUrl}/video?ad=${runId}`;
+    const url = started.url ?? reviewUrl(deps.dashboardUrl, { _id: runId });
     if (!opts.wait) {
         const lines = [
             `Started ad run ${runId}`,
@@ -826,7 +877,7 @@ export async function waitFlow(runId, opts, deps) {
         }
         return {
             code: stop.at === "failed" ? 1 : 0,
-            lines: [...lines, ...stopLines(stop, runId, deps.dashboardUrl)],
+            lines: [...lines, ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run))],
         };
     }
     const timeoutLine = `Still running after ${Math.round((maxPolls * interval) / 60000)} minutes. Check in with: exodus video status ${runId}`;
@@ -860,13 +911,22 @@ export async function statusFlow(runId, json, deps) {
     const items = itemsRes.data.items ?? [];
     const stop = classifyRun(run);
     const hasFinal = items.some((i) => i.itemKind === "final" && i.status === "done");
+    const warnings = run.nodes
+        .filter((n) => n.warning)
+        .map((n) => ({ nodeId: n.nodeId, step: n.kind, warning: n.warning }));
     if (json) {
-        return { code: 0, lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal })] };
+        return {
+            code: 0,
+            lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings })],
+        };
     }
     const revoicedByScene = new Set();
+    const timedOnOriginalVoice = new Set();
     for (const artifact of outputsOfNodeKind(run, "video")) {
         if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
             revoicedByScene.add(artifact.sceneIndex);
+            if ((artifact.words?.length ?? 0) > 0)
+                timedOnOriginalVoice.add(artifact.sceneIndex);
         }
     }
     const byScene = new Map();
@@ -886,7 +946,11 @@ export async function statusFlow(runId, json, deps) {
     const headline = stop.at === "failed" && stop.repair
         ? `Ad run ${runId} — Stopped, a step failed`
         : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
-    const lines = [headline, ...stopLines(stop, runId, deps.dashboardUrl)];
+    const lines = [
+        headline,
+        ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+        ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
+    ];
     if (byScene.size === 0) {
         lines.push("", "No scenes yet — this run hasn't made anything to look at.");
     }
@@ -909,6 +973,9 @@ export async function statusFlow(runId, json, deps) {
                 lines.push(`       ${row.clip.error}`);
             if (revoicedByScene.has(sceneIndex))
                 lines.push("       voice: cast voice applied");
+            if (timedOnOriginalVoice.has(sceneIndex)) {
+                lines.push("       word timings: measured on the original voice (close, not frame-exact)");
+            }
             for (const finding of row.frame?.findings ?? []) {
                 lines.push(`       picture: ${finding.code} (${finding.severity}): ${finding.detail}`);
             }
@@ -958,6 +1025,23 @@ export async function storyboardFlow(runId, json, deps) {
         for (const scene of loose)
             lines.push(...sceneCardLines(scene));
     }
+    const voiceRes = await deps
+        .get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`)
+        .catch(() => null);
+    if (voiceRes?.ok) {
+        const sheet = (voiceRes.data ?? {});
+        const cast = Array.isArray(sheet.cast) ? sheet.cast : [];
+        const canChange = sheet.canChange !== false;
+        if (canChange || cast.some((row) => row.voice !== null)) {
+            const summary = voiceSummaryLines(cast, Array.isArray(sheet.notices) ? sheet.notices : []);
+            if (summary.length > 0) {
+                lines.push("", ...summary);
+                if (canChange) {
+                    lines.push(`set voices with: exodus video voices ${runId} --set <character>=<voiceId>`);
+                }
+            }
+        }
+    }
     lines.push("", `approve with: exodus video approve ${runId}`, `send it back: exodus video flag ${runId} --note "what's wrong"`);
     if (cards.framesNodeId) {
         lines.push(`redo one frame: exodus video retry-frame ${runId} --node ${cards.framesNodeId} --scene <n>`);
@@ -992,10 +1076,16 @@ export async function approveFlow(runId, json, deps) {
         return errorResult(res, json);
     if (json)
         return { code: 0, lines: [JSON.stringify({ ok: true, runId, data: res.data })] };
+    const voices = res.data
+        ?.voices;
+    const summary = voices
+        ? voiceSummaryLines(Array.isArray(voices.cast) ? voices.cast : [], Array.isArray(voices.notices) ? voices.notices : [])
+        : [];
     return {
         code: 0,
         lines: [
             "Approved.",
+            ...(summary.length > 0 ? ["", ...summary, ""] : []),
             `See what happens next: exodus video status ${runId}`,
         ],
     };
@@ -1049,6 +1139,127 @@ export async function retryFrameFlow(runId, nodeId, sceneIndex, note, json, deps
             `Redoing scene ${sceneIndex} on ${nodeId}.`,
             `triggerRunId: ${triggerRunId ?? "-"}`,
             "Neighbours stay. The pixel gate holds.",
+        ],
+    };
+}
+const UPLOADED_CUT_WARNING = "The cut you already uploaded will not include the new clip. Pull the pieces again, " +
+    "re-cut, and upload again.";
+export function planClipRedo(run, items, target) {
+    const stop = classifyRun(run);
+    const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
+    const rows = items.filter((i) => i.itemKind === "clip" &&
+        i.sceneIndex === target.sceneIndex &&
+        (target.nodeId === undefined || i.nodeId === target.nodeId));
+    if (rows.length === 0) {
+        return { ok: false, reason: `Scene ${target.sceneIndex} has no clip to redo.` };
+    }
+    const nodeIds = [...new Set(rows.map((r) => r.nodeId))];
+    if (nodeIds.length > 1) {
+        return {
+            ok: false,
+            reason: `Scene ${target.sceneIndex} has a clip on more than one step (${nodeIds.join(", ")}), ` +
+                "so say which one: --node <nodeId>.",
+        };
+    }
+    const row = rows[0];
+    const node = run.nodes.find((n) => n.nodeId === row.nodeId);
+    if (node?.status === "running") {
+        return {
+            ok: false,
+            reason: `The "${row.nodeId}" step is still making other scenes. Try again once it has finished ` +
+                `(exodus video status ${run._id}).`,
+        };
+    }
+    if (node && node.status !== "done") {
+        return {
+            ok: false,
+            reason: `The "${row.nodeId}" step did not finish (it is "${node.status}"), ` +
+                "and one clip can only be redone on a step that finished.",
+        };
+    }
+    if (row.status === "running") {
+        return { ok: false, reason: `Scene ${target.sceneIndex} is already being redone.` };
+    }
+    const redoable = row.status === "failed" ||
+        (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
+    if (!redoable) {
+        if (row.status === "done") {
+            return {
+                ok: false,
+                reason: `Scene ${target.sceneIndex}'s clip is finished and nothing flagged it. A finished clip ` +
+                    "can only be redone while the run is waiting for the final cut.",
+            };
+        }
+        const word = ITEM_STATUS_WORD[row.status] ?? row.status;
+        return {
+            ok: false,
+            reason: `Scene ${target.sceneIndex}'s clip is ${word}, so there is nothing to redo yet.`,
+        };
+    }
+    return {
+        ok: true,
+        nodeId: row.nodeId,
+        sceneIndex: target.sceneIndex,
+        attempt: row.attempt ?? 0,
+        warnings: uploadedCut ? [UPLOADED_CUT_WARNING] : [],
+    };
+}
+export async function retryClipFlow(runId, target, note, json, deps) {
+    const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
+    if (!runRes.ok)
+        return errorResult(runRes, json);
+    const run = asVideoRun(runRes.data);
+    const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+    if (!itemsRes.ok)
+        return errorResult(itemsRes, json);
+    const items = itemsRes.data.items ?? [];
+    const plan = planClipRedo(run, items, target);
+    if (!plan.ok) {
+        return {
+            code: 1,
+            lines: json ? [JSON.stringify({ ok: false, error: plan.reason })] : [plan.reason],
+        };
+    }
+    const res = await deps.post(SCENE_RETRY_PATH, {
+        runId,
+        nodeId: plan.nodeId,
+        sceneIndex: plan.sceneIndex,
+        ...(note ? { note } : {}),
+    });
+    if (!res.ok)
+        return errorResult(res, json);
+    const triggerRunId = res.data.triggerRunId;
+    const review = reviewUrl(deps.dashboardUrl, run);
+    if (json) {
+        return {
+            code: 0,
+            lines: [
+                JSON.stringify({
+                    ok: true,
+                    runId,
+                    nodeId: plan.nodeId,
+                    sceneIndex: plan.sceneIndex,
+                    triggerRunId,
+                    attemptBefore: plan.attempt,
+                    reviewUrl: review,
+                    warnings: plan.warnings,
+                    ...(note ? { note } : {}),
+                }),
+            ],
+        };
+    }
+    return {
+        code: 0,
+        lines: [
+            `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
+            `triggerRunId: ${triggerRunId ?? "-"}`,
+            "Every other scene stays as it is, and so do the pictures, the voices and the script.",
+            ...(note
+                ? ["Your note steers how this clip moves. It never changes the words that are spoken."]
+                : []),
+            `Watch it land: exodus video status ${runId}`,
+            `Review the run: ${review}`,
+            ...plan.warnings,
         ],
     };
 }
@@ -1138,14 +1349,30 @@ function availabilityWords(row) {
             return "not checked";
     }
 }
+function voiceWords(voice) {
+    if (!voice)
+        return "—";
+    return voice.label ? `${voice.label} (${voice.voiceId})` : voice.voiceId;
+}
+function voiceSummaryLines(cast, notices) {
+    const rows = cast.filter((row) => row.spokenScenes > 0 || row.voice !== null);
+    const width = Math.max(0, ...rows.map((row) => row.name.length));
+    const lines = rows.length > 0 ? ["Voices"] : [];
+    for (const row of rows) {
+        lines.push(row.voice
+            ? `  ${row.name.padEnd(width)}  →  ${voiceWords(row.voice)}  ${availabilityWords(row)}`
+            : `  ${row.name.padEnd(width)}  →  no voice chosen (keeps the generated voice)`);
+    }
+    for (const notice of notices)
+        lines.push(`Heads-up: ${notice}`);
+    return lines;
+}
 export function voiceSheetLines(sheet) {
     const lines = [`Voices for run ${sheet.runId}`];
     if (sheet.cast.length === 0)
         lines.push("  Nobody is in this ad yet.");
     for (const row of sheet.cast) {
-        const voice = row.voice
-            ? `${row.voice.label ? `${row.voice.label} (${row.voice.voiceId})` : row.voice.voiceId}`
-            : "—";
+        const voice = voiceWords(row.voice);
         lines.push(`  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
             `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`);
     }
@@ -1449,7 +1676,7 @@ export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
     if (!attached.ok)
         return errorResult(attached, json);
     const final = attached.data;
-    const finalWatchUrl = final.finalWatchUrl ?? `${deps.dashboardUrl}/video?ad=${runId}`;
+    const finalWatchUrl = final.finalWatchUrl ?? reviewUrl(deps.dashboardUrl, { _id: runId });
     if (json) {
         return {
             code: 0,
@@ -1543,6 +1770,7 @@ export async function run(flags) {
         "approve",
         "flag",
         "retry-frame",
+        "retry-clip",
         "voices",
         "pull",
         "upload",
@@ -1575,6 +1803,17 @@ export async function run(flags) {
             usage("video retry-frame --scene must be a number.");
         }
         return printResult(await retryFrameFlow(runId, nodeId, sceneIndex, flagString(flags, "note"), json, defaultDeps));
+    }
+    if (sub === "retry-clip") {
+        const sceneRaw = flagString(flags, "scene");
+        if (sceneRaw === undefined) {
+            usage("video retry-clip needs --scene <n>, the scene whose clip to redo.");
+        }
+        const sceneIndex = Number(sceneRaw);
+        if (!Number.isInteger(sceneIndex)) {
+            usage(`video retry-clip --scene must be a whole scene number, not "${sceneRaw}".`);
+        }
+        return printResult(await retryClipFlow(runId, { sceneIndex, nodeId: flagString(flags, "node") }, flagString(flags, "note"), json, defaultDeps));
     }
     if (sub === "voices") {
         let voices;

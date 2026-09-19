@@ -256,10 +256,13 @@ Start (Show route):
   exodus video start --show <id> --script <file> [--wait] [--json]     start an ad run; --wait stops at the storyboard gate
 Then, on either route:
   exodus video storyboard <runId> [--json]                             the scene cards
+  exodus video voices <runId> [--set <who>=<voiceId>] [--clear <who>] [--from <f>] [--json]  who speaks, with whose voice
   exodus video approve <runId> [--json]                                approve the storyboard, or the uploaded cut
   exodus video flag <runId> --note "<what is wrong>" [--json]          send the storyboard back — SHOW RUNS ONLY
+  exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "<t>"] [--json]  redo one still at the pixel gate
   exodus video status <runId> [--json]                                 the park and each scene's clip/voice/picture
   exodus video pull <runId> --out <dir> [--json]                       every piece + manifest.json
+  exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "<t>"] [--json]  redo one clip at the final watch
   exodus video upload <runId> --file <cut.mp4> [--duration <s>] [--json]   attach the cut (MP4/MOV/WebM, 200 MB)
 Cut: your choice of tool — Exodus does not stitch or mix. One option ships with the skill:
   node .claude/skills/exodus-video/scripts/first-cut.mjs <dir> [--skip n,m] [--no-music] [--out f]

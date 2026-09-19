@@ -41,6 +41,10 @@ The whole loop, in order:
   7. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
 
+     exodus video retry-clip <runId> --scene <n>
+       Redo ONE finished clip while the run waits for the cut. Everything
+       else stays. A --note steers the motion, never the words.
+
   8. Make your cut from those files.
 
   9. exodus video upload <runId> --file cut.mp4
@@ -57,6 +61,7 @@ Usage:
   exodus video approve <runId> [--json]
   exodus video flag <runId> --note "<what is wrong>" [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
+  exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
@@ -73,9 +78,12 @@ Options:
   --duration <sec>     How long your cut is, in seconds. Only needed when the
                        length can't be read off the file itself
   --note "<text>"      What is wrong with the storyboard (flag), or how to
-                       steer one frame redo (retry-frame)
-  --node <nodeId>      Which scene-frames node holds the still (retry-frame)
-  --scene <n>          Which scene's frame to redo. One scene only (retry-frame)
+                       steer one redo (retry-frame, retry-clip)
+  --node <nodeId>      Which scene-frames node holds the still (retry-frame).
+                       Which video step holds the clip, when a scene has one on
+                       more than one step (retry-clip)
+  --scene <n>          Which scene to redo. One scene only, a whole number
+                       (retry-frame, retry-clip)
   --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
                        character by its ID or by the name your script uses.
                        Repeat it once per character
@@ -94,6 +102,7 @@ Examples:
   exodus video storyboard run_123
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2
+  exodus video retry-clip run_123 --scene 3 --note "keep the handshake in frame"
   exodus video voices run_123
   exodus video voices run_123 --set C1=abc123voiceid --set "HOST 2=def456voiceid"
   exodus video voices run_123 --from voices.json
@@ -192,6 +201,8 @@ export interface VideoRunNode {
   kind: string;
   status: "idle" | "running" | "done" | "failed" | "skipped";
   error?: string;
+  /** A member-safe note on a step that still finished (the dashboard shows it on the step). */
+  warning?: string;
   outputs?: ArtifactSubset[];
 }
 
@@ -221,6 +232,12 @@ export interface VideoRun {
   pausedNodeId?: string;
   nodes: VideoRunNode[];
   castLock?: PullCastLock | null;
+  /** The saved workflow this run executed (`projectRun`, convex/workflows.ts). */
+  workflowId?: string;
+  /** #1851: set only when the run's workflow row is module-owned, which is what
+   *  a Show ad run is. The CLI is never told the `showId`, so this is the only
+   *  thing here that tells a Show ad apart from a member's own workflow run. */
+  moduleOwned?: boolean;
 }
 
 /** Every read of a run goes through here. A run whose node list is missing or
@@ -459,7 +476,25 @@ export function stepName(kind: string | undefined): string {
   return STEP_NAMES[kind] ?? `The ${kind} step`;
 }
 
-export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): string[] {
+/**
+ * #1851: the ONE place the CLI composes a link to a run's review page. A Show ad
+ * opens on the /video page. A showless workflow run cannot, because /video
+ * answers "That ad isn't here" for it (`getAdDetail` rejects it). So it
+ * gets its own workflow run page instead, and the canonical /runs/<id> forwarder
+ * when all the caller holds is a run id. That last one is the link the server
+ * itself mints for a showless run (`dashboardAdUrl`, convex/http.ts), so a
+ * server-supplied URL and one composed here agree.
+ */
+export function reviewUrl(
+  dashboardUrl: string,
+  run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">,
+): string {
+  if (run.moduleOwned === true) return `${dashboardUrl}/video?ad=${run._id}`;
+  if (run.workflowId) return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
+  return `${dashboardUrl}/runs/${run._id}`;
+}
+
+export function stopLines(stop: RunStop, runId: string, runUrl: string): string[] {
   if (stop.at === "storyboard-gate") {
     const lines = [
       "Parked: the storyboard is waiting for your yes.",
@@ -479,6 +514,8 @@ export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): s
       "Parked: every piece is made and the run is waiting for a cut.",
       `Pull the pieces: exodus video pull ${runId} --out ./ad-${runId}`,
       `Then upload:     exodus video upload ${runId} --file cut.mp4`,
+      `Redo one clip:   exodus video retry-clip ${runId} --scene <n>`,
+      `Watch it here:   ${runUrl}`,
     ];
   }
   if (stop.at === "failed") {
@@ -489,7 +526,7 @@ export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): s
       return [
         `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
         `Try that step again: exodus workflow repair ${runId} retry`,
-        `Or open the run:     ${dashboardUrl}/video?ad=${runId}`,
+        `Or open the run:     ${runUrl}`,
       ];
     }
     return [
@@ -506,7 +543,7 @@ export function stopLines(stop: RunStop, runId: string, dashboardUrl: string): s
   if (stop.at === "paused") {
     return [
       `Parked: this run is waiting on someone${stop.reason ? ` (${stop.reason})` : ""}.`,
-      `Open it: ${dashboardUrl}/video?ad=${runId}`,
+      `Open it: ${runUrl}`,
     ];
   }
   return [`Working: ${stageWord(stop.stage)}.`];
@@ -530,6 +567,12 @@ export interface ManifestScene {
   /** Which media the timings in `words` are relative to: the clip's own sound,
    *  or the scene's voice track. Null when no word times were delivered. */
   wordsFrom: "clip" | "voice" | null;
+  /** #1848: what those times actually describe. "this-file" — they were measured
+   *  on the very file `wordsFrom` names, so they hold to the frame.
+   *  "original-performance" — the clip's cast voice was swapped in AFTER the
+   *  times were measured, so they describe the take that was replaced: close,
+   *  but not frame-exact, and nothing re-measures them. Null when no words came. */
+  wordsDescribe: "original-performance" | "this-file" | null;
   voice: string | null;
   keyframe: string | null;
   qc: ClipQc | null;
@@ -562,6 +605,11 @@ export interface ManifestCastRef {
   /** The ledger row's status, or "missing" when no row and no downloadable URL. */
   status: string;
   error: string | null;
+  /** #1845: the ElevenLabs voice this character was given before the clips were
+   *  made, read off the run's storyboard. Null when nobody chose one — those
+   *  clips keep the voice the video model invents. */
+  voiceId: string | null;
+  voiceLabel: string | null;
 }
 
 export interface VideoManifest {
@@ -656,9 +704,38 @@ function reservedCastFrames(items: NodeItem[]): Map<number, NodeItem> {
   return byIndex;
 }
 
+/** #1845: the voice pinned to each character, keyed by character id. The pins
+ *  live on the storyboard envelope's `cast[]` (convex/lib/workflow/castVoices.ts),
+ *  not on the cast lock, so they are read off the storyboard artifact the pull
+ *  already has. A storyboard that never carried a cast yields nothing. */
+function castVoicePins(
+  artifact: Extract<ArtifactSubset, { type: "storyboard" }> | undefined,
+): Map<string, { voiceId: string; voiceLabel: string | null }> {
+  const pins = new Map<string, { voiceId: string; voiceLabel: string | null }>();
+  let envelope: unknown = artifact?.storyboard;
+  if (envelope === undefined && typeof artifact?.storyboardJson === "string") {
+    try {
+      envelope = JSON.parse(artifact.storyboardJson);
+    } catch {
+      return pins;
+    }
+  }
+  const cast = (envelope as { cast?: unknown } | undefined)?.cast;
+  if (!Array.isArray(cast)) return pins;
+  for (const member of cast as Array<Record<string, unknown>>) {
+    const characterId = typeof member.characterId === "string" ? member.characterId.trim() : "";
+    const voiceId = typeof member.voiceId === "string" ? member.voiceId.trim() : "";
+    if (!characterId || !voiceId) continue;
+    const label = typeof member.voiceLabel === "string" ? member.voiceLabel.trim() : "";
+    pins.set(characterId, { voiceId, voiceLabel: label ? label : null });
+  }
+  return pins;
+}
+
 function planCastRefs(
   run: VideoRun,
   items: NodeItem[],
+  pins: Map<string, { voiceId: string; voiceLabel: string | null }>,
 ): { cast: ManifestCastRef[]; downloads: PullDownload[] } {
   const ledger = reservedCastFrames(items);
   const ledgerRows = [...ledger.entries()].sort(([a], [b]) => a - b);
@@ -734,12 +811,15 @@ function planCastRefs(
   const downloads: PullDownload[] = [];
   for (const row of rows) {
     const file = row.url ? `${row.stem}.${extFor(row.url, "image")}` : null;
+    const pin = row.characterId ? pins.get(row.characterId) : undefined;
     cast.push({
       characterId: row.characterId,
       name: row.name,
       file,
       status: row.status,
       error: row.error,
+      voiceId: pin?.voiceId ?? null,
+      voiceLabel: pin?.voiceLabel ?? null,
     });
     if (file && row.url) downloads.push({ file, url: row.url });
   }
@@ -927,6 +1007,15 @@ export function planPull(
       clip: clip?.download.file ?? null,
       words,
       wordsFrom,
+      // #1848: nothing re-measures a clip's word times after its cast voice is
+      // swapped in, so say which take they describe rather than let a cut tool
+      // assume they were measured on the file it is about to play.
+      wordsDescribe:
+        wordsFrom === null
+          ? null
+          : clip?.revoiced === true && wordsFrom === "clip"
+            ? "original-performance"
+            : "this-file",
       voice: voice?.download.file ?? null,
       keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
       qc: clip?.qc ?? null,
@@ -940,7 +1029,11 @@ export function planPull(
     };
   });
 
-  const { cast, downloads: castDownloads } = planCastRefs(run, items);
+  const { cast, downloads: castDownloads } = planCastRefs(
+    run,
+    items,
+    castVoicePins(storyboardArtifact),
+  );
 
   const downloads: PullDownload[] = [
     ...(reference ? [reference] : []),
@@ -958,7 +1051,7 @@ export function planPull(
     manifest: {
       runId: run._id,
       pulledAt: opts.pulledAt,
-      dashboardUrl: `${opts.dashboardUrl}/video?ad=${run._id}`,
+      dashboardUrl: reviewUrl(opts.dashboardUrl, run),
       storyboard,
       reference: reference?.file ?? null,
       music: music?.file ?? null,
@@ -998,6 +1091,7 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
     if (scene.words === failure.file || lostWordsSource) {
       scene.words = null;
       scene.wordsFrom = null;
+      scene.wordsDescribe = null;
     }
   }
 }
@@ -1119,7 +1213,7 @@ export async function startFlow(opts: StartOptions, deps: VideoDeps): Promise<Fl
     return { code: 1, lines: ["The server started the ad but did not say which run it is."] };
   }
   const runId = started.runId;
-  const url = started.url ?? `${deps.dashboardUrl}/video?ad=${runId}`;
+  const url = started.url ?? reviewUrl(deps.dashboardUrl, { _id: runId });
 
   if (!opts.wait) {
     const lines = [
@@ -1179,7 +1273,7 @@ export async function waitFlow(
     }
     return {
       code: stop.at === "failed" ? 1 : 0,
-      lines: [...lines, ...stopLines(stop, runId, deps.dashboardUrl)],
+      lines: [...lines, ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run))],
     };
   }
 
@@ -1220,14 +1314,25 @@ export async function statusFlow(
   const stop = classifyRun(run);
   const hasFinal = items.some((i) => i.itemKind === "final" && i.status === "done");
 
+  const warnings = run.nodes
+    .filter((n) => n.warning)
+    .map((n) => ({ nodeId: n.nodeId, step: n.kind, warning: n.warning }));
+
   if (json) {
-    return { code: 0, lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal })] };
+    return {
+      code: 0,
+      lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings })],
+    };
   }
 
   const revoicedByScene = new Set<number>();
+  // #1848: a revoiced clip that also carries word times — those times were
+  // measured on the take the cast voice replaced, and nothing re-measures them.
+  const timedOnOriginalVoice = new Set<number>();
   for (const artifact of outputsOfNodeKind(run, "video")) {
     if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
       revoicedByScene.add(artifact.sceneIndex);
+      if ((artifact.words?.length ?? 0) > 0) timedOnOriginalVoice.add(artifact.sceneIndex);
     }
   }
 
@@ -1253,7 +1358,11 @@ export async function statusFlow(
     stop.at === "failed" && stop.repair
       ? `Ad run ${runId} — Stopped, a step failed`
       : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
-  const lines = [headline, ...stopLines(stop, runId, deps.dashboardUrl)];
+  const lines = [
+    headline,
+    ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+    ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
+  ];
 
   if (byScene.size === 0) {
     lines.push("", "No scenes yet — this run hasn't made anything to look at.");
@@ -1277,6 +1386,9 @@ export async function statusFlow(
       if (row.clip?.error) lines.push(`       ${row.clip.error}`);
       // #1708: the cast voice applied, and what the picture check found.
       if (revoicedByScene.has(sceneIndex)) lines.push("       voice: cast voice applied");
+      if (timedOnOriginalVoice.has(sceneIndex)) {
+        lines.push("       word timings: measured on the original voice (close, not frame-exact)");
+      }
       for (const finding of row.frame?.findings ?? []) {
         lines.push(`       picture: ${finding.code} (${finding.severity}): ${finding.detail}`);
       }
@@ -1354,6 +1466,31 @@ export async function storyboardFlow(
     for (const scene of loose) lines.push(...sceneCardLines(scene));
   }
 
+  // #1845: the voices ride the storyboard stop, so a person sees who speaks with
+  // what before approving instead of having to know about a second command. A
+  // second, NON-FATAL read: an older backend, a 404 or an empty cast prints
+  // nothing and the storyboard is unaffected.
+  // The catch matters as much as the `ok` check: a dropped connection throws.
+  const voiceRes = await deps
+    .get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`)
+    .catch(() => null);
+  if (voiceRes?.ok) {
+    const sheet = (voiceRes.data ?? {}) as Partial<CastVoiceSheet>;
+    const cast = Array.isArray(sheet.cast) ? sheet.cast : [];
+    const canChange = sheet.canChange !== false;
+    // A run whose voices are owned elsewhere (a Show) has nothing to act on, so
+    // it stays quiet unless somebody already pinned a voice worth seeing.
+    if (canChange || cast.some((row) => row.voice !== null)) {
+      const summary = voiceSummaryLines(cast, Array.isArray(sheet.notices) ? sheet.notices : []);
+      if (summary.length > 0) {
+        lines.push("", ...summary);
+        if (canChange) {
+          lines.push(`set voices with: exodus video voices ${runId} --set <character>=<voiceId>`);
+        }
+      }
+    }
+  }
+
   lines.push(
     "",
     `approve with: exodus video approve ${runId}`,
@@ -1392,12 +1529,26 @@ export async function approveFlow(
   deps: VideoDeps,
 ): Promise<FlowResult> {
   const res = await deps.post(APPROVE_PATH, { runId });
+  // #1845: a refused approve (a chosen voice ElevenLabs is certain is gone) comes
+  // back 400 with one plain sentence — printed as-is, exit 1, nothing approved.
   if (!res.ok) return errorResult(res, json);
   if (json) return { code: 0, lines: [JSON.stringify({ ok: true, runId, data: res.data })] };
+  // #1845: approving is the last moment a wrong voice can still be caught, so the
+  // receipt names the voice each speaking character got. Absent on older backends
+  // and on approves that are not the storyboard stop.
+  const voices = (res.data as { voices?: { cast?: CastVoiceRow[]; notices?: string[] } } | null)
+    ?.voices;
+  const summary = voices
+    ? voiceSummaryLines(
+        Array.isArray(voices.cast) ? voices.cast : [],
+        Array.isArray(voices.notices) ? voices.notices : [],
+      )
+    : [];
   return {
     code: 0,
     lines: [
       "Approved.",
+      ...(summary.length > 0 ? ["", ...summary, ""] : []),
       `See what happens next: exodus video status ${runId}`,
     ],
   };
@@ -1462,6 +1613,172 @@ export async function retryFrameFlow(
       `Redoing scene ${sceneIndex} on ${nodeId}.`,
       `triggerRunId: ${triggerRunId ?? "-"}`,
       "Neighbours stay. The pixel gate holds.",
+    ],
+  };
+}
+
+export type ClipRedoPlan =
+  | { ok: true; nodeId: string; sceneIndex: number; attempt: number; warnings: string[] }
+  | { ok: false; reason: string };
+
+export interface ClipRedoTarget {
+  sceneIndex: number;
+  nodeId?: string;
+}
+
+const UPLOADED_CUT_WARNING =
+  "The cut you already uploaded will not include the new clip. Pull the pieces again, " +
+  "re-cut, and upload again.";
+
+/**
+ * #1851: decide a clip redo before anything is enqueued. The server's
+ * `getSceneRetryContext` is the authority and its refusals are printed verbatim;
+ * this mirrors its rules so the usual mistakes (a clip that is already being
+ * redone, a step still rendering its other scenes, a finished clip on a run that
+ * is nowhere near its final watch) cost a read rather than a queued task and a
+ * silent no-op. A delivered ad is left to the server: the run payload carries no
+ * approval stamp, and a done `final` row does not prove one.
+ */
+export function planClipRedo(
+  run: VideoRun,
+  items: NodeItem[],
+  target: ClipRedoTarget,
+): ClipRedoPlan {
+  const stop = classifyRun(run);
+  const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
+
+  const rows = items.filter(
+    (i) =>
+      i.itemKind === "clip" &&
+      i.sceneIndex === target.sceneIndex &&
+      (target.nodeId === undefined || i.nodeId === target.nodeId),
+  );
+  if (rows.length === 0) {
+    return { ok: false, reason: `Scene ${target.sceneIndex} has no clip to redo.` };
+  }
+  const nodeIds = [...new Set(rows.map((r) => r.nodeId))];
+  if (nodeIds.length > 1) {
+    return {
+      ok: false,
+      reason:
+        `Scene ${target.sceneIndex} has a clip on more than one step (${nodeIds.join(", ")}), ` +
+        "so say which one: --node <nodeId>.",
+    };
+  }
+  const row = rows[0];
+
+  const node = run.nodes.find((n) => n.nodeId === row.nodeId);
+  if (node?.status === "running") {
+    return {
+      ok: false,
+      reason:
+        `The "${row.nodeId}" step is still making other scenes. Try again once it has finished ` +
+        `(exodus video status ${run._id}).`,
+    };
+  }
+  if (node && node.status !== "done") {
+    return {
+      ok: false,
+      reason:
+        `The "${row.nodeId}" step did not finish (it is "${node.status}"), ` +
+        "and one clip can only be redone on a step that finished.",
+    };
+  }
+  if (row.status === "running") {
+    return { ok: false, reason: `Scene ${target.sceneIndex} is already being redone.` };
+  }
+
+  const redoable =
+    row.status === "failed" ||
+    (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
+  if (!redoable) {
+    if (row.status === "done") {
+      return {
+        ok: false,
+        reason:
+          `Scene ${target.sceneIndex}'s clip is finished and nothing flagged it. A finished clip ` +
+          "can only be redone while the run is waiting for the final cut.",
+      };
+    }
+    const word = ITEM_STATUS_WORD[row.status] ?? row.status;
+    return {
+      ok: false,
+      reason: `Scene ${target.sceneIndex}'s clip is ${word}, so there is nothing to redo yet.`,
+    };
+  }
+
+  return {
+    ok: true,
+    nodeId: row.nodeId,
+    sceneIndex: target.sceneIndex,
+    attempt: row.attempt ?? 0,
+    warnings: uploadedCut ? [UPLOADED_CUT_WARNING] : [],
+  };
+}
+
+export async function retryClipFlow(
+  runId: string,
+  target: ClipRedoTarget,
+  note: string | undefined,
+  json: boolean,
+  deps: VideoDeps,
+): Promise<FlowResult> {
+  const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!runRes.ok) return errorResult(runRes, json);
+  const run = asVideoRun(runRes.data);
+
+  const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!itemsRes.ok) return errorResult(itemsRes, json);
+  const items = (itemsRes.data as { items?: NodeItem[] }).items ?? [];
+
+  const plan = planClipRedo(run, items, target);
+  if (!plan.ok) {
+    return {
+      code: 1,
+      lines: json ? [JSON.stringify({ ok: false, error: plan.reason })] : [plan.reason],
+    };
+  }
+
+  const res = await deps.post(SCENE_RETRY_PATH, {
+    runId,
+    nodeId: plan.nodeId,
+    sceneIndex: plan.sceneIndex,
+    ...(note ? { note } : {}),
+  });
+  if (!res.ok) return errorResult(res, json);
+  const triggerRunId = (res.data as { triggerRunId?: string }).triggerRunId;
+  const review = reviewUrl(deps.dashboardUrl, run);
+
+  if (json) {
+    return {
+      code: 0,
+      lines: [
+        JSON.stringify({
+          ok: true,
+          runId,
+          nodeId: plan.nodeId,
+          sceneIndex: plan.sceneIndex,
+          triggerRunId,
+          attemptBefore: plan.attempt,
+          reviewUrl: review,
+          warnings: plan.warnings,
+          ...(note ? { note } : {}),
+        }),
+      ],
+    };
+  }
+  return {
+    code: 0,
+    lines: [
+      `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
+      `triggerRunId: ${triggerRunId ?? "-"}`,
+      "Every other scene stays as it is, and so do the pictures, the voices and the script.",
+      ...(note
+        ? ["Your note steers how this clip moves. It never changes the words that are spoken."]
+        : []),
+      `Watch it land: exodus video status ${runId}`,
+      `Review the run: ${review}`,
+      ...plan.warnings,
     ],
   };
 }
@@ -1600,13 +1917,37 @@ function availabilityWords(row: CastVoiceRow): string {
   }
 }
 
+/** One pinned voice, spelled the same way everywhere it is shown. */
+function voiceWords(voice: { voiceId: string; label?: string } | null): string {
+  if (!voice) return "—";
+  return voice.label ? `${voice.label} (${voice.voiceId})` : voice.voiceId;
+}
+
+/** #1845: the compact "Voices" block the storyboard stop and the approve receipt
+ *  share — one line per character who speaks or already has a voice, then the
+ *  sheet's own notices. Empty when there is nothing worth saying. */
+function voiceSummaryLines(cast: CastVoiceRow[], notices: string[]): string[] {
+  const rows = cast.filter((row) => row.spokenScenes > 0 || row.voice !== null);
+  // A note can arrive with no rows at all (the approve's check could not run),
+  // and it must still be read — only the "Voices" heading needs rows under it.
+  const width = Math.max(0, ...rows.map((row) => row.name.length));
+  const lines = rows.length > 0 ? ["Voices"] : [];
+  for (const row of rows) {
+    lines.push(
+      row.voice
+        ? `  ${row.name.padEnd(width)}  →  ${voiceWords(row.voice)}  ${availabilityWords(row)}`
+        : `  ${row.name.padEnd(width)}  →  no voice chosen (keeps the generated voice)`,
+    );
+  }
+  for (const notice of notices) lines.push(`Heads-up: ${notice}`);
+  return lines;
+}
+
 export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
   const lines = [`Voices for run ${sheet.runId}`];
   if (sheet.cast.length === 0) lines.push("  Nobody is in this ad yet.");
   for (const row of sheet.cast) {
-    const voice = row.voice
-      ? `${row.voice.label ? `${row.voice.label} (${row.voice.voiceId})` : row.voice.voiceId}`
-      : "—";
+    const voice = voiceWords(row.voice);
     lines.push(
       `  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
         `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`,
@@ -1977,7 +2318,7 @@ export async function uploadFlow(
   const attached = attaching.value;
   if (!attached.ok) return errorResult(attached, json);
   const final = attached.data as { finalWatchUrl?: string };
-  const finalWatchUrl = final.finalWatchUrl ?? `${deps.dashboardUrl}/video?ad=${runId}`;
+  const finalWatchUrl = final.finalWatchUrl ?? reviewUrl(deps.dashboardUrl, { _id: runId });
 
   if (json) {
     return {
@@ -2080,6 +2421,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     "approve",
     "flag",
     "retry-frame",
+    "retry-clip",
     "voices",
     "pull",
     "upload",
@@ -2111,6 +2453,26 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     }
     return printResult(
       await retryFrameFlow(runId, nodeId, sceneIndex, flagString(flags, "note"), json, defaultDeps),
+    );
+  }
+
+  if (sub === "retry-clip") {
+    const sceneRaw = flagString(flags, "scene");
+    if (sceneRaw === undefined) {
+      usage("video retry-clip needs --scene <n>, the scene whose clip to redo.");
+    }
+    const sceneIndex = Number(sceneRaw);
+    if (!Number.isInteger(sceneIndex)) {
+      usage(`video retry-clip --scene must be a whole scene number, not "${sceneRaw}".`);
+    }
+    return printResult(
+      await retryClipFlow(
+        runId,
+        { sceneIndex, nodeId: flagString(flags, "node") },
+        flagString(flags, "note"),
+        json,
+        defaultDeps,
+      ),
     );
   }
 

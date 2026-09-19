@@ -75,6 +75,8 @@ exodus workflow list                                      the brand's workflows
 exodus workflow describe <workflowId|name>                what inputs it needs
 exodus workflow run <workflowId|name> --input <field>=@script.txt --wait
                                                           start, stop at the storyboard gate
+exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voices.json --wait
+                                                          same, with the brand's voices already chosen
 exodus video status <runId>                               where it is, per scene
 ```
 
@@ -96,6 +98,8 @@ exodus video flag <runId> --note "what's wrong"           send it back — SHOW 
 exodus video retry-frame <runId> --node <nodeId> --scene <n>  redo one still at the pixel gate
 exodus video status <runId>                               where it is, per scene
 exodus video pull <runId> --out ./ad-<runId>              every piece + manifest.json
+exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "…"]
+                                                          redo one clip at the final watch
                                                           … make the cut (your choice of tool)
 exodus video upload <runId> --file ./ad-<runId>/cut.mp4   attach it
 exodus video approve <runId>                              make it the ad
@@ -115,7 +119,8 @@ per-scene detail, and the checkpoint verbs cannot resolve a video park — see
 under it:
 
 - storyboard gate: needs `approve`, or `flag` on a Show run.
-- final watch: every piece is made; needs `pull`, a cut, and `upload`. A
+- final watch: every piece is made; needs `pull`, a cut, and `upload`. It is also
+  the one park where a finished clip can be redone, with `retry-clip`. A
   workflow run only reaches this park if its video node sets `finalWatch: true`
   — otherwise it skips straight to finished.
 - paused: a builder checkpoint neither video verb resolves —
@@ -170,6 +175,7 @@ Verified against the routes, not assumed. Everything here is admin-gated on top.
 | `video flag --note` | **refused** | works |
 | script-turn edits at the gate | **refused** | dashboard only |
 | `video retry-frame` | works | works |
+| `video retry-clip` | works | works |
 | `video pull` | works | works |
 | `video upload` | only if the video node sets `finalWatch: true` | works |
 | `workflow checkpoint approve` | **refused at a video gate** | **refused at a video gate** |
@@ -218,11 +224,14 @@ Five consequences worth knowing before you promise a user anything:
   slots park is still not a landing: it prints its notice once and the loop
   keeps polling, so a resolve from another shell carries the run on. Do not read
   a park banner mid-poll as the wait having finished.
-- **The run's page link differs.** A Show run's `dashboardUrl` opens
-  `/video?show=…&ad=…`; a showless run gets `/runs/<runId>`, because the `/video`
-  page cannot render one (`convex/http.ts:9204-9211`). The manifest's
-  `dashboardUrl` is always `/video?ad=<runId>`, which is the Show-route shape —
-  on a workflow run, hand the user the link `upload` prints, not the manifest's.
+- **The run's page link differs, and every link the CLI prints follows the run.**
+  A Show ad opens on the `/video` page. A showless workflow run opens on
+  `/workflows/<workflowId>/runs/<runId>`, because `/video` answers "That ad isn't
+  here" for a run with no Show (`getAdDetail` rejects it;
+  `convex/http.ts:9204-9211`). Since #1851 the manifest's `dashboardUrl`, the
+  link in every park block and the link `upload` prints are all minted that way,
+  so they agree on both routes. When all the CLI holds is a run id it mints
+  `/runs/<runId>`, the canonical forwarder, which lands on the same page.
 
 ## The script file
 
@@ -248,8 +257,10 @@ THE SOFTGEL: Tap below and give your eyes ClearBlink.
 ## Reading the storyboard gate
 
 `storyboard <runId>` prints one card per scene on both routes: who speaks, the
-line, the planned duration, and whether its picture is drawn. Read it for the
-user, then ask one question.
+line, the planned duration, and whether its picture is drawn. Under the cards it
+also lists the voices — one line per character who speaks or already has a voice
+— so the user can see who sounds like whom before paying for the clips. Read it
+for the user, then ask one question.
 
 On a **workflow run** the question is approve or don't — there is no flag. If
 the storyboard is wrong, say so plainly and let the user decide between
@@ -302,6 +313,17 @@ on that account. Each refusal says the plain reason and saves nothing. If
 ElevenLabs simply cannot be reached, the choice IS saved and the output says the
 check could not be made — a provider outage never blocks the run.
 
+**Approving checks the voices one last time.** `video approve` re-checks every
+chosen voice before the clips are paid for. If ElevenLabs is certain one of them
+is gone — deleted from the account, or the account changed — the approve is
+refused in one plain sentence, nothing is approved and the command exits 1. Fix
+it by choosing another voice (`video voices <runId> --set <character>=<voiceId>`)
+or clearing that character (`--clear <character>`, which lets the clip keep the
+voice the video model makes), then approve again. When the approve goes through,
+the receipt lists each speaking character and the voice they got, plus any
+`Heads-up:` lines worth reading — that is the last moment a wrong voice is cheap
+to fix.
+
 **The voices file.** A plain JSON object, keyed by the names the script uses:
 
 ```json
@@ -318,6 +340,18 @@ without editing it. Use the name the file uses: if the file says `HOST 2` and th
 flag says `C2`, that is one character named two ways, and the whole request is
 refused with a sentence saying so. Voice IDs belong to the user's own ElevenLabs account and to that brand's
 folder — never put a brand's voice IDs in a shared workflow or template.
+
+**One file, two moments.** A brand keeps a single `voices.json` in its own
+folder. Hand it to the run at the start with `exodus workflow run <workflow>
+--voices @voices.json` when the script is one the user supplied (it names its
+speakers, so `HOST 1` means something before the planner has run), or hand it in
+at the storyboard review with `exodus video voices <runId> --from voices.json`.
+Launching with voices refuses before the run is created — nothing is spent — if
+a speaker is not in the script, the same speaker is named twice, or ElevenLabs
+is certain it does not have one of the voices; a workflow whose script is
+written by a bot is refused with a pointer at the review-time command, because
+nobody knows the speaker names yet. When the storyboard arrives, the voices are
+already set and `exodus video voices <runId>` shows them.
 
 **The JSON receipt** (`--json`), the same shape for reading and for setting:
 
@@ -378,18 +412,28 @@ manifest.json            the index below
 `manifest.json`:
 
 ```
-runId, pulledAt, dashboardUrl        the run and its page (/video?ad=<runId>)
+runId, pulledAt, dashboardUrl        the run and the page that opens it:
+                                     /video?ad=<runId> for a Show ad,
+                                     /workflows/<workflowId>/runs/<runId> for a
+                                     workflow run
 storyboard, reference, music         filenames, or null when not delivered
 narration                            { file, timing }, or null on a per-scene run
 cast[]                               one per identity still
   characterId, name                  from the run's cast lock; null for an
                                      unclaimed ledger still
   file, status, error
+  voiceId, voiceLabel                the ElevenLabs voice this character was
+                                     given before the clips were made; null when
+                                     nobody chose one
 scenes[]                             one per scene, in order
   sceneIndex, durationSec            the run's number and the clip's real length
   clip, voice, keyframe, words       filenames, or null
   wordsFrom                          clip | voice — which file the word times are
                                      measured against; null when none came
+  wordsDescribe                      this-file | original-performance — whether
+                                     those times were measured on the file you
+                                     have, or on the take a cast voice replaced;
+                                     null when no words came
   clipStatus                         done | failed | running | pending | missing
   error                              why the clip failed, when it did
   flagged, findings[]                QC verdict: {check, code, severity: fail|warn, detail}
@@ -466,6 +510,18 @@ re-based to the start of that scene's cut; on a per-scene run it is instead a
 blind Scribe pass over that scene's own voice track. Nothing is aligned to the
 finished ad — that timeline does not exist until you make it.
 
+**How far to trust them** (`wordsDescribe`). `"this-file"` means the times were
+measured on the very file `wordsFrom` names, so they hold to the frame: cut
+captions and cue points straight off them. `"original-performance"` means the
+scene's clip was re-voiced *after* its words were timed — the times describe the
+take the cast voice replaced. The words and their order are right and the timing
+is close, but nothing re-measures it, so check any cut that has to land on a
+single frame. A clip carrying a `voice-timing-shifted` warning is the same thing
+with a measured gap: the swapped audio came back a different length, so treat
+that scene's times as a rough guide and watch it before you trust it. Nothing in
+the pipeline speeds audio or video up or slows it down to make the two agree —
+the timings are reported honestly instead.
+
 **Cast identity stills** (`cast-*.<ext>`). A full-body identity still per cast
 member, on a plain neutral background in the run's style, minted once and
 frozen onto the run as its cast lock. Every scene picture was anchored to these,
@@ -487,14 +543,19 @@ music failure degrades to a warning rather than blocking the run.
 - `wordsFrom: "voice"`, or a scene whose storyboard entry has `voText` and no
   on-camera line: the clip is picture only and the voice track is the sound.
   Do not use that clip's own audio.
+- `wordsDescribe: "original-performance"`: the word times were measured before
+  that clip's cast voice was swapped in. Close, not frame-exact — say so if the
+  user is cutting captions to the frame.
 - `manifest.narration` present: listen to `narration.mp3` end to end, then the
   joins between adjacent `scene-NN.voice` files, before you trust the cut.
   Matching voice IDs and a one-speaker diarization result do not prove
   continuity (#1802).
 - `flagged: true` is a warning, not a block. The clip was delivered anyway; the
   findings say what the QC model saw (`wrong-character`, `eyeline-off`,
-  `set-drift`, `speech-cutoff`, `framing-off`). Tell the user which scenes are
-  flagged and why, and let them decide whether to keep, trim, or drop each one.
+  `set-drift`, `speech-cutoff`, `framing-off`, `voice-timing-shifted`). Tell the
+  user which scenes are flagged and why, and let them decide whether to keep,
+  trim, drop or redo each one (`retry-clip`, see "Redoing one clip at the final
+  watch").
   A `speech-cutoff` on the CTA scene is the one to worry about; the ad's last
   words are missing. `status` shows the checker's own wording behind each
   finding; the manifest carries only the verdict.
@@ -505,6 +566,49 @@ music failure degrades to a warning rather than blocking the run.
 - `clipStatus: "running"` or `"pending"`: pull again later. `status` says when
   the run parks at the final watch, which means nothing is still rendering.
 - `failed[]` non-empty: run the same `pull` again.
+
+## Redoing one clip at the final watch
+
+`retry-clip` re-renders ONE scene's clip on the run that already made it. There
+is no second run, no new storyboard and no re-render of anything else.
+
+```
+exodus video retry-clip <runId> --scene 3
+exodus video retry-clip <runId> --scene 3 --note "keep both hands in frame on the handshake"
+exodus video retry-clip <runId> --scene 3 --node video-2
+```
+
+`--node` is only needed when a run has clips for that scene on two video steps;
+the CLI asks for it by name when it does.
+
+**When it is allowed.** A failed clip, once the step that made it has finished. A
+finished clip, only while the run is parked at the final watch, or when QC
+flagged it (`flagged: true` in `status` and in the manifest). Everything else is
+refused in one plain sentence before any task is queued: a step still rendering
+its other scenes or one that failed outright, a scene already being redone, a
+finished clip on a run that is not at its final watch. An ad that is already
+delivered is refused by the server, in its own sentence.
+
+**What stays untouched.** Every other scene's clip, every keyframe, the cast
+pins, the voices and the approved script. The redone clip re-renders from the
+same keyframe with the same voice path the first take used, so it comes back
+revoiced and trimmed the same way, with fresh findings and fresh word timings.
+
+**A `--note` steers the motion, never the words.** It is folded into that
+scene's motion prompt only (`withRedoDirection`,
+`scout/src/trigger/workflow-scene-retry.ts`); the spoken line still comes from
+the approved storyboard. Asking for different words in a note will not change
+them. If the words are wrong, that is a storyboard flag or a new run.
+
+**A redo whose take fails the checks keeps the original clip.** On a finished
+clip the row stays `done` with the ORIGINAL take and only its findings are
+refreshed, because a worse take must never replace a delivered one. So never
+report that the clip changed. Read `status` again for the new findings, then pull
+and compare the file before and after.
+
+**Re-cut afterwards.** A cut you already uploaded still holds the old clip, and
+the CLI says so when that is the case. Pull again, re-cut and upload again before
+anyone approves.
 
 ## Cutting the ad
 

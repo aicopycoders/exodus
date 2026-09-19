@@ -3,6 +3,7 @@ import { type PollOptions, type PollResult } from "../lib/poll.js";
 import { LEGACY_WORKFLOW_RUN_STATUS_VALUES, type RunStatus } from "../lib/runStatus.js";
 import { type RunDeliverySummary } from "../lib/runVerdict.js";
 import { type Channel } from "../lib/channel.js";
+import { type VoiceMap } from "./video.js";
 export declare const helpText: string;
 export type WorkflowNodeKind = "brief" | "brief-form" | "asset" | "bot" | "primer" | "image" | "image-rig" | "rig" | "storyboard" | "reference" | "scene-frames" | "video" | "voiceover" | "output" | "call" | "show-set" | "show-cast" | "show-voices" | "product-truth" | "transform" | "formatter" | "splitter" | "collector" | "checkpoint" | "prompt";
 export type WorkflowSlotState = "locked" | "auto" | "ask" | "inferred";
@@ -407,6 +408,7 @@ interface RunFlowOptions {
     fill?: string;
     autoApprove?: boolean;
     imageRigOverrides?: Record<string, unknown>;
+    voices?: VoiceMap;
     wait: boolean;
     json: boolean;
     out?: string;
@@ -427,6 +429,7 @@ export declare function serverWarningsToPrint(serverWarnings: unknown, alreadyPr
 export declare function rejectTerminalFlag(args: string[]): void;
 export declare function parseAutoApproveFlag(args: string[]): boolean;
 export declare function parseRigOverridesFlag(args: string[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
+export declare function parseVoicesFlag(args: string[], readFile?: (path: string) => string): VoiceMap | undefined;
 export declare function parseFillFlag(args: string[]): string | undefined;
 export declare function formatWorkflowList(workflows: WorkflowListItem[]): string;
 export declare function formatRecentRuns(runs: WorkflowRunProjection[]): string;

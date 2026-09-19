@@ -70,6 +70,7 @@ export interface VideoRunNode {
     kind: string;
     status: "idle" | "running" | "done" | "failed" | "skipped";
     error?: string;
+    warning?: string;
     outputs?: ArtifactSubset[];
 }
 export type BuilderPauseReason = "taste" | "repair" | "slots" | "call" | "checkpoint";
@@ -96,6 +97,8 @@ export interface VideoRun {
     pausedNodeId?: string;
     nodes: VideoRunNode[];
     castLock?: PullCastLock | null;
+    workflowId?: string;
+    moduleOwned?: boolean;
 }
 export declare function asVideoRun(data: unknown): VideoRun;
 export interface NodeItem {
@@ -177,7 +180,8 @@ export type RunStop = {
 export declare function classifyRun(run: VideoRun): RunStop;
 export declare function stageWord(stage: string): string;
 export declare function stepName(kind: string | undefined): string;
-export declare function stopLines(stop: RunStop, runId: string, dashboardUrl: string): string[];
+export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">): string;
+export declare function stopLines(stop: RunStop, runId: string, runUrl: string): string[];
 export interface PullDownload {
     file: string;
     url: string;
@@ -192,6 +196,7 @@ export interface ManifestScene {
     clip: string | null;
     words: string | null;
     wordsFrom: "clip" | "voice" | null;
+    wordsDescribe: "original-performance" | "this-file" | null;
     voice: string | null;
     keyframe: string | null;
     qc: ClipQc | null;
@@ -214,6 +219,8 @@ export interface ManifestCastRef {
     file: string | null;
     status: string;
     error: string | null;
+    voiceId: string | null;
+    voiceLabel: string | null;
 }
 export interface VideoManifest {
     runId: string;
@@ -265,6 +272,22 @@ export declare function storyboardFlow(runId: string, json: boolean, deps: Video
 export declare function approveFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function flagFlow(runId: string, note: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function retryFrameFlow(runId: string, nodeId: string, sceneIndex: number, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export type ClipRedoPlan = {
+    ok: true;
+    nodeId: string;
+    sceneIndex: number;
+    attempt: number;
+    warnings: string[];
+} | {
+    ok: false;
+    reason: string;
+};
+export interface ClipRedoTarget {
+    sceneIndex: number;
+    nodeId?: string;
+}
+export declare function planClipRedo(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
+export declare function retryClipFlow(runId: string, target: ClipRedoTarget, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export interface CastVoiceRow {
     characterId: string;
     name: string;

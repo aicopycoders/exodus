@@ -9,7 +9,7 @@ import { runVerdict } from "../lib/runVerdict.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
-import { asVideoRun, classifyRun, stopLines } from "./video.js";
+import { asVideoRun, classifyRun, reviewUrl, stopLines, } from "./video.js";
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
 
@@ -20,7 +20,7 @@ Usage:
   exodus workflow templates [list] [--json]
   exodus workflow templates export <key> [--out <file>] [--json]
   exodus workflow schema [--kind <kind>] [--face <face>] [--json]
-  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--auto-approve] [--wait] [--out <dir>] [--json]
+  exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=<path> ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--out <dir>] [--json]
   exodus workflow status [--json]
   exodus workflow status --id <runId> [--out <dir>] [--json]
   exodus workflow cancel <runId> [--reason "..."] [--json]
@@ -83,6 +83,25 @@ Flags:
                          before anything runs, and the error names it. On
                          "triggers fire" it REPLACES the schedule's own
                          overrides for that one test fire.
+  --voices <json>        (run) Give the ad's characters their voices at the
+                         moment the run starts, instead of at the storyboard
+                         review. Keyed by the names the SCRIPT uses for its
+                         speakers ("HOST 1") — the planner's character ids
+                         (C1, C2) do not exist yet when a run starts. Takes a
+                         JSON object, or @path to a .json file holding one:
+                           --voices @voices.json
+                           --voices '{"HOST 1":"<voiceId>"}'
+                         Same file "exodus video voices <run> --from" reads at
+                         the review, so a brand keeps ONE voices.json for both.
+                         A speaker the script does not have, the same speaker
+                         named twice, or a voice ElevenLabs does not have stops
+                         the launch before the run is created — nothing is
+                         spent, and the message says which one. A workflow whose
+                         script is written by a bot (so nobody knows the speaker
+                         names at the start) is told to use "exodus video voices
+                         <run>" at the storyboard review instead. Voice ids
+                         belong to the brand's own folder — never put them in a
+                         shared workflow or template.
   --auto-approve         (run) Deliberately unattended launch: every Checkpoint
                          box this run stops at is approved automatically, with
                          whatever it was holding left exactly as it is, and the
@@ -174,6 +193,7 @@ Examples:
   exodus workflow run "Launch Flow" --auto-approve --wait
   exodus workflow run "Product Shots" --rig-overrides '{"rig_1":{"lines":{"line_1":{"count":3}}}}'
   exodus workflow run "Product Shots" --rig-overrides @rig.json --wait
+  exodus workflow run "Podcast Ad" --input script=@script.txt --voices @voices.json --wait
   exodus workflow run "Launch Flow" --wait --out ./deliverables
   exodus workflow status                      # recent runs + their ids
   exodus workflow status --id wr_123
@@ -235,6 +255,19 @@ Notes:
   message says which key was wrong. A trigger can carry the same payload in its
   YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
   Friday one can fire the same workflow at different sizes.
+  "workflow run --voices" hands a video run its voices at the start, so a brand
+  that always uses the same hosts stops choosing them by hand on every run. The
+  file is keyed by the names the script uses for its speakers, because that is
+  all that exists before the planner has run — it is the SAME voices.json
+  "exodus video voices <run> --from" reads at the storyboard review, so one file
+  per brand serves both moments. A speaker the script does not have, the same
+  speaker named twice, or a voice ElevenLabs does not have stops the launch
+  before the run exists and nothing is spent. When the storyboard is planned,
+  each named speaker's character already has their voice, and "exodus video
+  voices <run>" shows them set. A workflow whose script is written by a bot has
+  no speaker names to key on at the start, so it is refused with a pointer at
+  the review-time command. Keep voice ids in the brand's own folder, never in a
+  shared workflow or template. (#1846)
   workflow triggers are addressed by 1-based position — a trigger carries no id,
   so the CLI reads the live list from the export contract and sends a fingerprint
   of the trigger's fields as the guard; a concurrent edit fails loud rather than
@@ -320,6 +353,7 @@ const VALUE_FLAGS = new Set([
     "slot",
     "reject",
     "rig-overrides",
+    "voices",
     "note",
 ]);
 function defaultMkdirp(dir) {
@@ -914,6 +948,63 @@ export function parseRigOverridesFlag(args, readFile) {
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         throw new Error("--rig-overrides must be a JSON object keyed by Image Rig node id, e.g. '{\"rig_1\":{\"lines\":{\"line_1\":{\"count\":3}}}}'");
+    }
+    return parsed;
+}
+export function parseVoicesFlag(args, readFile) {
+    let raw;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        let value;
+        if (arg === "--voices") {
+            value = args[i + 1];
+            i++;
+        }
+        else if (arg.startsWith("--voices=")) {
+            value = arg.slice("--voices=".length);
+        }
+        else {
+            continue;
+        }
+        if (value === undefined || value.startsWith("--")) {
+            throw new Error("--voices requires JSON or @path/to/voices.json");
+        }
+        raw = value;
+    }
+    if (raw === undefined)
+        return undefined;
+    let text = raw.trim();
+    if (!text)
+        throw new Error("--voices requires JSON or @path/to/voices.json");
+    if (text.startsWith("@@")) {
+        text = text.slice(1);
+    }
+    else if (text.startsWith("@")) {
+        const filePath = text.slice(1);
+        if (!filePath) {
+            throw new Error("--voices @<file> needs a file path after \"@\"");
+        }
+        if (!readFile) {
+            throw new Error(`--voices: cannot load @${filePath} here (no file access)`);
+        }
+        try {
+            text = readFile(filePath);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`--voices: could not read file "${filePath}": ${msg}`);
+        }
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`--voices is not valid JSON: ${msg}`);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("--voices must be a JSON object keyed by the script's speaker names, e.g. {\"HOST 1\":\"<voiceId>\"}");
     }
     return parsed;
 }
@@ -1723,6 +1814,20 @@ export async function botsFlow(opts, deps) {
         return { code: 0, lines: [JSON.stringify(catalog)] };
     return { code: 0, lines: [formatBotsList(catalog, opts.category)] };
 }
+function launchVoicesLine(attached) {
+    if (!Array.isArray(attached))
+        return undefined;
+    const said = [];
+    for (const raw of attached) {
+        if (!raw || typeof raw !== "object")
+            continue;
+        const { speaker, voiceId, label } = raw;
+        if (typeof speaker !== "string" || typeof voiceId !== "string")
+            continue;
+        said.push(`${speaker} → ${typeof label === "string" && label !== "" ? label : voiceId}`);
+    }
+    return said.length > 0 ? `Voices: ${said.join(", ")}` : undefined;
+}
 export async function runFlow(workflowRef, opts, deps) {
     let workflowId;
     try {
@@ -1765,6 +1870,7 @@ export async function runFlow(workflowRef, opts, deps) {
         ...(opts.fill && opts.fill.trim() !== "" ? { fill: opts.fill.trim() } : {}),
         ...(opts.autoApprove === true ? { autoApprove: true } : {}),
         ...(opts.imageRigOverrides ? { imageRigOverrides: opts.imageRigOverrides } : {}),
+        ...(opts.voices ? { voices: opts.voices } : {}),
         launchedVia: "cli",
     };
     const start = await deps.post(RUN_PATH, body);
@@ -1778,6 +1884,7 @@ export async function runFlow(workflowRef, opts, deps) {
     const base = { ...data, workflowId };
     if (opts.json && !opts.wait)
         return { code: 0, lines: [JSON.stringify(base)] };
+    const voicesLine = launchVoicesLine(data?.launchVoices);
     const lines = opts.json
         ? []
         : [
@@ -1785,6 +1892,7 @@ export async function runFlow(workflowRef, opts, deps) {
             "Workflow run started.",
             `runId:        ${data.runId}`,
             `triggerRunId: ${data.triggerRunId}`,
+            ...(voicesLine ? [voicesLine] : []),
             `Poll: exodus workflow status --id ${data.runId}`,
         ];
     if (!opts.wait) {
@@ -1903,7 +2011,8 @@ async function waitForRun(runId, opts, deps) {
         lines.push("", landOnPark.headline, ...formatPauseNotice(landOnPark.pauseReason, runId, dashboardUrl).slice(1));
     }
     if (videoStop) {
-        lines.push("", ...stopLines(videoStop, runId, deps.dashboardUrl ?? getDashboardUrl()));
+        const review = reviewUrl(deps.dashboardUrl ?? getDashboardUrl(), asVideoRun(pollResult.data));
+        lines.push("", ...stopLines(videoStop, runId, review));
     }
     return { code: pollResult.ok ? 0 : 1, lines };
 }
@@ -2900,19 +3009,21 @@ export async function run(flags) {
         const workflowRef = rest[0];
         if (!workflowRef) {
             console.error("Error: workflow run requires <workflowId|name>.");
-            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--auto-approve] [--wait] [--json]");
+            console.log("Usage: exodus workflow run <workflowId|name> [--fill <name>] [--input key=value ...] [--input <fileField>=./path/to/file ...] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--auto-approve] [--wait] [--json]");
             process.exit(1);
         }
         let inputs;
         let fill;
         let autoApprove;
         let imageRigOverrides;
+        let voices;
         try {
             inputs = parseRawInputFlags(process.argv.slice(3));
             rejectTerminalFlag(process.argv.slice(3));
             fill = parseFillFlag(process.argv.slice(3));
             autoApprove = parseAutoApproveFlag(process.argv.slice(3));
             imageRigOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
+            voices = parseVoicesFlag(process.argv.slice(3), defaultDeps.readFile);
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -2923,6 +3034,7 @@ export async function run(flags) {
             fill,
             autoApprove,
             imageRigOverrides,
+            voices,
             wait: flags["wait"] === true,
             json,
             out: flagString(flags, "out"),
