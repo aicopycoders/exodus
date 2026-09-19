@@ -26,24 +26,28 @@ The whole loop, in order:
   3. exodus video storyboard <runId>
      The scene cards: what each scene says and the picture it will look like.
 
-  4. exodus video approve <runId>          (looks right — keep going)
+  4. exodus video voices <runId>
+     Who is in the ad, which voice each one has, how the voices get applied
+     and who pays. Add --set to give someone a voice, before any clip is made.
+
+  5. exodus video approve <runId>          (looks right — keep going)
      exodus video flag <runId> --note "…"  (something is wrong — send it back)
      exodus video retry-frame <runId> --node <nodeId> --scene <n>
        Redo ONE still at the pixel gate. Neighbours stay. The gate holds.
 
-  5. exodus video status <runId>
+  6. exodus video status <runId>
      Where the run is and how each scene's clip turned out.
 
-  6. exodus video pull <runId> --out ./ad
+  7. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
 
-  7. Make your cut from those files.
+  8. Make your cut from those files.
 
-  8. exodus video upload <runId> --file cut.mp4
+  9. exodus video upload <runId> --file cut.mp4
      Attaches your cut to the run and prints the page to approve it on.
 
-  9. exodus video approve <runId>
-     Or click Approve on the page from step 8.
+  10. exodus video approve <runId>
+      Or click Approve on the page from step 9.
 
 Usage:
   exodus video shows [--json]
@@ -53,6 +57,7 @@ Usage:
   exodus video approve <runId> [--json]
   exodus video flag <runId> --note "<what is wrong>" [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
+  exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
 
@@ -71,6 +76,12 @@ Options:
                        steer one frame redo (retry-frame)
   --node <nodeId>      Which scene-frames node holds the still (retry-frame)
   --scene <n>          Which scene's frame to redo. One scene only (retry-frame)
+  --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
+                       character by its ID or by the name your script uses.
+                       Repeat it once per character
+  --clear <who>        Take a character's voice off again (voices). Repeatable
+  --from <file.json>   A file of characters and voice IDs (voices). --set and
+                       --clear win over the same name in the file
   --json               Machine-readable output
   --help, -h           Show this help
 
@@ -83,6 +94,9 @@ Examples:
   exodus video storyboard run_123
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2
+  exodus video voices run_123
+  exodus video voices run_123 --set C1=abc123voiceid --set "HOST 2=def456voiceid"
+  exodus video voices run_123 --from voices.json
   exodus video pull run_123 --out ./ad-run_123
   exodus video upload run_123 --file ./cut.mp4
 `.trim();
@@ -96,6 +110,7 @@ const FLAG_PATH = "/api/v2/video/storyboard/flag";
 const APPROVE_PATH = "/api/v2/workflow/approve";
 const SCENE_RETRY_PATH = "/api/v2/workflow/scene/retry";
 const FINAL_PATH = "/api/v2/video/final";
+export const VOICES_PATH = "/api/v2/video/voices";
 const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
 const ASSETS_PATH = "/api/v2/workflows/assets";
 
@@ -1451,6 +1466,178 @@ export async function retryFrameFlow(
   };
 }
 
+export interface CastVoiceRow {
+  characterId: string;
+  name: string;
+  voice: { voiceId: string; label?: string } | null;
+  availability?:
+    | { state: "available"; providerName: string }
+    | { state: "missing" }
+    | { state: "not-checked"; why: string };
+  spokenScenes: number;
+  spokenSeconds: number;
+}
+
+export interface CastVoiceSheet {
+  runId: string;
+  canChange: boolean;
+  whyNot?: string;
+  cast: CastVoiceRow[];
+  narrator: { voiceId: string; label?: string } | null;
+  treatment: {
+    summary: string;
+    provider: string;
+    model: string;
+    speedChange: boolean;
+    costNote: string;
+    usage: { clips: number; seconds: number };
+  };
+  notices: string[];
+  changed?: string[];
+}
+
+/** What `--set`, `--clear` and `--from` add up to: the map the route wants. */
+export type VoiceMap = Record<string, string | { voiceId: string; label?: string } | null>;
+
+/**
+ * Returns null for "just show me", which is what a bare `video voices <runId>`
+ * means. `--set`/`--clear` win over `--from`, so a file can be overridden on the
+ * spot without editing it.
+ */
+export function parseVoiceFlags(
+  argv: readonly string[],
+  readFile: (path: string) => string,
+): VoiceMap | null {
+  const fromFile: VoiceMap = {};
+  const typed: VoiceMap = {};
+  let asked = false;
+
+  const valueFor = (i: number, flag: string): [string, number] => {
+    const arg = argv[i];
+    if (arg.startsWith(`${flag}=`)) return [arg.slice(flag.length + 1), i];
+    const next = argv[i + 1];
+    if (next === undefined) throw new Error(`${flag} needs a value.`);
+    return [next, i + 1];
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--set" || arg.startsWith("--set=")) {
+      const [raw, next] = valueFor(i, "--set");
+      i = next;
+      // Split on the LAST "=" so a character label containing one still parses.
+      const eq = raw.lastIndexOf("=");
+      if (eq <= 0 || eq === raw.length - 1) {
+        throw new Error(
+          "--set must look like <character>=<voice id>, for example " +
+            `--set C1=abc123voiceid (got "${raw}").`,
+        );
+      }
+      typed[raw.slice(0, eq).trim()] = raw.slice(eq + 1).trim();
+      asked = true;
+    } else if (arg === "--clear" || arg.startsWith("--clear=")) {
+      const [raw, next] = valueFor(i, "--clear");
+      i = next;
+      if (!raw.trim()) throw new Error("--clear needs a character, for example --clear C1.");
+      typed[raw.trim()] = null;
+      asked = true;
+    } else if (arg === "--from" || arg.startsWith("--from=")) {
+      const [file, next] = valueFor(i, "--from");
+      i = next;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFile(file));
+      } catch {
+        throw new Error(`Could not read ${file} as a list of characters and voice IDs.`);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Could not read ${file} as a list of characters and voice IDs.`);
+      }
+      Object.assign(fromFile, parsed as VoiceMap);
+      asked = true;
+    }
+  }
+  if (!asked) return null;
+  // The cast lives on the server, so the only identity known here is the name as
+  // typed: a file entry is replaced when a flag names it the same way, whatever
+  // the case or spacing. "HOST 2" in the file and --set C2 both reach the server,
+  // which refuses the pair by name rather than guessing which one was meant.
+  const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+  const merged: VoiceMap = {};
+  for (const [who, choice] of Object.entries(fromFile)) {
+    if (!Object.keys(typed).some((t) => sameName(t, who))) merged[who] = choice;
+  }
+  return { ...merged, ...typed };
+}
+
+/** One flow for the one verb: no voices means look, voices means set. */
+export async function voicesFlow(
+  runId: string,
+  voices: VoiceMap | null,
+  json: boolean,
+  deps: VideoDeps,
+): Promise<FlowResult> {
+  const res = voices
+    ? await deps.post(VOICES_PATH, { runId, voices })
+    : await deps.get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!res.ok) return errorResult(res, json);
+  const sheet = res.data as CastVoiceSheet;
+  if (json) return { code: 0, lines: [JSON.stringify({ ok: true, ...sheet })] };
+  return { code: 0, lines: voiceSheetLines(sheet) };
+}
+
+function availabilityWords(row: CastVoiceRow): string {
+  if (!row.voice) return "no voice yet";
+  switch (row.availability?.state) {
+    case "available":
+      return "ElevenLabs has it";
+    case "missing":
+      return "ElevenLabs does not have it";
+    case "not-checked":
+      return "not checked just now";
+    default:
+      return "not checked";
+  }
+}
+
+export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
+  const lines = [`Voices for run ${sheet.runId}`];
+  if (sheet.cast.length === 0) lines.push("  Nobody is in this ad yet.");
+  for (const row of sheet.cast) {
+    const voice = row.voice
+      ? `${row.voice.label ? `${row.voice.label} (${row.voice.voiceId})` : row.voice.voiceId}`
+      : "—";
+    lines.push(
+      `  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
+        `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`,
+    );
+  }
+  if (sheet.narrator) {
+    const label = sheet.narrator.label ? `${sheet.narrator.label} ` : "";
+    lines.push(`  Narrator  ${label}(${sheet.narrator.voiceId})  set on the workflow, not here`);
+  }
+  if (sheet.changed) {
+    lines.push(
+      sheet.changed.length > 0
+        ? `Changed: ${sheet.changed.join(", ")}. Pictures and script were not touched.`
+        : "Nothing changed — those voices were already set. Pictures and script were not touched.",
+    );
+  }
+  lines.push(`How voices are applied: ${sheet.treatment.summary}${sheet.treatment.speedChange ? "" : " No speed change."}`);
+  lines.push(
+    `Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
+      `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
+      `${sheet.treatment.usage.clips} clips will be converted.`,
+  );
+  for (const notice of sheet.notices) lines.push(notice);
+  lines.push(
+    sheet.canChange
+      ? "You can still change voices until you approve the storyboard."
+      : (sheet.whyNot ?? "Voices can no longer be changed on this run."),
+  );
+  return lines;
+}
+
 export async function pullFlow(
   runId: string,
   dir: string,
@@ -1818,6 +2005,9 @@ const VALUE_FLAGS = new Set([
   "duration",
   "node",
   "scene",
+  "set",
+  "clear",
+  "from",
 ]);
 
 export function parsePositional(args = process.argv.slice(3)): string[] {
@@ -1884,7 +2074,16 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   }
 
   const runId = rest[0];
-  const needsRunId = ["status", "storyboard", "approve", "flag", "retry-frame", "pull", "upload"];
+  const needsRunId = [
+    "status",
+    "storyboard",
+    "approve",
+    "flag",
+    "retry-frame",
+    "voices",
+    "pull",
+    "upload",
+  ];
   if (needsRunId.includes(sub) && !runId) {
     usage(`video ${sub} needs a run id: exodus video ${sub} <runId>`);
   }
@@ -1913,6 +2112,16 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     return printResult(
       await retryFrameFlow(runId, nodeId, sceneIndex, flagString(flags, "note"), json, defaultDeps),
     );
+  }
+
+  if (sub === "voices") {
+    let voices: VoiceMap | null;
+    try {
+      voices = parseVoiceFlags(process.argv.slice(3), defaultDeps.readFile);
+    } catch (err) {
+      usage((err as Error).message);
+    }
+    return printResult(await voicesFlow(runId, voices, json, defaultDeps));
   }
 
   if (sub === "pull") {

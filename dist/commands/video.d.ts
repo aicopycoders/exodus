@@ -1,5 +1,6 @@
 import { type ApiResponse } from "../lib/client.js";
 export declare const helpText: string;
+export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
     w: string;
     s: number;
@@ -264,6 +265,55 @@ export declare function storyboardFlow(runId: string, json: boolean, deps: Video
 export declare function approveFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function flagFlow(runId: string, note: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function retryFrameFlow(runId: string, nodeId: string, sceneIndex: number, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export interface CastVoiceRow {
+    characterId: string;
+    name: string;
+    voice: {
+        voiceId: string;
+        label?: string;
+    } | null;
+    availability?: {
+        state: "available";
+        providerName: string;
+    } | {
+        state: "missing";
+    } | {
+        state: "not-checked";
+        why: string;
+    };
+    spokenScenes: number;
+    spokenSeconds: number;
+}
+export interface CastVoiceSheet {
+    runId: string;
+    canChange: boolean;
+    whyNot?: string;
+    cast: CastVoiceRow[];
+    narrator: {
+        voiceId: string;
+        label?: string;
+    } | null;
+    treatment: {
+        summary: string;
+        provider: string;
+        model: string;
+        speedChange: boolean;
+        costNote: string;
+        usage: {
+            clips: number;
+            seconds: number;
+        };
+    };
+    notices: string[];
+    changed?: string[];
+}
+export type VoiceMap = Record<string, string | {
+    voiceId: string;
+    label?: string;
+} | null>;
+export declare function parseVoiceFlags(argv: readonly string[], readFile: (path: string) => string): VoiceMap | null;
+export declare function voicesFlow(runId: string, voices: VoiceMap | null, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function voiceSheetLines(sheet: CastVoiceSheet): string[];
 export declare function pullFlow(runId: string, dir: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parseMvhdDurationSec(bytes: Uint8Array): number | null;
 export declare const NO_DURATION_MESSAGE: string;

@@ -89,6 +89,8 @@ exodus video start --show <id> --script script.txt --wait  start, wait for the s
 
 ```operator-guide
 exodus video storyboard <runId>                           read the scene cards
+exodus video voices <runId>                               who speaks and with whose voice
+exodus video voices <runId> --set <character>=<voiceId>   give a character a voice
 exodus video approve <runId>                              keep going
 exodus video flag <runId> --note "what's wrong"           send it back — SHOW RUNS ONLY
 exodus video retry-frame <runId> --node <nodeId> --scene <n>  redo one still at the pixel gate
@@ -162,6 +164,8 @@ Verified against the routes, not assumed. Everything here is admin-gated on top.
 | `workflow run` | starts the run | not the entry point |
 | `video status` | works | works |
 | `video storyboard` | works | works |
+| `video voices` (read) | works | works |
+| `video voices --set` | works | **refused** — the Show owns its voices |
 | `video approve` | works, both gates | works, both gates |
 | `video flag --note` | **refused** | works |
 | script-turn edits at the gate | **refused** | dashboard only |
@@ -196,13 +200,16 @@ Five consequences worth knowing before you promise a user anything:
 
 - **`flag` is Show-only and fails loudly.** `exodus video flag` on a workflow run
   answers "Flag-with-note is only available on Video-module ads."
-  (`convex/videoModule.ts:2208`, guarded on `!run.showId`). Script-turn edits
-  refuse the same way (`:2334`). There is **no** CLI path that sends a workflow
-  run's storyboard back with a note — the direct-edit mutation exists but is
-  wired only to the dashboard's gate screen, not to any API route. From the
-  terminal the storyboard is approve-or-cancel: `exodus workflow cancel <runId>`
-  and run again with a better script, or edit the workflow. Do not offer `flag`
-  to a user on the workflow route.
+  (`convex/videoModule.ts`, guarded on `!run.showId`). Script-turn edits refuse
+  the same way. There is **no** CLI path that sends a workflow run's storyboard
+  back with a note, and none that rewrites its scenes, script or prompts — the
+  whole-envelope edit mutation is wired only to the dashboard's gate screen, not
+  to any API route. The one exception is voices: `exodus video voices --set`
+  writes the cast's voice choices in place and nothing else (see "Giving the
+  characters voices"). For everything else the storyboard is approve-or-cancel
+  from the terminal: `exodus workflow cancel <runId>` and run again with a better
+  script, or edit the workflow. Do not offer `flag` to a user on the workflow
+  route.
 - **`--wait` lands on both video parks, but only those.** Since #1818 every
   `--wait` caller — `workflow run`, `triggers fire`, `checkpoint approve|retry`,
   `repair retry|skip` — ends at a storyboard gate or a final watch, exits 0, and
@@ -256,6 +263,94 @@ The note is read by the model that rewrites the storyboard, so make it concrete
 
 Either way, do not approve on the user's behalf unless they told you to run the
 whole loop unattended.
+
+## Giving the characters voices
+
+By default a workflow run's characters have no voice chosen, so every clip keeps
+the voice the video model invents. `exodus video voices` is where that gets
+fixed, and it only works **before** the storyboard is approved — once clips start
+it refuses.
+
+```
+exodus video voices <runId>
+exodus video voices <runId> --json
+exodus video voices <runId> --set C1=abc123voiceid --set "HOST 2=def456voiceid"
+exodus video voices <runId> --from voices.json
+exodus video voices <runId> --clear C2
+```
+
+Read it first. With no flags it prints one line per character: the character's
+ID, the name the script uses, the voice chosen, whether ElevenLabs actually has
+that voice on the user's account, and how many scenes that character speaks in.
+Under it: how the voices get applied, who pays, and anything worth knowing before
+approving.
+
+Name a character either way. `C1` is the ID the planner handed out; `HOST 1` is
+the name the script uses. Both work, and the name is the portable one — the same
+voices file works on every run of that brand because the planner may hand out the
+IDs differently each time.
+
+**What `--set` changes.** The voice choices, and nothing else. The script, the
+scene pictures and the run itself are left exactly as they were — no re-boarding,
+no picture is redrawn, nothing is charged. A character whose voice was already
+what you asked for reports "Nothing changed".
+
+**What it refuses, and why nothing is written when it does.** A character name
+nobody in the cast answers to, a voice ID with a space in it (people paste the
+voice's *name* by mistake), and a voice ID ElevenLabs is certain it does not have
+on that account. Each refusal says the plain reason and saves nothing. If
+ElevenLabs simply cannot be reached, the choice IS saved and the output says the
+check could not be made — a provider outage never blocks the run.
+
+**The voices file.** A plain JSON object, keyed by the names the script uses:
+
+```json
+{
+  "HOST 1": { "voiceId": "abc123voiceid", "label": "First host" },
+  "HOST 2": { "voiceId": "def456voiceid", "label": "Second host" }
+}
+```
+
+A bare string works instead of the object when you do not care about the label
+(`"HOST 1": "abc123voiceid"`), and `null` clears that character's voice. `--set`
+and `--clear` win over the same name in the file, so one entry can be overridden
+without editing it. Use the name the file uses: if the file says `HOST 2` and the
+flag says `C2`, that is one character named two ways, and the whole request is
+refused with a sentence saying so. Voice IDs belong to the user's own ElevenLabs account and to that brand's
+folder — never put a brand's voice IDs in a shared workflow or template.
+
+**The JSON receipt** (`--json`), the same shape for reading and for setting:
+
+```
+ok                    true
+runId
+changed[]             the characters whose voice actually moved (set only)
+canChange             false once the run has left the storyboard review
+whyNot                why, in one sentence, when canChange is false
+cast[]                one per character
+  characterId, name
+  voice               { voiceId, label } or null
+  availability        { state: "available" | "missing" | "not-checked", … }
+  spokenScenes        how many scenes this character speaks in
+  spokenSeconds       those scenes' planned seconds — what ElevenLabs bills on
+narrator              the one fallback voice, set on the workflow, not here
+treatment             how the voices reach the clips: summary, provider, model,
+                      speedChange, billedTo, estimatedCostUsd, costNote,
+                      usage { clips, seconds }, keyOnRun
+notices[]             plain sentences worth reading before approving
+```
+
+A failure is the same shape every `video` verb uses:
+`{ "ok": false, "status": 400, "error": "<one plain sentence>" }`, exit 1.
+
+**Before you approve, read `notices`.** The ones that cost the user something:
+a character who speaks but has no voice (those clips keep their generated
+voice), no ElevenLabs key saved on the run (no voice can be applied at all), and
+a voice ElevenLabs no longer has.
+
+`estimatedCostUsd` is always null. Exodus cannot price a voice conversion yet;
+ElevenLabs bills the user's own account by audio length, and `usage` gives the
+length. Do not invent a number.
 
 ## The handover: what `pull` gives you
 
