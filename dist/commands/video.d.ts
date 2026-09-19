@@ -1,4 +1,5 @@
 import { type ApiResponse } from "../lib/client.js";
+import type { FlagOccurrence } from "../lib/args.js";
 export declare const helpText: string;
 export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
@@ -43,6 +44,8 @@ export type ArtifactSubset = {
     final?: boolean;
     revoiced?: boolean;
     speechTrimmed?: boolean;
+    tailTrimmed?: boolean;
+    rawStorageId?: string;
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -202,6 +205,7 @@ export interface ManifestScene {
     qc: ClipQc | null;
     revoiced: boolean | null;
     speechTrimmed: boolean | null;
+    rawStorageId: string | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;
@@ -288,6 +292,11 @@ export interface ClipRedoTarget {
 }
 export declare function planClipRedo(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
 export declare function retryClipFlow(runId: string, target: ClipRedoTarget, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function planClipRevoice(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
+export type RevoiceTarget = ClipRedoTarget | {
+    all: true;
+};
+export declare function revoiceFlow(runId: string, target: RevoiceTarget, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export interface CastVoiceRow {
     characterId: string;
     name: string;
@@ -295,6 +304,7 @@ export interface CastVoiceRow {
         voiceId: string;
         label?: string;
     } | null;
+    voiceFrom?: "own-pin" | "run-default";
     availability?: {
         state: "available";
         providerName: string;
@@ -334,7 +344,7 @@ export type VoiceMap = Record<string, string | {
     voiceId: string;
     label?: string;
 } | null>;
-export declare function parseVoiceFlags(argv: readonly string[], readFile: (path: string) => string): VoiceMap | null;
+export declare function parseVoiceFlags(occurrences: FlagOccurrence[], readFile: (path: string) => string): VoiceMap | null;
 export declare function voicesFlow(runId: string, voices: VoiceMap | null, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function voiceSheetLines(sheet: CastVoiceSheet): string[];
 export declare function pullFlow(runId: string, dir: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
@@ -343,4 +353,4 @@ export declare const NO_DURATION_MESSAGE: string;
 export declare function describeFetchFailure(err: unknown): string;
 export declare function uploadFlow(runId: string, filePath: string, durationFlag: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parsePositional(args?: string[]): string[];
-export declare function run(flags: Record<string, string | boolean>): Promise<void>;
+export declare function run(flags: Record<string, string | boolean>, occurrences: FlagOccurrence[]): Promise<void>;

@@ -12,6 +12,7 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getVersion } from "../lib/version.js";
+import { parseArgs, type FlagOccurrence } from "../lib/args.js";
 
 // Commands that are utilities rather than generative pipelines. Everything else
 // present on disk is grouped under "Pipeline Commands".
@@ -152,50 +153,8 @@ async function buildHelp(): Promise<string> {
   return sections.filter((s) => s.trim() !== "").join("\n\n");
 }
 
-interface ParsedArgs {
-  command: string;
-  flags: Record<string, string | boolean>;
-}
-
-function parseArgs(argv: string[]): ParsedArgs {
-  const [, , rawCommand = "help", ...rest] = argv;
-
-  // Route --help/-h/-help as the command itself to the top-level help printer.
-  const command = ["--help", "-h", "-help"].includes(rawCommand) ? "help" : rawCommand;
-
-  const flags: Record<string, string | boolean> = {};
-  let i = 0;
-  while (i < rest.length) {
-    const arg = rest[i];
-    if (arg === "--help" || arg === "-h") {
-      flags["help"] = true;
-      i++;
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = rest[i + 1];
-      if (key.startsWith("no-")) {
-        // --no-wait → { wait: false }
-        flags[key.slice(3)] = false;
-        i++;
-      } else if (next !== undefined && !next.startsWith("--")) {
-        flags[key] = next;
-        i += 2;
-      } else {
-        flags[key] = true;
-        i++;
-      }
-    } else {
-      i++;
-    }
-  }
-
-  return { command, flags };
-}
-
 async function main() {
-  const { command, flags } = parseArgs(process.argv);
+  const { command, flags, occurrences } = parseArgs(process.argv);
 
   // Version: handled before dispatch so `--version`/`-v` isn't treated as a command.
   if (["--version", "-v", "-V", "version"].includes(command)) {
@@ -210,7 +169,10 @@ async function main() {
   }
 
   let commandModule: {
-    run: (flags: Record<string, string | boolean>) => Promise<void>;
+    run: (
+      flags: Record<string, string | boolean>,
+      occurrences: FlagOccurrence[],
+    ) => Promise<void>;
     helpText?: string;
   };
   try {
@@ -237,7 +199,7 @@ async function main() {
     process.exit(1);
   }
 
-  await commandModule.run(flags);
+  await commandModule.run(flags, occurrences);
 }
 
 main().catch((err: unknown) => {

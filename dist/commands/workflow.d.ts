@@ -1,4 +1,5 @@
 import { type ApiResponse } from "../lib/client.js";
+import type { FlagOccurrence } from "../lib/args.js";
 import { type PollOptions, type PollResult } from "../lib/poll.js";
 import { LEGACY_WORKFLOW_RUN_STATUS_VALUES, type RunStatus } from "../lib/runStatus.js";
 import { type RunDeliverySummary } from "../lib/runVerdict.js";
@@ -416,8 +417,8 @@ interface RunFlowOptions {
     onWarningLine?: (line: string) => void;
 }
 export declare function formatPauseNotice(pauseReason: WorkflowPauseReason | undefined, runId: string, dashboardUrl: string): string[];
-export declare function parseRawInputFlags(args: string[]): Record<string, string>;
-export declare function parseInputFlags(args: string[], readFile?: (path: string) => string): Record<string, string>;
+export declare function parseRawInputFlags(occurrences: FlagOccurrence[]): Record<string, string>;
+export declare function parseInputFlags(occurrences: FlagOccurrence[], readFile?: (path: string) => string): Record<string, string>;
 export declare const ASSET_UPLOAD_POLICY: Record<WorkflowMediaType, {
     mimeByExtension: Record<string, string>;
     maxBytes: number;
@@ -426,11 +427,11 @@ export declare const ASSET_UPLOAD_POLICY: Record<WorkflowMediaType, {
 export declare const NO_DELIVERIES_WARNING: string;
 export declare function noDeliveriesWarning(described: unknown): string | undefined;
 export declare function serverWarningsToPrint(serverWarnings: unknown, alreadyPrinted: string[]): string[];
-export declare function rejectTerminalFlag(args: string[]): void;
+export declare function rejectTerminalFlag(occurrences: FlagOccurrence[]): void;
 export declare function parseAutoApproveFlag(args: string[]): boolean;
-export declare function parseRigOverridesFlag(args: string[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
-export declare function parseVoicesFlag(args: string[], readFile?: (path: string) => string): VoiceMap | undefined;
-export declare function parseFillFlag(args: string[]): string | undefined;
+export declare function parseRigOverridesFlag(occurrences: FlagOccurrence[], readFile?: (path: string) => string): Record<string, unknown> | undefined;
+export declare function parseVoicesFlag(occurrences: FlagOccurrence[], readFile?: (path: string) => string): VoiceMap | undefined;
+export declare function parseFillFlag(occurrences: FlagOccurrence[]): string | undefined;
 export declare function formatWorkflowList(workflows: WorkflowListItem[]): string;
 export declare function formatRecentRuns(runs: WorkflowRunProjection[]): string;
 export declare function formatWorkflowVersions(versions: WorkflowVersion[]): string;
@@ -586,9 +587,9 @@ export declare function repairFlow(runId: string, action: "retry" | "skip" | "ki
     json: boolean;
     onProgressLine?: (line: string) => void;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function parseSlotFlags(args: string[]): Record<string, string>;
+export declare function parseSlotFlags(occurrences: FlagOccurrence[]): Record<string, string>;
 export declare function answerFlow(runId: string, values: Record<string, string>, opts: {
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
-export declare function run(flags: Record<string, string | boolean>): Promise<void>;
+export declare function run(flags: Record<string, string | boolean>, occurrences: FlagOccurrence[]): Promise<void>;
 export {};

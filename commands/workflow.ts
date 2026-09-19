@@ -12,6 +12,7 @@ import {
   type ApiResponse,
 } from "../lib/client.js";
 import { formatApiError } from "../lib/format.js";
+import type { FlagOccurrence } from "../lib/args.js";
 import { pollUntilDone, type PollOptions, type PollResult } from "../lib/poll.js";
 import {
   normalizeRunStatus,
@@ -1625,35 +1626,25 @@ function normalizeMultiValue(value: string): string {
  * `describe` has said which fields are Asset Inputs — for those, a bare path is
  * the argument itself and must never be slurped in as utf-8 text.
  */
-export function parseRawInputFlags(args: string[]): Record<string, string> {
+export function parseRawInputFlags(occurrences: FlagOccurrence[]): Record<string, string> {
   const inputs: Record<string, string> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let raw: string | undefined;
-    if (arg === "--input") {
-      raw = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--input=")) {
-      raw = arg.slice("--input=".length);
-    } else {
-      continue;
-    }
-
-    if (!raw) throw new Error("--input requires key=value");
-    const eq = raw.indexOf("=");
-    if (eq <= 0) throw new Error(`--input must be key=value (got "${raw}")`);
-    const key = raw.slice(0, eq).trim();
-    if (!key) throw new Error(`--input must include a key (got "${raw}")`);
-    inputs[key] = raw.slice(eq + 1);
+  for (const { flag, value } of occurrences) {
+    if (flag !== "input") continue;
+    if (!value) throw new Error("--input requires key=value");
+    const eq = value.indexOf("=");
+    if (eq <= 0) throw new Error(`--input must be key=value (got "${value}")`);
+    const key = value.slice(0, eq).trim();
+    if (!key) throw new Error(`--input must include a key (got "${value}")`);
+    inputs[key] = value.slice(eq + 1);
   }
   return inputs;
 }
 
 export function parseInputFlags(
-  args: string[],
+  occurrences: FlagOccurrence[],
   readFile?: (path: string) => string,
 ): Record<string, string> {
-  const inputs = parseRawInputFlags(args);
+  const inputs = parseRawInputFlags(occurrences);
   for (const [key, value] of Object.entries(inputs)) {
     inputs[key] = expandInputValue(key, value, readFile);
   }
@@ -2167,40 +2158,32 @@ async function prepareRunInputs(
  * #1259: `--terminal <nodeId>` (#860) used to scope a run to the upstream
  * closure of some end nodes. #1222 repealed partial runs — the server refuses
  * ANY launch that would skip a step — so the flag can no longer do anything but
- * fail. It is still READ, off the raw argv, purely so an old script gets one
- * plain sentence here instead of a raw server error after a round trip. The
- * flag is no longer advertised in the help text.
+ * fail. It is still READ purely so an old script gets one plain sentence here
+ * instead of a raw server error after a round trip. The flag is no longer
+ * advertised in the help text.
  *
  * Throws when the flag appears in any form (`--terminal id`, `--terminal=id`,
  * or bare); returns silently when it doesn't.
  */
-export function rejectTerminalFlag(args: string[]): void {
-  for (const arg of args) {
-    if (arg === "--terminal" || arg.startsWith("--terminal=")) {
-      throw new Error(
-        "--terminal is no longer supported: a run now executes the whole " +
-          "workflow or it doesn't start. Re-run without --terminal.",
-      );
-    }
+export function rejectTerminalFlag(occurrences: FlagOccurrence[]): void {
+  if (occurrences.some((o) => o.flag === "terminal")) {
+    throw new Error(
+      "--terminal is no longer supported: a run now executes the whole " +
+        "workflow or it doesn't start. Re-run without --terminal.",
+    );
   }
 }
 
 /**
- * Read the `--fill <name>` flag (#1013) off the raw argv — the saved fill a run
- * launches from. Accepts both `--fill name` and `--fill=name`, mirroring the
- * `--input` parse convention; the shared flags map splits neither form
- * reliably, and a fill silently dropped would launch the WRONG run. Returns
- * undefined when the flag was never passed; throws when it was passed empty.
- */
-/**
- * Detect the bare `--auto-approve` flag (#1079) off the raw argv. The shared
- * flags map can't be trusted for it: parseArgs greedily eats the NEXT token as
- * any flag's value, so `run --auto-approve "Flow"` lands in the map as
- * `{"auto-approve": "Flow"}` — and a strict `=== true` check would silently
- * launch ATTENDED, which is the one failure nobody is around to notice. Raw
- * presence is the truth: the flag takes no value, so seeing it at all means it
- * was passed. (Same raw-argv convention as --input/--fill; an `--auto-approve=...`
- * form is rejected rather than guessed at.)
+ * Detect the bare `--auto-approve` flag (#1079) off the raw argv — the one flag
+ * still read that way. It takes no value, so `--auto-approve=yes` has to fail
+ * loud rather than be guessed at, and a parsed occurrence cannot tell that form
+ * apart from `--auto-approve yes` (both carry the value "yes"). Only the words
+ * themselves keep the two apart. Presence is otherwise the whole truth: the
+ * flag takes no value, so seeing it at all means it was passed — a strict
+ * `=== true` check against the shared flags map would instead read
+ * `run --auto-approve "Flow"` as `{"auto-approve": "Flow"}` and silently launch
+ * ATTENDED, which is the one failure nobody is around to notice.
  */
 export function parseAutoApproveFlag(args: string[]): boolean {
   for (const arg of args) {
@@ -2213,10 +2196,10 @@ export function parseAutoApproveFlag(args: string[]): boolean {
 }
 
 /**
- * Read the `--rig-overrides <json|@file.json>` flag (#1084 F2) off the raw argv —
- * the per-run Image Rig re-aim a launch carries. Accepts both
- * `--rig-overrides '<json>'` and `--rig-overrides=@plan.json`; `@path` reads the
- * file (the `--input` convention), and `@@` escapes a literal leading `@`.
+ * Read the `--rig-overrides <json|@file.json>` flag (#1084 F2) — the per-run
+ * Image Rig re-aim a launch carries. Accepts both `--rig-overrides '<json>'` and
+ * `--rig-overrides=@plan.json`; `@path` reads the file (the `--input`
+ * convention), and `@@` escapes a literal leading `@`.
  *
  * The JSON is parsed HERE, before the run is requested, for one reason: a typo
  * in a payload should cost a shell error, not a round trip that comes back as an
@@ -2225,21 +2208,12 @@ export function parseAutoApproveFlag(args: string[]): boolean {
  * object. Returns undefined when the flag was never passed.
  */
 export function parseRigOverridesFlag(
-  args: string[],
+  occurrences: FlagOccurrence[],
   readFile?: (path: string) => string,
 ): Record<string, unknown> | undefined {
   let raw: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let value: string | undefined;
-    if (arg === "--rig-overrides") {
-      value = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--rig-overrides=")) {
-      value = arg.slice("--rig-overrides=".length);
-    } else {
-      continue;
-    }
+  for (const { flag, value } of occurrences) {
+    if (flag !== "rig-overrides") continue;
     if (value === undefined || value.startsWith("--")) {
       throw new Error("--rig-overrides requires JSON or @path/to/file.json");
     }
@@ -2286,11 +2260,11 @@ export function parseRigOverridesFlag(
 }
 
 /**
- * Read the `--voices <json|@voices.json>` flag (#1846) off the raw argv — the
- * voices a run carries from the moment it starts, keyed by the names the script
- * gives its speakers ("HOST 1"), because the planner's character ids (C1, C2)
- * do not exist yet. Same file `exodus video voices <run> --from` reads at the
- * storyboard review, so a brand keeps one voices.json for both.
+ * Read the `--voices <json|@voices.json>` flag (#1846) — the voices a run carries
+ * from the moment it starts, keyed by the names the script gives its speakers
+ * ("HOST 1"), because the planner's character ids (C1, C2) do not exist yet.
+ * Same file `exodus video voices <run> --from` reads at the storyboard review,
+ * so a brand keeps one voices.json for both.
  *
  * Parsed HERE, before anything is requested, for the `--rig-overrides` reason: a
  * JSON typo should cost a shell error, not a round trip. WHICH speakers and
@@ -2298,21 +2272,12 @@ export function parseRigOverridesFlag(
  * ElevenLabs account — so this only insists the text is an object.
  */
 export function parseVoicesFlag(
-  args: string[],
+  occurrences: FlagOccurrence[],
   readFile?: (path: string) => string,
 ): VoiceMap | undefined {
   let raw: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let value: string | undefined;
-    if (arg === "--voices") {
-      value = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--voices=")) {
-      value = arg.slice("--voices=".length);
-    } else {
-      continue;
-    }
+  for (const { flag, value } of occurrences) {
+    if (flag !== "voices") continue;
     if (value === undefined || value.startsWith("--")) {
       throw new Error("--voices requires JSON or @path/to/voices.json");
     }
@@ -2356,24 +2321,21 @@ export function parseVoicesFlag(
   return parsed as VoiceMap;
 }
 
-export function parseFillFlag(args: string[]): string | undefined {
+/**
+ * Read the `--fill <name>` flag (#1013) — the saved fill a run launches from.
+ * Accepts both `--fill name` and `--fill=name`, mirroring the `--input` parse
+ * convention; a fill silently dropped would launch the WRONG run. Returns
+ * undefined when the flag was never passed; throws when it was passed empty.
+ */
+export function parseFillFlag(occurrences: FlagOccurrence[]): string | undefined {
   let name: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let raw: string | undefined;
-    if (arg === "--fill") {
-      raw = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--fill=")) {
-      raw = arg.slice("--fill=".length);
-    } else {
-      continue;
-    }
+  for (const { flag, value } of occurrences) {
+    if (flag !== "fill") continue;
     // A bare trailing `--fill`, or one followed by another flag, names nothing.
-    if (raw === undefined || raw.startsWith("--")) {
+    if (value === undefined || value.startsWith("--")) {
       throw new Error("--fill requires a saved fill's name");
     }
-    const trimmed = raw.trim();
+    const trimmed = value.trim();
     if (!trimmed) throw new Error("--fill requires a saved fill's name");
     // Last one wins, matching how the shared flags map treats a repeated flag.
     name = trimmed;
@@ -5281,25 +5243,16 @@ async function resumeAndMaybeWait(
 // ── Answer verb (nested-slot parks) ───────────────────────────────────────
 
 /** Collect the repeatable `--slot key=value` flag into a values map. */
-export function parseSlotFlags(args: string[]): Record<string, string> {
+export function parseSlotFlags(occurrences: FlagOccurrence[]): Record<string, string> {
   const values: Record<string, string> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    let raw: string | undefined;
-    if (arg === "--slot") {
-      raw = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--slot=")) {
-      raw = arg.slice("--slot=".length);
-    } else {
-      continue;
-    }
-    if (!raw) throw new Error("--slot requires key=value");
-    const eq = raw.indexOf("=");
-    if (eq <= 0) throw new Error(`--slot must be key=value (got "${raw}")`);
-    const key = raw.slice(0, eq).trim();
-    if (!key) throw new Error(`--slot must include a key (got "${raw}")`);
-    values[key] = raw.slice(eq + 1);
+  for (const { flag, value } of occurrences) {
+    if (flag !== "slot") continue;
+    if (!value) throw new Error("--slot requires key=value");
+    const eq = value.indexOf("=");
+    if (eq <= 0) throw new Error(`--slot must be key=value (got "${value}")`);
+    const key = value.slice(0, eq).trim();
+    if (!key) throw new Error(`--slot must include a key (got "${value}")`);
+    values[key] = value.slice(eq + 1);
   }
   return values;
 }
@@ -5391,7 +5344,10 @@ async function maybeReadStdin(
   return raw.endsWith("\n") ? raw.slice(0, -1) : raw;
 }
 
-export async function run(flags: Record<string, string | boolean>): Promise<void> {
+export async function run(
+  flags: Record<string, string | boolean>,
+  occurrences: FlagOccurrence[],
+): Promise<void> {
   const positional = parsePositional();
   const [sub, ...rest] = positional;
   const json = !!flags["json"];
@@ -5481,28 +5437,22 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     try {
       // Stage 3B: parse RAW. runFlow expands `@path` text inputs and uploads
       // file inputs once describe has said which fields are which.
-      inputs = parseRawInputFlags(process.argv.slice(3));
+      inputs = parseRawInputFlags(occurrences);
       // #1259: --terminal (partial runs, #860) was repealed by #1222. Refuse it
       // HERE, before a single request goes out, so an old script gets one plain
       // sentence instead of a raw server error.
-      rejectTerminalFlag(process.argv.slice(3));
-      // #1013: --fill reads the raw argv too, so `--fill=<name>` can't be
-      // swallowed and an empty one fails loud instead of launching fill-less.
-      fill = parseFillFlag(process.argv.slice(3));
-      // #1079: --auto-approve reads the raw argv for the same reason — the
-      // shared map can hand it the NEXT token as a "value" (flag-before-name
-      // ordering), and a strict boolean check would then silently launch
-      // ATTENDED, the one miss nobody is around to notice.
+      rejectTerminalFlag(occurrences);
+      fill = parseFillFlag(occurrences);
+      // #1079: --auto-approve alone still reads the raw words, because only they
+      // tell `--auto-approve=yes` (refused) from `--auto-approve yes` (the flag
+      // plus a positional). See parseAutoApproveFlag.
       autoApprove = parseAutoApproveFlag(process.argv.slice(3));
       // #1084 (F2): --rig-overrides is parsed HERE, before anything is
       // requested — a JSON typo must cost a shell error, not a run.
-      imageRigOverrides = parseRigOverridesFlag(
-        process.argv.slice(3),
-        defaultDeps.readFile,
-      );
+      imageRigOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
       // #1846: --voices is parsed here for the same reason — a typo in the
       // brand's voices.json must cost a shell error, not a run.
-      voices = parseVoicesFlag(process.argv.slice(3), defaultDeps.readFile);
+      voices = parseVoicesFlag(occurrences, defaultDeps.readFile);
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -5736,9 +5686,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     }
     let values: Record<string, string>;
     try {
-      // --slot repeats, so read the raw argv (the shared flags map only keeps
-      // the last value of a repeated flag).
-      values = parseSlotFlags(process.argv.slice(3));
+      values = parseSlotFlags(occurrences);
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -5780,14 +5728,11 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
           process.exit(1);
         }
       }
-      // #1084 (F2): same raw-argv parse the run verb uses — a bad payload must
-      // fail here, before a run fires on the owner's keys.
+      // #1084 (F2): same parse the run verb uses — a bad payload must fail
+      // here, before a run fires on the owner's keys.
       let fireOverrides: Record<string, unknown> | undefined;
       try {
-        fireOverrides = parseRigOverridesFlag(
-          process.argv.slice(3),
-          defaultDeps.readFile,
-        );
+        fireOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
       } catch (e) {
         console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
         process.exit(1);

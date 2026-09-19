@@ -5,6 +5,7 @@ import { apiGet, apiPost, getDashboardUrl, type ApiResponse } from "../lib/clien
 import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
+import type { FlagOccurrence } from "../lib/args.js";
 import { ASSET_UPLOAD_POLICY } from "./workflow.js";
 
 export const helpText = `
@@ -45,6 +46,12 @@ The whole loop, in order:
        Redo ONE finished clip while the run waits for the cut. Everything
        else stays. A --note steers the motion, never the words.
 
+     exodus video revoice <runId> --all
+       Redo only the VOICE on clips that kept the video model's own voice
+       (for example, the run had no ElevenLabs key when they were made). The
+       picture stays, no new video is made, and a clip whose voice pass
+       cannot finish is kept as it was. Use --scene <n> for one clip.
+
   8. Make your cut from those files.
 
   9. exodus video upload <runId> --file cut.mp4
@@ -62,6 +69,7 @@ Usage:
   exodus video flag <runId> --note "<what is wrong>" [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
+  exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
@@ -81,9 +89,11 @@ Options:
                        steer one redo (retry-frame, retry-clip)
   --node <nodeId>      Which scene-frames node holds the still (retry-frame).
                        Which video step holds the clip, when a scene has one on
-                       more than one step (retry-clip)
+                       more than one step (retry-clip, revoice)
   --scene <n>          Which scene to redo. One scene only, a whole number
-                       (retry-frame, retry-clip)
+                       (retry-frame, retry-clip, revoice)
+  --all                Every finished clip that kept the video model's voice
+                       (revoice)
   --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
                        character by its ID or by the name your script uses.
                        Repeat it once per character
@@ -103,6 +113,7 @@ Examples:
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2
   exodus video retry-clip run_123 --scene 3 --note "keep the handshake in frame"
+  exodus video revoice run_123 --all
   exodus video voices run_123
   exodus video voices run_123 --set C1=abc123voiceid --set "HOST 2=def456voiceid"
   exodus video voices run_123 --from voices.json
@@ -118,6 +129,13 @@ const STORYBOARD_PATH = "/api/v2/video/storyboard";
 const FLAG_PATH = "/api/v2/video/storyboard/flag";
 const APPROVE_PATH = "/api/v2/workflow/approve";
 const SCENE_RETRY_PATH = "/api/v2/workflow/scene/retry";
+// #1858: the voice-only redo has its OWN route. /scene/retry drops fields it
+// does not know, so asking an older server for a voice redo through it would
+// buy a full paid redo of the clip. An older server answers 404 here instead.
+const SCENE_REVOICE_PATH = "/api/v2/workflow/scene/revoice";
+const REVOICE_NOT_ON_THIS_SERVER =
+  "This Exodus server does not have the voice redo yet, so nothing was started and nothing " +
+  "was spent. It arrives with the next server update.";
 const FINAL_PATH = "/api/v2/video/final";
 export const VOICES_PATH = "/api/v2/video/voices";
 const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
@@ -172,6 +190,11 @@ export type ArtifactSubset =
       revoiced?: boolean;
       /** #1708: the clip was trimmed to its spoken words. */
       speechTrimmed?: boolean;
+      /** #801: off-script speech was cut from the end of the clip. */
+      tailTrimmed?: boolean;
+      /** #1858: the generator's own file, kept on record when the voice pass
+       *  replaced the clip file. */
+      rawStorageId?: string;
     }
   | {
       type: "audio";
@@ -581,6 +604,9 @@ export interface ManifestScene {
   revoiced: boolean | null;
   /** #1708: true when the clip was trimmed to its spoken words; null without a clip. */
   speechTrimmed: boolean | null;
+  /** #1858: the stored file the video model made, when the voice pass replaced
+   *  the clip with a new file. Null when the clip IS that file, or there is none. */
+  rawStorageId: string | null;
   /** The clip ledger row's status (pending/running/done/failed), or "missing"
    *  when the run never wrote one. */
   clipStatus: string;
@@ -665,6 +691,7 @@ type SceneClipPull = {
   words: ClipWord[] | null;
   revoiced: boolean;
   speechTrimmed: boolean;
+  rawStorageId: string | null;
 };
 
 function clipFromArtifact(
@@ -684,6 +711,7 @@ function clipFromArtifact(
     words: artifact.words ?? null,
     revoiced: artifact.revoiced === true,
     speechTrimmed: artifact.speechTrimmed === true,
+    rawStorageId: artifact.rawStorageId ?? null,
   };
 }
 
@@ -1021,6 +1049,7 @@ export function planPull(
       qc: clip?.qc ?? null,
       revoiced: clip ? clip.revoiced : null,
       speechTrimmed: clip ? clip.speechTrimmed : null,
+      rawStorageId: clip ? clip.rawStorageId : null,
       clipStatus: item?.status ?? "missing",
       error: item?.error ?? null,
       flagged: item?.flagged === true,
@@ -1085,6 +1114,7 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
       scene.clip = null;
       scene.revoiced = null;
       scene.speechTrimmed = null;
+      scene.rawStorageId = null;
     }
     if (scene.voice === failure.file) scene.voice = null;
     if (scene.keyframe === failure.file) scene.keyframe = null;
@@ -1645,48 +1675,9 @@ export function planClipRedo(
   target: ClipRedoTarget,
 ): ClipRedoPlan {
   const stop = classifyRun(run);
-  const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
-
-  const rows = items.filter(
-    (i) =>
-      i.itemKind === "clip" &&
-      i.sceneIndex === target.sceneIndex &&
-      (target.nodeId === undefined || i.nodeId === target.nodeId),
-  );
-  if (rows.length === 0) {
-    return { ok: false, reason: `Scene ${target.sceneIndex} has no clip to redo.` };
-  }
-  const nodeIds = [...new Set(rows.map((r) => r.nodeId))];
-  if (nodeIds.length > 1) {
-    return {
-      ok: false,
-      reason:
-        `Scene ${target.sceneIndex} has a clip on more than one step (${nodeIds.join(", ")}), ` +
-        "so say which one: --node <nodeId>.",
-    };
-  }
-  const row = rows[0];
-
-  const node = run.nodes.find((n) => n.nodeId === row.nodeId);
-  if (node?.status === "running") {
-    return {
-      ok: false,
-      reason:
-        `The "${row.nodeId}" step is still making other scenes. Try again once it has finished ` +
-        `(exodus video status ${run._id}).`,
-    };
-  }
-  if (node && node.status !== "done") {
-    return {
-      ok: false,
-      reason:
-        `The "${row.nodeId}" step did not finish (it is "${node.status}"), ` +
-        "and one clip can only be redone on a step that finished.",
-    };
-  }
-  if (row.status === "running") {
-    return { ok: false, reason: `Scene ${target.sceneIndex} is already being redone.` };
-  }
+  const found = findClipRow(run, items, target);
+  if ("reason" in found) return { ok: false, reason: found.reason };
+  const { row, uploadedCut } = found;
 
   const redoable =
     row.status === "failed" ||
@@ -1714,6 +1705,56 @@ export function planClipRedo(
     attempt: row.attempt ?? 0,
     warnings: uploadedCut ? [UPLOADED_CUT_WARNING] : [],
   };
+}
+
+/** The one clip row a redo names, or why it cannot be worked on right now. The
+ *  rules both kinds of redo share: the row exists on exactly one step, that step
+ *  has finished, and nobody is already redoing the scene. */
+function findClipRow(
+  run: VideoRun,
+  items: NodeItem[],
+  target: ClipRedoTarget,
+): { row: NodeItem; uploadedCut: boolean } | { reason: string } {
+  const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
+
+  const rows = items.filter(
+    (i) =>
+      i.itemKind === "clip" &&
+      i.sceneIndex === target.sceneIndex &&
+      (target.nodeId === undefined || i.nodeId === target.nodeId),
+  );
+  if (rows.length === 0) {
+    return { reason: `Scene ${target.sceneIndex} has no clip to redo.` };
+  }
+  const nodeIds = [...new Set(rows.map((r) => r.nodeId))];
+  if (nodeIds.length > 1) {
+    return {
+      reason:
+        `Scene ${target.sceneIndex} has a clip on more than one step (${nodeIds.join(", ")}), ` +
+        "so say which one: --node <nodeId>.",
+    };
+  }
+  const row = rows[0];
+
+  const node = run.nodes.find((n) => n.nodeId === row.nodeId);
+  if (node?.status === "running") {
+    return {
+      reason:
+        `The "${row.nodeId}" step is still making other scenes. Try again once it has finished ` +
+        `(exodus video status ${run._id}).`,
+    };
+  }
+  if (node && node.status !== "done") {
+    return {
+      reason:
+        `The "${row.nodeId}" step did not finish (it is "${node.status}"), ` +
+        "and one clip can only be redone on a step that finished.",
+    };
+  }
+  if (row.status === "running") {
+    return { reason: `Scene ${target.sceneIndex} is already being redone.` };
+  }
+  return { row, uploadedCut };
 }
 
 export async function retryClipFlow(
@@ -1783,10 +1824,210 @@ export async function retryClipFlow(
   };
 }
 
+/** Has this clip's file already been changed by the voice pass? The pass works on
+ *  the video model's own file, so a clip it has touched cannot go through again. */
+function clipIsStillRaw(item: NodeItem): boolean {
+  const a = item.artifact;
+  return (
+    item.status === "done" &&
+    a?.type === "video" &&
+    a.revoiced !== true &&
+    a.speechTrimmed !== true &&
+    a.tailTrimmed !== true
+  );
+}
+
+/**
+ * What a clip's checks say when its voice should have been changed and was not.
+ * `speech-check-skipped` is deliberately NOT here: it also lands on clips whose
+ * audio the render or a later step owns, where there is no voice change to redo
+ * and a pass would bill a transcription to change nothing.
+ */
+const VOICE_NOT_CHANGED_CODES = new Set(["voice-unpinned", "voice-not-applied"]);
+
+/**
+ * #1858: decide a voice-only redo before anything is queued. Mirrors the
+ * server's rule the way `planClipRedo` mirrors its own: a finished clip whose
+ * file is still the video model's own. The server stays the authority.
+ */
+export function planClipRevoice(
+  run: VideoRun,
+  items: NodeItem[],
+  target: ClipRedoTarget,
+): ClipRedoPlan {
+  const found = findClipRow(run, items, target);
+  if ("reason" in found) return { ok: false, reason: found.reason };
+  const { row, uploadedCut } = found;
+  const remake = `To make the clip again from scratch: exodus video retry-clip ${run._id} --scene ${target.sceneIndex}`;
+
+  if (row.status !== "done" || row.artifact?.type !== "video") {
+    return {
+      ok: false,
+      reason: `Scene ${target.sceneIndex} has no finished clip, so there is no voice to redo. ${remake}`,
+    };
+  }
+  if (!clipIsStillRaw(row)) {
+    return {
+      ok: false,
+      reason:
+        `Scene ${target.sceneIndex}'s clip has already been through the voice pass, ` +
+        `so it cannot go through it again. ${remake}`,
+    };
+  }
+  return {
+    ok: true,
+    nodeId: row.nodeId,
+    sceneIndex: target.sceneIndex,
+    attempt: row.attempt ?? 0,
+    warnings: uploadedCut ? [UPLOADED_CUT_WARNING] : [],
+  };
+}
+
+export type RevoiceTarget = ClipRedoTarget | { all: true };
+
+/** "Scene 3", "Scenes 3 and 4", "Scenes 3, 4 and 9". */
+function sceneListWords(sceneIndexes: number[]): string {
+  if (sceneIndexes.length === 1) return `Scene ${sceneIndexes[0]}`;
+  return `Scenes ${sceneIndexes.slice(0, -1).join(", ")} and ${sceneIndexes[sceneIndexes.length - 1]}`;
+}
+
+type RevoiceSceneResult =
+  | { sceneIndex: number; nodeId?: string; ok: true; triggerRunId?: string }
+  | { sceneIndex: number; nodeId?: string; ok: false; error: string };
+
+/** One request per scene, so one scene's refusal never costs the others. */
+export async function revoiceFlow(
+  runId: string,
+  target: RevoiceTarget,
+  json: boolean,
+  deps: VideoDeps,
+): Promise<FlowResult> {
+  const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!runRes.ok) return errorResult(runRes, json);
+  const run = asVideoRun(runRes.data);
+
+  const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!itemsRes.ok) return errorResult(itemsRes, json);
+  const items = (itemsRes.data as { items?: NodeItem[] }).items ?? [];
+
+  const targets: ClipRedoTarget[] =
+    "all" in target
+      ? items
+          .filter(
+            (i) =>
+              i.itemKind === "clip" &&
+              clipIsStillRaw(i) &&
+              (i.findings ?? []).some((f) => VOICE_NOT_CHANGED_CODES.has(f.code)),
+          )
+          .sort((a, b) => a.sceneIndex - b.sceneIndex)
+          .map((i) => ({ sceneIndex: i.sceneIndex, nodeId: i.nodeId }))
+      : [target];
+
+  if (targets.length === 0) {
+    const nothing = "No clip on this run is waiting for a voice pass, so nothing was started.";
+    return {
+      code: 0,
+      lines: json ? [JSON.stringify({ ok: true, runId, scenes: [], note: nothing })] : [nothing],
+    };
+  }
+
+  const scenes: RevoiceSceneResult[] = [];
+  const warnings = new Set<string>();
+  for (const one of targets) {
+    const plan = planClipRevoice(run, items, one);
+    if (!plan.ok) {
+      scenes.push({ sceneIndex: one.sceneIndex, nodeId: one.nodeId, ok: false, error: plan.reason });
+      continue;
+    }
+    const res = await deps.post(SCENE_REVOICE_PATH, {
+      runId,
+      nodeId: plan.nodeId,
+      sceneIndex: plan.sceneIndex,
+    });
+    // The route itself is missing, which is true of every scene alike. Stop
+    // here, and never reach for /scene/retry: that one makes new paid video.
+    if (missingRouteLine(res, "exodus video revoice")) {
+      return {
+        code: 1,
+        lines: json
+          ? [JSON.stringify({ ok: false, status: 404, error: REVOICE_NOT_ON_THIS_SERVER })]
+          : [REVOICE_NOT_ON_THIS_SERVER],
+      };
+    }
+    if (res.ok) {
+      plan.warnings.forEach((w) => warnings.add(w));
+      scenes.push({
+        sceneIndex: plan.sceneIndex,
+        nodeId: plan.nodeId,
+        ok: true,
+        triggerRunId: (res.data as { triggerRunId?: string }).triggerRunId,
+      });
+      continue;
+    }
+    scenes.push({
+      sceneIndex: plan.sceneIndex,
+      nodeId: plan.nodeId,
+      ok: false,
+      error: videoApiError(res),
+    });
+  }
+
+  const queued = scenes.filter((r) => r.ok).length;
+  const code = scenes.every((r) => r.ok) ? 0 : 1;
+  const review = reviewUrl(deps.dashboardUrl, run);
+  if (json) {
+    return {
+      code,
+      lines: [
+        JSON.stringify({
+          ok: code === 0,
+          runId,
+          scenes,
+          reviewUrl: review,
+          warnings: [...warnings],
+        }),
+      ],
+    };
+  }
+  // A refusal about the whole run (no key saved, the ad already delivered) comes
+  // back word for word on every scene, so scenes that heard the same sentence
+  // share one line, placed where the first of them would have been.
+  const refusedWith = new Map<string, number[]>();
+  for (const r of scenes) {
+    if (!r.ok) refusedWith.set(r.error, [...(refusedWith.get(r.error) ?? []), r.sceneIndex]);
+  }
+  const sceneLines = scenes.flatMap((r) => {
+    if (r.ok) {
+      return [
+        `Scene ${r.sceneIndex}: redoing the voice on ${r.nodeId}. triggerRunId: ${r.triggerRunId ?? "-"}`,
+      ];
+    }
+    const sharing = refusedWith.get(r.error) ?? [];
+    if (sharing[0] !== r.sceneIndex) return [];
+    return [`${sceneListWords(sharing)}: not started. ${r.error}`];
+  });
+  if (queued === 0) return { code, lines: sceneLines };
+  return {
+    code,
+    lines: [
+      ...sceneLines,
+      "The picture in each clip stays exactly as it is. No new video is made.",
+      "The words are checked against the script, the clip is trimmed to the speech, and the chosen voice is applied. ElevenLabs bills that to your own key.",
+      "If the voice pass cannot finish on a clip, that clip is kept as it was.",
+      `Watch them land: exodus video status ${runId}`,
+      `Review the run: ${review}`,
+      ...warnings,
+    ],
+  };
+}
+
 export interface CastVoiceRow {
   characterId: string;
   name: string;
+  /** The voice this character's clips are converted to: their own, else the
+   *  run's default (#1858). */
   voice: { voiceId: string; label?: string } | null;
+  voiceFrom?: "own-pin" | "run-default";
   availability?:
     | { state: "available"; providerName: string }
     | { state: "missing" }
@@ -1822,26 +2063,21 @@ export type VoiceMap = Record<string, string | { voiceId: string; label?: string
  * spot without editing it.
  */
 export function parseVoiceFlags(
-  argv: readonly string[],
+  occurrences: FlagOccurrence[],
   readFile: (path: string) => string,
 ): VoiceMap | null {
   const fromFile: VoiceMap = {};
   const typed: VoiceMap = {};
   let asked = false;
 
-  const valueFor = (i: number, flag: string): [string, number] => {
-    const arg = argv[i];
-    if (arg.startsWith(`${flag}=`)) return [arg.slice(flag.length + 1), i];
-    const next = argv[i + 1];
-    if (next === undefined) throw new Error(`${flag} needs a value.`);
-    return [next, i + 1];
+  const valueFor = (occurrence: FlagOccurrence): string => {
+    if (occurrence.value === undefined) throw new Error(`--${occurrence.flag} needs a value.`);
+    return occurrence.value;
   };
 
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--set" || arg.startsWith("--set=")) {
-      const [raw, next] = valueFor(i, "--set");
-      i = next;
+  for (const occurrence of occurrences) {
+    if (occurrence.flag === "set") {
+      const raw = valueFor(occurrence);
       // Split on the LAST "=" so a character label containing one still parses.
       const eq = raw.lastIndexOf("=");
       if (eq <= 0 || eq === raw.length - 1) {
@@ -1852,15 +2088,13 @@ export function parseVoiceFlags(
       }
       typed[raw.slice(0, eq).trim()] = raw.slice(eq + 1).trim();
       asked = true;
-    } else if (arg === "--clear" || arg.startsWith("--clear=")) {
-      const [raw, next] = valueFor(i, "--clear");
-      i = next;
+    } else if (occurrence.flag === "clear") {
+      const raw = valueFor(occurrence);
       if (!raw.trim()) throw new Error("--clear needs a character, for example --clear C1.");
       typed[raw.trim()] = null;
       asked = true;
-    } else if (arg === "--from" || arg.startsWith("--from=")) {
-      const [file, next] = valueFor(i, "--from");
-      i = next;
+    } else if (occurrence.flag === "from") {
+      const file = valueFor(occurrence);
       let parsed: unknown;
       try {
         parsed = JSON.parse(readFile(file));
@@ -1917,10 +2151,12 @@ function availabilityWords(row: CastVoiceRow): string {
   }
 }
 
-/** One pinned voice, spelled the same way everywhere it is shown. */
-function voiceWords(voice: { voiceId: string; label?: string } | null): string {
+/** One character's voice, spelled the same way everywhere it is shown. */
+function voiceWords(row: Pick<CastVoiceRow, "voice" | "voiceFrom">): string {
+  const voice = row.voice;
   if (!voice) return "—";
-  return voice.label ? `${voice.label} (${voice.voiceId})` : voice.voiceId;
+  const words = voice.label ? `${voice.label} (${voice.voiceId})` : voice.voiceId;
+  return row.voiceFrom === "run-default" ? `${words}, the run's default voice` : words;
 }
 
 /** #1845: the compact "Voices" block the storyboard stop and the approve receipt
@@ -1935,7 +2171,7 @@ function voiceSummaryLines(cast: CastVoiceRow[], notices: string[]): string[] {
   for (const row of rows) {
     lines.push(
       row.voice
-        ? `  ${row.name.padEnd(width)}  →  ${voiceWords(row.voice)}  ${availabilityWords(row)}`
+        ? `  ${row.name.padEnd(width)}  →  ${voiceWords(row)}  ${availabilityWords(row)}`
         : `  ${row.name.padEnd(width)}  →  no voice chosen (keeps the generated voice)`,
     );
   }
@@ -1947,7 +2183,7 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
   const lines = [`Voices for run ${sheet.runId}`];
   if (sheet.cast.length === 0) lines.push("  Nobody is in this ad yet.");
   for (const row of sheet.cast) {
-    const voice = voiceWords(row.voice);
+    const voice = voiceWords(row);
     lines.push(
       `  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
         `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`,
@@ -2383,7 +2619,10 @@ function usage(line: string): never {
   process.exit(1);
 }
 
-export async function run(flags: Record<string, string | boolean>): Promise<void> {
+export async function run(
+  flags: Record<string, string | boolean>,
+  occurrences: FlagOccurrence[],
+): Promise<void> {
   const [sub, ...rest] = parsePositional();
   const json = flags["json"] === true;
 
@@ -2422,6 +2661,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     "flag",
     "retry-frame",
     "retry-clip",
+    "revoice",
     "voices",
     "pull",
     "upload",
@@ -2476,10 +2716,28 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
     );
   }
 
+  if (sub === "revoice") {
+    const sceneRaw = flagString(flags, "scene");
+    const all = flags["all"] === true;
+    if (all === (sceneRaw !== undefined)) {
+      usage(
+        "video revoice needs one of --scene <n> (one clip) or --all (every clip that kept the video model's voice).",
+      );
+    }
+    if (all) return printResult(await revoiceFlow(runId, { all: true }, json, defaultDeps));
+    const sceneIndex = Number(sceneRaw);
+    if (!Number.isInteger(sceneIndex)) {
+      usage(`video revoice --scene must be a whole scene number, not "${sceneRaw}".`);
+    }
+    return printResult(
+      await revoiceFlow(runId, { sceneIndex, nodeId: flagString(flags, "node") }, json, defaultDeps),
+    );
+  }
+
   if (sub === "voices") {
     let voices: VoiceMap | null;
     try {
-      voices = parseVoiceFlags(process.argv.slice(3), defaultDeps.readFile);
+      voices = parseVoiceFlags(occurrences, defaultDeps.readFile);
     } catch (err) {
       usage((err as Error).message);
     }

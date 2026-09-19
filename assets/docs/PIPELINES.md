@@ -263,6 +263,7 @@ Then, on either route:
   exodus video status <runId> [--json]                                 the park and each scene's clip/voice/picture
   exodus video pull <runId> --out <dir> [--json]                       every piece + manifest.json
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "<t>"] [--json]  redo one clip at the final watch
+  exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]  redo only the voice on finished clips; no new video
   exodus video upload <runId> --file <cut.mp4> [--duration <s>] [--json]   attach the cut (MP4/MOV/WebM, 200 MB)
 Cut: your choice of tool — Exodus does not stitch or mix. One option ships with the skill:
   node .claude/skills/exodus-video/scripts/first-cut.mjs <dir> [--skip n,m] [--no-music] [--out f]

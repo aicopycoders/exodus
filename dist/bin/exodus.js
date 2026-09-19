@@ -5,6 +5,7 @@ import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getVersion } from "../lib/version.js";
+import { parseArgs } from "../lib/args.js";
 const OTHER_COMMANDS = new Set([
     "browse",
     "status",
@@ -113,42 +114,8 @@ async function buildHelp() {
     ];
     return sections.filter((s) => s.trim() !== "").join("\n\n");
 }
-function parseArgs(argv) {
-    const [, , rawCommand = "help", ...rest] = argv;
-    const command = ["--help", "-h", "-help"].includes(rawCommand) ? "help" : rawCommand;
-    const flags = {};
-    let i = 0;
-    while (i < rest.length) {
-        const arg = rest[i];
-        if (arg === "--help" || arg === "-h") {
-            flags["help"] = true;
-            i++;
-            continue;
-        }
-        if (arg.startsWith("--")) {
-            const key = arg.slice(2);
-            const next = rest[i + 1];
-            if (key.startsWith("no-")) {
-                flags[key.slice(3)] = false;
-                i++;
-            }
-            else if (next !== undefined && !next.startsWith("--")) {
-                flags[key] = next;
-                i += 2;
-            }
-            else {
-                flags[key] = true;
-                i++;
-            }
-        }
-        else {
-            i++;
-        }
-    }
-    return { command, flags };
-}
 async function main() {
-    const { command, flags } = parseArgs(process.argv);
+    const { command, flags, occurrences } = parseArgs(process.argv);
     if (["--version", "-v", "-V", "version"].includes(command)) {
         console.log(getVersion());
         process.exit(0);
@@ -180,7 +147,7 @@ async function main() {
         console.error(`Command "${command}" does not export a run() function.`);
         process.exit(1);
     }
-    await commandModule.run(flags);
+    await commandModule.run(flags, occurrences);
 }
 main().catch((err) => {
     console.error("Fatal error:", err instanceof Error ? err.message : String(err));

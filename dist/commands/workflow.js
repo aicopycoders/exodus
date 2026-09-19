@@ -552,35 +552,25 @@ function normalizeMultiValue(value) {
         .filter((p) => p.length > 0)
         .join(", ");
 }
-export function parseRawInputFlags(args) {
+export function parseRawInputFlags(occurrences) {
     const inputs = {};
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let raw;
-        if (arg === "--input") {
-            raw = args[i + 1];
-            i++;
-        }
-        else if (arg.startsWith("--input=")) {
-            raw = arg.slice("--input=".length);
-        }
-        else {
+    for (const { flag, value } of occurrences) {
+        if (flag !== "input")
             continue;
-        }
-        if (!raw)
+        if (!value)
             throw new Error("--input requires key=value");
-        const eq = raw.indexOf("=");
+        const eq = value.indexOf("=");
         if (eq <= 0)
-            throw new Error(`--input must be key=value (got "${raw}")`);
-        const key = raw.slice(0, eq).trim();
+            throw new Error(`--input must be key=value (got "${value}")`);
+        const key = value.slice(0, eq).trim();
         if (!key)
-            throw new Error(`--input must include a key (got "${raw}")`);
-        inputs[key] = raw.slice(eq + 1);
+            throw new Error(`--input must include a key (got "${value}")`);
+        inputs[key] = value.slice(eq + 1);
     }
     return inputs;
 }
-export function parseInputFlags(args, readFile) {
-    const inputs = parseRawInputFlags(args);
+export function parseInputFlags(occurrences, readFile) {
+    const inputs = parseRawInputFlags(occurrences);
     for (const [key, value] of Object.entries(inputs)) {
         inputs[key] = expandInputValue(key, value, readFile);
     }
@@ -876,12 +866,10 @@ async function prepareRunInputs(workflowId, raw, deps, note) {
     }
     return { inputs: prepared, warnings };
 }
-export function rejectTerminalFlag(args) {
-    for (const arg of args) {
-        if (arg === "--terminal" || arg.startsWith("--terminal=")) {
-            throw new Error("--terminal is no longer supported: a run now executes the whole " +
-                "workflow or it doesn't start. Re-run without --terminal.");
-        }
+export function rejectTerminalFlag(occurrences) {
+    if (occurrences.some((o) => o.flag === "terminal")) {
+        throw new Error("--terminal is no longer supported: a run now executes the whole " +
+            "workflow or it doesn't start. Re-run without --terminal.");
     }
 }
 export function parseAutoApproveFlag(args) {
@@ -894,21 +882,11 @@ export function parseAutoApproveFlag(args) {
     }
     return false;
 }
-export function parseRigOverridesFlag(args, readFile) {
+export function parseRigOverridesFlag(occurrences, readFile) {
     let raw;
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let value;
-        if (arg === "--rig-overrides") {
-            value = args[i + 1];
-            i++;
-        }
-        else if (arg.startsWith("--rig-overrides=")) {
-            value = arg.slice("--rig-overrides=".length);
-        }
-        else {
+    for (const { flag, value } of occurrences) {
+        if (flag !== "rig-overrides")
             continue;
-        }
         if (value === undefined || value.startsWith("--")) {
             throw new Error("--rig-overrides requires JSON or @path/to/file.json");
         }
@@ -951,21 +929,11 @@ export function parseRigOverridesFlag(args, readFile) {
     }
     return parsed;
 }
-export function parseVoicesFlag(args, readFile) {
+export function parseVoicesFlag(occurrences, readFile) {
     let raw;
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let value;
-        if (arg === "--voices") {
-            value = args[i + 1];
-            i++;
-        }
-        else if (arg.startsWith("--voices=")) {
-            value = arg.slice("--voices=".length);
-        }
-        else {
+    for (const { flag, value } of occurrences) {
+        if (flag !== "voices")
             continue;
-        }
         if (value === undefined || value.startsWith("--")) {
             throw new Error("--voices requires JSON or @path/to/voices.json");
         }
@@ -1008,25 +976,15 @@ export function parseVoicesFlag(args, readFile) {
     }
     return parsed;
 }
-export function parseFillFlag(args) {
+export function parseFillFlag(occurrences) {
     let name;
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let raw;
-        if (arg === "--fill") {
-            raw = args[i + 1];
-            i++;
-        }
-        else if (arg.startsWith("--fill=")) {
-            raw = arg.slice("--fill=".length);
-        }
-        else {
+    for (const { flag, value } of occurrences) {
+        if (flag !== "fill")
             continue;
-        }
-        if (raw === undefined || raw.startsWith("--")) {
+        if (value === undefined || value.startsWith("--")) {
             throw new Error("--fill requires a saved fill's name");
         }
-        const trimmed = raw.trim();
+        const trimmed = value.trim();
         if (!trimmed)
             throw new Error("--fill requires a saved fill's name");
         name = trimmed;
@@ -2858,30 +2816,20 @@ async function resumeAndMaybeWait(runId, triggerRunId, headline, opts, deps, lan
     const prefix = opts.onProgressLine ? [] : startLines;
     return { code: waited.code, lines: [...prefix, ...waited.lines] };
 }
-export function parseSlotFlags(args) {
+export function parseSlotFlags(occurrences) {
     const values = {};
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        let raw;
-        if (arg === "--slot") {
-            raw = args[i + 1];
-            i++;
-        }
-        else if (arg.startsWith("--slot=")) {
-            raw = arg.slice("--slot=".length);
-        }
-        else {
+    for (const { flag, value } of occurrences) {
+        if (flag !== "slot")
             continue;
-        }
-        if (!raw)
+        if (!value)
             throw new Error("--slot requires key=value");
-        const eq = raw.indexOf("=");
+        const eq = value.indexOf("=");
         if (eq <= 0)
-            throw new Error(`--slot must be key=value (got "${raw}")`);
-        const key = raw.slice(0, eq).trim();
+            throw new Error(`--slot must be key=value (got "${value}")`);
+        const key = value.slice(0, eq).trim();
         if (!key)
-            throw new Error(`--slot must include a key (got "${raw}")`);
-        values[key] = raw.slice(eq + 1);
+            throw new Error(`--slot must include a key (got "${value}")`);
+        values[key] = value.slice(eq + 1);
     }
     return values;
 }
@@ -2953,7 +2901,7 @@ async function maybeReadStdin(flags) {
         return undefined;
     return raw.endsWith("\n") ? raw.slice(0, -1) : raw;
 }
-export async function run(flags) {
+export async function run(flags, occurrences) {
     const positional = parsePositional();
     const [sub, ...rest] = positional;
     const json = !!flags["json"];
@@ -3018,12 +2966,12 @@ export async function run(flags) {
         let imageRigOverrides;
         let voices;
         try {
-            inputs = parseRawInputFlags(process.argv.slice(3));
-            rejectTerminalFlag(process.argv.slice(3));
-            fill = parseFillFlag(process.argv.slice(3));
+            inputs = parseRawInputFlags(occurrences);
+            rejectTerminalFlag(occurrences);
+            fill = parseFillFlag(occurrences);
             autoApprove = parseAutoApproveFlag(process.argv.slice(3));
-            imageRigOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
-            voices = parseVoicesFlag(process.argv.slice(3), defaultDeps.readFile);
+            imageRigOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
+            voices = parseVoicesFlag(occurrences, defaultDeps.readFile);
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -3167,7 +3115,7 @@ export async function run(flags) {
         }
         let values;
         try {
-            values = parseSlotFlags(process.argv.slice(3));
+            values = parseSlotFlags(occurrences);
         }
         catch (e) {
             console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -3205,7 +3153,7 @@ export async function run(flags) {
             }
             let fireOverrides;
             try {
-                fireOverrides = parseRigOverridesFlag(process.argv.slice(3), defaultDeps.readFile);
+                fireOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
             }
             catch (e) {
                 console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);

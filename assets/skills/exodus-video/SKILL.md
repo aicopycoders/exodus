@@ -100,6 +100,7 @@ exodus video status <runId>                               where it is, per scene
 exodus video pull <runId> --out ./ad-<runId>              every piece + manifest.json
 exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "…"]
                                                           redo one clip at the final watch
+exodus video revoice <runId> --all | --scene <n>          redo only the voice; no new video
                                                           … make the cut (your choice of tool)
 exodus video upload <runId> --file ./ad-<runId>/cut.mp4   attach it
 exodus video approve <runId>                              make it the ad
@@ -176,6 +177,7 @@ Verified against the routes, not assumed. Everything here is admin-gated on top.
 | script-turn edits at the gate | **refused** | dashboard only |
 | `video retry-frame` | works | works |
 | `video retry-clip` | works | works |
+| `video revoice` | works | works |
 | `video pull` | works | works |
 | `video upload` | only if the video node sets `finalWatch: true` | works |
 | `workflow checkpoint approve` | **refused at a video gate** | **refused at a video gate** |
@@ -277,9 +279,11 @@ whole loop unattended.
 
 ## Giving the characters voices
 
-By default a workflow run's characters have no voice chosen, so every clip keeps
-the voice the video model invents. `exodus video voices` is where that gets
-fixed, and it only works **before** the storyboard is approved — once clips start
+By default a workflow run's characters have no voice of their own. A character
+without one gets the run's default voice (the workflow's narrator voice) when the
+run has one; with no default either, the clip keeps the voice the video model
+invents. `exodus video voices` shows which of the three applies and is where it
+gets fixed, and it only works **before** the storyboard is approved — once clips start
 it refuses.
 
 ```
@@ -363,7 +367,10 @@ canChange             false once the run has left the storyboard review
 whyNot                why, in one sentence, when canChange is false
 cast[]                one per character
   characterId, name
-  voice               { voiceId, label } or null
+  voice               { voiceId, label }: the voice this character's clips are
+                      converted to. null only when they have no voice of their
+                      own AND the run has no default voice
+  voiceFrom           "own-pin" or "run-default"; absent when voice is null
   availability        { state: "available" | "missing" | "not-checked", … }
   spokenScenes        how many scenes this character speaks in
   spokenSeconds       those scenes' planned seconds — what ElevenLabs bills on
@@ -378,8 +385,8 @@ A failure is the same shape every `video` verb uses:
 `{ "ok": false, "status": 400, "error": "<one plain sentence>" }`, exit 1.
 
 **Before you approve, read `notices`.** The ones that cost the user something:
-a character who speaks but has no voice (those clips keep their generated
-voice), no ElevenLabs key saved on the run (no voice can be applied at all), and
+a character who speaks but has no voice of their own and no run default to fall
+back on (those clips keep their generated voice), no ElevenLabs key saved on the run (no voice can be applied at all), and
 a voice ElevenLabs no longer has.
 
 `estimatedCostUsd` is always null. Exodus cannot price a voice conversion yet;
@@ -445,6 +452,10 @@ scenes[]                             one per scene, in order
   speechTrimmed                      the clip was re-cut to its spoken words
                                      (0.5 s before the first, 0.8 s after the
                                      last); null when there is no clip
+  rawStorageId                       the stored file the video model made, kept
+                                     on record when the voice pass replaced the
+                                     clip with a new file; null when the clip IS
+                                     that file, or there is no clip
 failed[]                             files that did not download: {file, url, error}
 ```
 
@@ -609,6 +620,65 @@ and compare the file before and after.
 **Re-cut afterwards.** A cut you already uploaded still holds the old clip, and
 the CLI says so when that is the case. Pull again, re-cut and upload again before
 anyone approves.
+
+## Redoing only the voice on finished clips
+
+`revoice` puts clips that are already paid for back through the voice pass: the
+spoken words are checked against the script, the clip is trimmed to the speech,
+and the chosen voice is applied. It makes no new video, so the picture cannot
+change and no video credits are spent. ElevenLabs bills the voice work to the
+member's own key.
+
+```
+exodus video revoice <runId> --all
+exodus video revoice <runId> --scene 3
+```
+
+**When to reach for it.** `status` shows talking clips with `voice-unpinned` or
+`voice-not-applied` (usually next to `speech-check-skipped`), and the manifest
+shows `revoiced: false` with no words file. The usual cause is a run that had no ElevenLabs key when its
+clips were made. `voices <runId>` says so: "This run has no ElevenLabs key saved".
+
+**It finds the key by itself.** Before queuing anything, the server gives the run
+the ElevenLabs key saved on the run owner's account, if the run has none. When
+there is no saved key either, nothing is queued and the refusal says where to add
+one (Settings → Keys). Approving a storyboard does the same top-up, so an older
+run parked at its storyboard is fixed before any clip is paid for.
+
+**`--all` picks the clips that need it.** Every finished clip whose file is still
+the video model's own and whose findings carry `voice-unpinned` or
+`voice-not-applied`, the two codes that mean a voice change should have happened
+and did not. `speech-check-skipped` alone does not qualify: it also lands on
+clips whose sound the video model or a later step owns, where there is no voice
+to change and a pass would bill a transcription for nothing. `--scene <n>` is
+not filtered this way; the server decides. It sends one request per scene, tries
+every one, and reports each. Scenes refused with the same sentence share one
+line (a run with no key prints that sentence once); `--json` keeps one entry per
+scene.
+
+**What is refused.** A clip that already went through the voice pass (`revoiced`,
+`speechTrimmed` or a trimmed tail): the pass would trim or convert it twice. Use
+`retry-clip` to make that clip again from scratch. A failed clip, a scene already
+being redone, a step still rendering, and an ad already delivered.
+
+**An older server starts nothing.** The voice redo has its own server route and
+its own worker task. A server or worker from before it existed cannot run it, and
+the CLI never falls back to `retry-clip`'s route, which would make new paid video.
+You get one sentence saying the server does not have the voice redo yet, and
+nothing is queued or spent.
+
+**A clip is never lost.** The clip stays on its row the whole time. If the voice
+pass cannot finish, the clip, its findings and its cost are left as they were and
+one warning, `revoice-not-finished`, is added. Run it again. If ElevenLabs refuses
+the key, the clip comes back unchanged with `voice-not-applied`.
+
+**If the word check now fails.** The voiced clip is still delivered, and the scene
+is flagged with the finding, because the picture is the same one the ad already
+had. Decide from `status`: keep it, or `retry-clip` it.
+
+**Afterwards.** Pull again. Each voiced scene now has `revoiced: true`, a words
+file, and `rawStorageId` naming the original file. Re-cut and upload again if a
+cut was already uploaded; the CLI says so when that is the case.
 
 ## Cutting the ad
 
