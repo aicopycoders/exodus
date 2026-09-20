@@ -14,7 +14,7 @@ import {
 } from "./workflow.js";
 
 export const helpText = `
-exodus video — make an ad from a Show, pull every piece, upload your cut
+exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
 The dashboard makes the PIECES of an ad: the storyboard, one picture per scene,
 one voice track per scene, one video clip per scene, plus the music bed. It does
@@ -23,28 +23,34 @@ with whatever editing tools you like, and upload the cut back.
 
 The whole loop, in order:
 
-  1. exodus video shows
-     Which Shows exist and which are ready to make ads.
+  1. exodus workflow list
+     Which workflows this brand has saved. A video workflow is one that makes
+     ads.
 
-  2. exodus video start --show <id> --script script.txt --wait
-     Starts an ad and waits. It stops when the storyboard needs your yes.
+  2. exodus workflow describe <workflowId|name>
+     What that workflow needs before it can run, and what it gives back.
 
-  3. exodus video storyboard <runId>
+  3. exodus workflow run <workflowId|name> --input <field>=@script.txt --wait
+     Starts the ad on your script and waits. It stops when the storyboard
+     needs your yes. "describe" names the field your script goes in. You can
+     also settle the voices here, at the launch, instead of at step 5 — the
+     launch flags all live in: exodus workflow --help
+
+  4. exodus video storyboard <runId>
      The scene cards: what each scene says and the picture it will look like.
 
-  4. exodus video voices <runId>
+  5. exodus video voices <runId>
      Who is in the ad, which voice each one has, how the voices get applied
      and who pays. Add --set to give someone a voice, before any clip is made.
 
-  5. exodus video approve <runId>          (looks right — keep going)
-     exodus video flag <runId> --note "…"  (something is wrong — send it back)
+  6. exodus video approve <runId>          (looks right — keep going)
      exodus video retry-frame <runId> --node <nodeId> --scene <n>
        Redo ONE still at the pixel gate. Neighbours stay. The gate holds.
 
-  6. exodus video status <runId>
+  7. exodus video status <runId>
      Where the run is and how each scene's clip turned out.
 
-  7. exodus video pull <runId> --out ./ad
+  8. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
 
      exodus video retry-clip <runId> --scene <n>
@@ -57,21 +63,18 @@ The whole loop, in order:
        picture stays, no new video is made, and a clip whose voice pass
        cannot finish is kept as it was. Use --scene <n> for one clip.
 
-  8. Make your cut from those files.
+  9. Make your cut from those files.
 
-  9. exodus video upload <runId> --file cut.mp4
-     Attaches your cut to the run and prints the page to approve it on.
+  10. exodus video upload <runId> --file cut.mp4
+      Attaches your cut to the run and prints the page to approve it on.
 
-  10. exodus video approve <runId>
-      Or click Approve on the page from step 9.
+  11. exodus video approve <runId>
+      Or click Approve on the page from step 10.
 
 Usage:
-  exodus video shows [--json]
-  exodus video start --show <id> --script <file> [--voice-path <v>] [--no-music] [--wait] [--json]
   exodus video status <runId> [--json]
   exodus video storyboard <runId> [--json]
   exodus video approve <runId> [--json]
-  exodus video flag <runId> --note "<what is wrong>" [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
   exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
@@ -80,18 +83,11 @@ Usage:
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
 
 Options:
-  --show <id>          Which Show the ad belongs to (from: exodus video shows)
-  --script <file>      A text file with the words you want the ad to say
-  --voice-path <v>     Override the Show's voice path for this ad
-  --no-music           Skip the music bed
-  --wait               Stay open and report as the run moves; stops at every
-                       point that needs you
   --out <dir>          Folder to write the pulled pieces into (pull)
   --file <cut.mp4>     Your finished cut (upload). MP4, MOV or WebM, up to 200MB
   --duration <sec>     How long your cut is, in seconds. Only needed when the
                        length can't be read off the file itself
-  --note "<text>"      What is wrong with the storyboard (flag), or how to
-                       steer one redo (retry-frame, retry-clip)
+  --note "<text>"      How to steer one redo (retry-frame, retry-clip)
   --node <nodeId>      Which scene-frames node holds the still (retry-frame).
                        Which video step holds the clip, when a scene has one on
                        more than one step (retry-clip, revoice)
@@ -106,14 +102,15 @@ Options:
   --from <file.json>   A file of characters and voice IDs (voices). --set and
                        --clear win over the same name in the file
   --json               Machine-readable output
-  --help, -h           Show this help
+  --help, -h           Print this help
 
 Video is admin-only. If every command here answers "video isn't enabled for
 this key", your dashboard user needs the admin role on this brand.
 
 Examples:
-  exodus video shows
-  exodus video start --show k57abc --script ./script.txt --wait
+  exodus workflow list
+  exodus workflow describe "Video Ad"
+  exodus workflow run "Video Ad" --input script=@./script.txt --wait
   exodus video storyboard run_123
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2

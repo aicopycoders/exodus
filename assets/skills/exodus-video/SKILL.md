@@ -1,6 +1,6 @@
 ---
 name: exodus-video
-description: Make a video ad with Exodus from the terminal. The main path is script-first: run a saved video workflow with `npx @aicopycoders/exodus workflow run`, no Show involved. Starting from a Show with `exodus video start --show` is the other way in. Either way you read and approve the storyboard, pull every finished piece (per-scene clips, the narration track and per-scene voice, keyframes, cast identity stills, word timings, the music bed) into a folder with `exodus video pull`, and upload a finished cut for approval. Exodus makes the pieces; the cut is made outside it, in whatever editor the user wants — this skill hands over the pieces and the facts about them, it does not prescribe an editor. Use it whenever the user has invoked Exodus and wants anything to do with a video ad, an ad run's clips or storyboard, a Show, "pull the pieces", "stitch it together", "make the cut", "upload my cut", or checking on a video run ("exodus, make a video ad from this script", "exodus, is my video run done", "exodus, pull the clips for run X and cut them", "exodus, what's wrong with scene 3", "exodus video status"). Also use it when the user ran an `npx @aicopycoders/exodus video` command or the `exodus` hub skill routed here. Video is admin-only: "video isn't enabled for this key" means either the dashboard user lacks the admin role or the run id is wrong, so check the id and then say so; do not retry. Never claim generic video-editing asks ("edit this mp4", "add captions to my reel") without Exodus context; in shared folders those belong to the user's other tools. Running or authoring workflows generally is `exodus-workflow`; static image ads are `exodus-image`; copy is `exodus-write`.
+description: Make a video ad with Exodus from the terminal. The main path is script-first: run a saved video workflow with `npx @aicopycoders/exodus workflow run`. You read and approve the storyboard, pull every finished piece (per-scene clips, the narration track and per-scene voice, keyframes, cast identity stills, word timings, the music bed) into a folder with `exodus video pull`, and upload a finished cut for approval. Exodus makes the pieces; the cut is made outside it, in whatever editor the user wants — this skill hands over the pieces and the facts about them, it does not prescribe an editor. Use it whenever the user has invoked Exodus and wants anything to do with a video ad, an ad run's clips or storyboard, "pull the pieces", "stitch it together", "make the cut", "upload my cut", or checking on a video run ("exodus, make a video ad from this script", "exodus, is my video run done", "exodus, pull the clips for run X and cut them", "exodus, what's wrong with scene 3", "exodus video status"). Also use it when the user ran an `npx @aicopycoders/exodus video` command or the `exodus` hub skill routed here. Video is admin-only: "video isn't enabled for this key" means either the dashboard user lacks the admin role or the run id is wrong, so check the id and then say so; do not retry. Never claim generic video-editing asks ("edit this mp4", "add captions to my reel") without Exodus context; in shared folders those belong to the user's other tools. Running or authoring workflows generally is `exodus-workflow`; static image ads are `exodus-image`; copy is `exodus-write`.
 ---
 
 # Video: make the pieces, cut the ad, hand it back
@@ -21,29 +21,18 @@ Your job in this skill is to drive that loop, hand over the pieces with the
 facts about them, and make whatever cut the user asked for. **How to edit is the
 user's call, not this skill's** — see "Cutting the ad".
 
-## Two routes in, one set of pieces out
+## How a run starts
 
-**The workflow route (no Show) is the main path.** The ad is a saved workflow in
-the brand, started script-first with `exodus workflow run`. This is where the
-real work happens and what to assume unless the user says otherwise.
-
-**The Show route** starts from a locked Show — its cast, rooms and voices set up
-on the dashboard beforehand — with `exodus video start --show`. It buys two
-things the workflow route does not have: `video flag` for sending a storyboard
-back with a note, and script-turn edits at the gate.
-
-Everything after the storyboard is the same on both: the same nodes render, the
-same `video status` reads the run, the same `video pull` writes the same folder,
-the same `video upload` and `approve` finish it. Where a behaviour differs, this
-skill says which route it belongs to. **Do not assume the routes are symmetric**
-— see "What each route can and cannot do".
+The ad is a saved workflow in the brand, started script-first with `exodus
+workflow run`. From there the same nodes render, `video status` reads the run,
+`video pull` writes the folder, and `video upload` and `approve` finish it.
 
 ## Before anything
 
 - `npx @aicopycoders/exodus video --help` and `workflow --help` are the
   authoritative flag lists. The `video` verb is admin-only and hidden from the
   top-level `--help`; that is expected, not a broken install.
-- **Video is admin-only on both routes**, and says so two different ways.
+- **Video is admin-only**, and says so two different ways.
   - "video isn't enabled for this key", from a `video` verb, has two causes the
     CLI cannot tell apart: the user is not an admin on this brand, or the run id
     does not exist. Check the id first; if it is right, they need the admin role.
@@ -58,17 +47,17 @@ skill says which route it belongs to. **Do not assume the routes are symmetric**
   you must pass `--duration <sec>`. Editing tools have their own requirements on
   top of that — the bundled script needs a full `ffmpeg` with `libx264` and
   exits 2 if it is missing.
-- The brand matters. A workflow and a Show both belong to one brand, so
-  `exodus workflow list` and `exodus video shows` show the active brand's only.
-  Wrong list means wrong brand; `exodus brand use <slug>`.
+- The brand matters. A workflow belongs to one brand, so `exodus workflow list`
+  shows the active brand's only. Wrong list means wrong brand; `exodus brand use
+  <slug>`.
 
 ## The loop
 
 Run each line as `npx @aicopycoders/exodus …`; `exodus` below is shorthand.
 
-**Starting on the workflow route (the main path).** The workflow is already
-saved in the brand — find it and read what it wants before you run it, because
-the script's input field is named by the workflow, not by this skill.
+**Starting a run.** The workflow is already saved in the brand — find it and
+read what it wants before you run it, because the script's input field is named
+by the workflow, not by this skill.
 
 ```operator-guide
 exodus workflow list                                      the brand's workflows
@@ -82,21 +71,13 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatm
 exodus video status <runId>                               where it is, per scene
 ```
 
-**Starting on the Show route.**
-
-```operator-guide
-exodus video shows                                        which Shows are ready
-exodus video start --show <id> --script script.txt --wait  start, wait for the storyboard gate
-```
-
-**From the storyboard on, both routes are the same.**
+**From the storyboard on.**
 
 ```operator-guide
 exodus video storyboard <runId>                           read the scene cards
 exodus video voices <runId>                               who speaks and with whose voice
 exodus video voices <runId> --set <character>=<voiceId>   give a character a voice
 exodus video approve <runId>                              keep going
-exodus video flag <runId> --note "what's wrong"           send it back — SHOW RUNS ONLY
 exodus video retry-frame <runId> --node <nodeId> --scene <n>  redo one still at the pixel gate
 exodus video status <runId>                               where it is, per scene
 exodus video pull <runId> --out ./ad-<runId>              every piece + manifest.json
@@ -111,31 +92,32 @@ exodus video approve <runId>                              make it the ad
 Every command takes `--json`. Read `--json` when you need to decide something
 from the output; read the plain form when you are relaying it to the user.
 
-**Read a run's position with `exodus video status`, on either route.** It is the
-richest reader — every scene's clip, voice and picture, with the findings. A
-`--wait` that landed already printed the same stop block, and `workflow inbox`
-lists a parked video run (its row carries `hasShow`), but neither shows the
-per-scene detail, and the checkpoint verbs cannot resolve a video park — see
-"What each route can and cannot do".
+**Read a run's position with `exodus video status`.** It is the richest reader —
+every scene's clip, voice and picture, with the findings. A `--wait` that landed
+already printed the same stop block, and `workflow inbox` lists a parked video
+run, but neither shows the per-scene detail, and the checkpoint verbs cannot
+resolve a video park — see "What the CLI can and cannot do".
 
 **Where a run can stop.** Five stops, each with the exact next command printed
 under it:
 
-- storyboard gate: needs `approve`, or `flag` on a Show run.
+- storyboard gate: needs `approve`. When the stop block prints a `Redo one
+  frame:` line with a node id, one still can be redone first with `retry-frame`;
+  a gate parked before the stills are drawn has nothing to redraw.
 - final watch: every piece is made; needs `pull`, a cut, and `upload`. It is also
-  the one park where a finished clip can be redone, with `retry-clip`. A
-  workflow run only reaches this park if its video node sets `finalWatch: true`
-  — otherwise it skips straight to finished.
+  the one park where a finished clip can be redone, with `retry-clip`. A run
+  only reaches this park if its video node sets `finalWatch: true` — otherwise
+  it skips straight to finished.
 - paused: a builder checkpoint neither video verb resolves —
   `exodus workflow checkpoint <runId>` is the verb for that one.
 - failed: `status` shows how far it got, and a `--wait` that was running exits
   1 with the error. Tell the user; do not start another run on your own.
 - finished: pull what it made.
 
-**`--wait` stops at both video parks on either route** (#1818). `workflow run
---wait` and `video start --wait` both end at the storyboard gate and again at
-the final watch, exit 0, and close with the same `Parked:` block and next
-commands that `exodus video status` prints. Under `--json` the line carries an
+**`--wait` stops at both video parks** (#1818). `workflow run --wait` ends at
+the storyboard gate and again at the final watch, exits 0, and closes with the
+same `Parked:` block and next commands that `exodus video status` prints. Under
+`--json` the line carries an
 additive `stop` field in the same shape `video status --json` uses, so branch on
 `stop.at` rather than re-deriving the park. Every other park still prints its
 notice once and keeps polling, so a resolve from another shell carries the run
@@ -155,10 +137,10 @@ part: the voices and the clips. So a run that has not paused yet is already
 spending a little, and a run still drawing pictures is healthy. `exodus workflow
 status` and `exodus video status` both print "This run will pause for your
 approval once the frames are ready" on a run that is headed for the gate. Do not
-cancel it because the pause has not arrived. `shows`, `workflow list`, `workflow describe`, `video status`,
+cancel it because the pause has not arrived. `workflow list`, `workflow describe`, `video status`,
 `storyboard` and `pull` are free reads; run them as often as you like. Never
-start a second run to "retry" without the user asking; flag the storyboard (Show
-runs) or tell them what failed instead.
+start a second run to "retry" without the user asking; tell them what failed
+instead.
 
 **`--auto-approve` does not cover either video gate.** It releases Checkpoint
 boxes only (`convex/workflows.ts:7266` keys on `pauseReason === "checkpoint"`),
@@ -167,30 +149,11 @@ and the storyboard gate and the final watch carry no pause reason. An unattended
 safe behaviour, since nothing should approve paid rendering or ship an uncut ad
 on its own.
 
-## What each route can and cannot do
+## What the CLI can and cannot do
 
-Verified against the routes, not assumed. Everything here is admin-gated on top.
-
-| Verb | Workflow run (no Show) | Show run |
-|---|---|---|
-| `video shows` | nothing to list | lists the brand's Shows |
-| `video start --show` | not the entry point | starts the run |
-| `workflow run` | starts the run | not the entry point |
-| `video status` | works | works |
-| `video storyboard` | works | works |
-| `video voices` (read) | works | works |
-| `video voices --set` | works | **refused** — the Show owns its voices |
-| `video approve` | works, both gates | works, both gates |
-| `video flag --note` | **refused** | works |
-| script-turn edits at the gate | **refused** | dashboard only |
-| `video retry-frame` | works | works |
-| `video retry-clip` | works | works |
-| `video revoice` | works | works |
-| `video pull` | works | works |
-| `video upload` | only if the video node sets `finalWatch: true` | works |
-| `workflow checkpoint approve` | **refused at a video gate** | **refused at a video gate** |
-
-Five consequences worth knowing before you promise a user anything:
+Verified against the CLI and the server, not assumed. Everything here is
+admin-gated on top. Five things worth knowing before you promise a user
+anything:
 
 - **A workflow only stops for your cut if its video node asks to.** `finalWatch`
   defaults to `false` (`convex/lib/workflow/catalog.ts:780`), and the run only
@@ -210,22 +173,20 @@ Five consequences worth knowing before you promise a user anything:
   `pauseReason === "checkpoint"` (`exodus/commands/workflow.ts:4487-4519`), and
   both video gates park with no pause reason at all, so those verbs refuse
   client-side with "Run … is not parked for a checkpoint approval — it is parked
-  at the cost gate (legacy)." `exodus video approve` posts straight through and
-  works on either route. `exodus workflow cancel` also works at a video gate; it
-  has no preflight.
+  at the cost gate (legacy)." `exodus video approve` posts straight through.
+  `exodus workflow cancel` also works at a video gate; it has no preflight.
 
-- **`flag` is Show-only and fails loudly.** `exodus video flag` on a workflow run
-  answers "Flag-with-note is only available on Video-module ads."
-  (`convex/videoModule.ts`, guarded on `!run.showId`). Script-turn edits refuse
-  the same way. There is **no** CLI path that sends a workflow run's storyboard
-  back with a note, and none that rewrites its scenes, script or prompts — the
-  whole-envelope edit mutation is wired only to the dashboard's gate screen, not
-  to any API route. The one exception is voices: `exodus video voices --set`
-  writes the cast's voice choices in place and nothing else (see "Giving the
-  characters voices"). For everything else the storyboard is approve-or-cancel
-  from the terminal: `exodus workflow cancel <runId>` and run again with a better
-  script, or edit the workflow. Do not offer `flag` to a user on the workflow
-  route.
+- **Nothing sends the storyboard back with a note.** There is **no** CLI path
+  that returns a run's storyboard for a rewrite, and none that rewrites its
+  scenes, script or prompts — the whole-envelope edit mutation is wired only to
+  the dashboard's gate screen, not to any API route. The one exception is
+  voices: `exodus video voices --set` writes the cast's voice choices in place
+  and nothing else (see "Giving the characters voices"). A single still can be
+  redrawn with `exodus video retry-frame`. For everything else the storyboard is
+  approve-or-cancel from the terminal: `exodus workflow cancel <runId>` and run
+  again with a better script, or edit the workflow.
+  The stop block a parked run prints may still offer a `Send back:` line. A
+  workflow ad refuses it, so never run it and never offer it to the user.
 - **`--wait` lands on both video parks, but only those.** Since #1818 every
   `--wait` caller — `workflow run`, `triggers fire`, `checkpoint approve|retry`,
   `repair retry|skip` — ends at a storyboard gate or a final watch, exits 0, and
@@ -234,20 +195,16 @@ Five consequences worth knowing before you promise a user anything:
   slots park is still not a landing: it prints its notice once and the loop
   keeps polling, so a resolve from another shell carries the run on. Do not read
   a park banner mid-poll as the wait having finished.
-- **The run's page link differs, and every link the CLI prints follows the run.**
-  A Show ad opens on the `/video` page. A showless workflow run opens on
-  `/workflows/<workflowId>/runs/<runId>`, because `/video` answers "That ad isn't
-  here" for a run with no Show (`getAdDetail` rejects it;
-  `convex/http.ts:9204-9211`). Since #1851 the manifest's `dashboardUrl`, the
-  link in every park block and the link `upload` prints are all minted that way,
-  so they agree on both routes. When all the CLI holds is a run id it mints
-  `/runs/<runId>`, the canonical forwarder, which lands on the same page.
+- **Every link the CLI prints follows the run.** A run opens on
+  `/workflows/<workflowId>/runs/<runId>`. Since #1851 the manifest's
+  `dashboardUrl`, the link in every park block and the link `upload` prints are
+  all minted that way, so they agree. When all the CLI holds is a run id it
+  mints `/runs/<runId>`, the canonical forwarder, which lands on the same page.
 
 ## The script file
 
 Plain text. A `CAST:` block naming the speakers, one line per turn, then a
-`CTA:` block. On a Show run the names must match what the Show locked. The
-planner sizes every line at
+`CTA:` block. The planner sizes every line at
 2.5 words per second (`WORD_LADDER_WPS`), so a turn near 14 words plans a clip
 near 6 seconds. If a line does get truncated in its clip, the manifest says so
 (`speech-cutoff`).
@@ -273,25 +230,23 @@ in `manifest.json` under `provenance`.
 
 ## Reading the storyboard gate
 
-`storyboard <runId>` prints one card per scene on both routes: who speaks, the
+`storyboard <runId>` prints one card per scene: who speaks, the
 line, the planned duration, and whether its picture is drawn. Under the cards it
 also lists the voices — one line per character who speaks or already has a voice
 — so the user can see who sounds like whom before paying for the clips. Read it
 for the user, then ask one question.
 
-On a **workflow run** the question is approve or don't — there is no flag. If
-the storyboard is wrong, say so plainly and let the user decide between
-approving anyway, cancelling (`exodus workflow cancel <runId>`) and re-running
-with a better script, or changing the workflow. Approving is what releases the
-voices and the clips — the expensive part — so do not approve a storyboard you
-have just told the user is wrong.
+The question is approve or don't. If the storyboard is wrong, say so plainly and
+let the user decide between approving anyway, redrawing a single still when
+the stop block offers it (`exodus video retry-frame <runId> --node <nodeId>
+--scene <n>`, with the node id that block prints), cancelling
+(`exodus workflow cancel <runId>`) and re-running with a better script, or
+changing the workflow. Approving is what releases the voices and the clips — the
+expensive part — so do not approve a storyboard you have just told the user is
+wrong.
 
-On a **Show run** you can also send it back: `video flag <runId> --note "…"`.
-The note is read by the model that rewrites the storyboard, so make it concrete
-("scene 2 should be a close-up of the softgel, not the eyes").
-
-Either way, do not approve on the user's behalf unless they told you to run the
-whole loop unattended.
+Do not approve on the user's behalf unless they told you to run the whole loop
+unattended.
 
 ## Giving the characters voices
 
@@ -374,7 +329,7 @@ nobody knows the speaker names yet. When the storyboard arrives, the voices are
 already set and `exodus video voices <runId>` shows them.
 
 **Choosing how the voices are made.** `--voice-treatment` on `workflow run` says
-HOW a run makes its voices, and it is the only door on the workflow route. Two
+HOW a run makes its voices, and it is the only door. Two
 kinds of answer.
 
 A name on its own picks a way of working that plays a voice you already have,
@@ -447,8 +402,7 @@ person made at a keyboard for one run, and nobody made it for the sub-workflow.
 **Written voices cannot be changed at the review.** They are chosen when the run
 starts. `exodus video voices <runId>` on a described run names the treatment and
 prints each written voice, and says plainly that `--voice-treatment` at launch is
-what changes them. Do not tell anyone to create a Show for this, and do not set a
-voice path in node config — neither is a door.
+what changes them. Do not set a voice path in node config — it is not a door.
 
 **Where it shows up afterwards.** The launch receipt and `exodus workflow status`
 both print one line naming the treatment and the speakers who got a written
@@ -524,9 +478,7 @@ manifest.json            the index below
 
 ```
 runId, pulledAt, dashboardUrl        the run and the page that opens it:
-                                     /video?ad=<runId> for a Show ad,
-                                     /workflows/<workflowId>/runs/<runId> for a
-                                     workflow run
+                                     /workflows/<workflowId>/runs/<runId>
 storyboard, reference, music         filenames, or null when not delivered
 narration                            { file, timing }, or null on a per-scene run
 cast[]                               one per identity still
@@ -564,8 +516,7 @@ provenance                           which saved rulebook this run followed:
                                      {format: {via, nodeId, rigId, rigName,
                                      rulesFrom, specVersion}}. Absent when the
                                      run followed none. `nodeId` is the Rig box
-                                     that chose it (absent on a Show ad, which
-                                     has no box); `rulesFrom` names the rig the
+                                     that chose it; `rulesFrom` names the rig the
                                      rules were borrowed from when the picked
                                      rig is a copy. Names, ids and a version
                                      only — never the rules themselves
@@ -588,12 +539,10 @@ it is a picture-only takeover of the frame while the spoken track underneath
 keeps running, so it adds no audio and takes no place in the running order. The
 envelope also carries `overlays[]` (each with a `cueLineId` and a `placement`)
 and `audio` (`roomTone`, `music`, `sfxCues[]`) — the planner's notes on what
-should sit on top. **Route difference:** on a Show run the image and motion
-prompts (`framePrompt`, `videoPrompt`, `referencePrompt`) are stripped before
-the file reaches you, for everyone including admins — they are style-pack IP
-(`convex/workflows.ts:13847`, `isModuleRun = !!run.showId`). A workflow run has
-no `showId`, so an admin key gets them in full. Their absence on a Show run is
-by design, not a broken pull.
+should sit on top. The image and motion prompts (`framePrompt`, `videoPrompt`,
+`referencePrompt`) reach an admin key in full. A caller who cannot use video on
+this brand gets them stripped before the file arrives — they are style-pack IP
+(`redactVideoIp` in `convex/workflows.ts`).
 
 **The narration track** (`narration.mp3` + `narration.json`). Present when the
 run recorded continuously: every narrated scene's `voText` joined into one
@@ -605,8 +554,7 @@ narration.mp3**. Runs go per-scene instead when any scene has on-camera
 dialogue, when the voiceover node is configured `take: "per-scene"`, or on an
 older storyboard carrying no `script[]`; then there is no `narration.mp3` and
 each scene's voice is its own recording. That choice is made from the storyboard
-and the node config (`planNarration`), not from the route — a workflow run and a
-Show run reach it the same way.
+and the node config (`planNarration`).
 
 **The per-scene voice tracks** (`scene-NN.voice.<ext>`). On a continuous run
 these are cut out of `narration.mp3` itself — the same audio, sliced at the
@@ -621,9 +569,8 @@ speech inside the clip — under the default voice treatment the video model's
 invented voice is then replaced, in place, with the cast member's pinned
 ElevenLabs voice (that is `revoiced: true`). Other treatments leave the render
 owning its own audio, e.g. lip-sync retargeting a VO track onto the video. The
-treatment is frozen on the run when it starts, and there are exactly two doors
-that set one: `--voice-path` on `video start` for a Show run, and
-`--voice-treatment` on `workflow run` for a workflow run (see **Choosing how the
+treatment is frozen on the run when it starts, and there is exactly one door
+that sets it: `--voice-treatment` on `workflow run` (see **Choosing how the
 voices are made**). Node config is never a door — nothing on the canvas sets a
 voice treatment, and a run that was given none renders the default. Read
 `wordsFrom` and `revoiced` per scene rather than assuming.
@@ -661,8 +608,8 @@ finding says `wrong-character`.
 generated by Eleven Music after the last clip lands, at the landed clips' summed
 length plus a 3-second safety pad. One track per ad, never per-scene. It is
 never mixed into any clip and never levelled — gain, fade and ducking are the
-cut-maker's decisions. `--no-music` on `start` means no artifact at all, and a
-music failure degrades to a warning rather than blocking the run.
+cut-maker's decisions. A music failure degrades to a warning rather than
+blocking the run.
 
 ### Reading it before you cut
 
@@ -725,7 +672,7 @@ revoiced and trimmed the same way, with fresh findings and fresh word timings.
 scene's motion prompt only (`withRedoDirection`,
 `scout/src/trigger/workflow-scene-retry.ts`); the spoken line still comes from
 the approved storyboard. Asking for different words in a note will not change
-them. If the words are wrong, that is a storyboard flag or a new run.
+them. If the words are wrong, that is a new run.
 
 **A redo whose take fails the checks keeps the original clip.** On a finished
 clip the row stays `done` with the ORIGINAL take and only its findings are
@@ -805,8 +752,7 @@ they want; if they have not said and are not around, say which you used and why.
 - **The bundled script** — `node .claude/skills/exodus-video/scripts/first-cut.mjs
   ./ad-<runId>`, path from the workspace root (from a brand subfolder, prefix
   `../`). A plain assembly with no editing decisions in it, for seeing the whole
-  ad end to end quickly. Read "What the bundled script does" before you run it:
-  it changes the audio.
+  ad end to end quickly. Read "What the bundled script does" before you run it.
 - **HyperFrames** — HTML/CSS compositions rendered to video. Suits an ad that
   needs captions, title cards, overlays or motion graphics laid over the clips.
   It is a separate skill pack; check that a `hyperframes` skill is installed
@@ -839,17 +785,15 @@ Read these out of `storyboard.json` before you build anything, in any tool:
 
 ### What the bundled script does
 
-State this to the user before you run it, because an editor does not expect a
-cut tool to alter the performance:
+State this to the user before you run it, so they know what the cut does with
+the pieces:
 
-- **It changes the narration's speed.** When a narrated scene's voice runs
-  longer than its clip, it speeds that scene's voice up — to at most 1.26×
-  (`ATEMPO_CAP`, `scripts/first-cut.mjs:39`) — and holds the last frame for the
-  remainder. The amount differs per scene, so one ad can play scene 1 at normal
-  speed and scene 3 a quarter faster. **This is the script's behaviour, not the
-  system's**; nothing in the pipeline does it. It is the defect tracked in
-  #1814. If the user cares about a single consistent narrator pace, cut
-  elsewhere, or skip the scenes it stretches.
+- **It cuts the picture to the voice, and never the other way round.** A
+  narrated scene's segment runs exactly as long as that scene's voice track plus
+  a beat of air. A clip that runs longer is trimmed; a clip that runs shorter
+  holds its last frame for the difference. The narration is never sped up,
+  slowed down or cut short, so every scene plays at the speed it was recorded,
+  and the word times are handed on as they were measured.
 - **It ignores the continuous master.** It reads only `scene-NN.voice` files;
   it never opens `narration.mp3` or `manifest.narration`. A tool that lays the
   master down whole and cuts the pictures to it keeps the read intact.
@@ -866,7 +810,8 @@ cut tool to alter the performance:
 - Beside the MP4 it writes `cut.words.json` (every spoken word of the finished
   ad with its start and end) and `cut.srt` (the same words grouped into subtitle
   lines), named from the `--out` basename. Those times are on the finished ad's
-  timeline and include the speed changes above. Scenes with no word times leave
+  timeline, each scene's own word times offset by where that scene starts in the
+  cut and otherwise unaltered. Scenes with no word times leave
   gaps and are named in the report; when no scene delivered any, neither file is
   written. These sidecars are the script's own output — another tool will not
   produce them.
@@ -890,8 +835,8 @@ give a real one.
 
 **`upload` only works at the final watch.** The run has to be parked there with
 its video step done, or the server answers "This ad isn't waiting for your final
-cut right now." On a workflow run that park exists only when the video node sets
-`finalWatch: true`; a Show run always has it. Uploading again replaces the
+cut right now." That park exists only when the video node sets
+`finalWatch: true`. Uploading again replaces the
 previous cut in place rather than adding a second one. Upload does not move the
 run; it stays parked until someone approves.
 
@@ -906,7 +851,7 @@ compares the cut against the script or the storyboard. The approved spoken copy
 and the approved narration are therefore not the editor's to change — reordering
 lines, re-recording narration, or cutting words out of the CTA will ship,
 silently. Cut the pictures to the words, not the words to the pictures. If the
-words are wrong, that is a storyboard flag or a new run, not an edit.
+words are wrong, that is a new run, not an edit.
 
 ## Reporting to the user
 

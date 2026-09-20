@@ -9,8 +9,8 @@
 // The audio track comes first. A narrated scene (the storyboard gives it
 // narration and no on-camera line) plays its voice track and NOTHING the clip
 // recorded: the voice replaces the clip's audio, and the picture is fitted to
-// the voice, trimmed when the clip runs longer, sped up to at most 1.26x and
-// then held on its last frame when the voice runs longer. A dialogue scene
+// the voice, trimmed when the clip runs longer and held on its last frame when
+// the voice runs longer. The voice itself is never altered. A dialogue scene
 // keeps the audio it performed. A scene with no clip but a keyframe becomes a
 // still for the length of its voice track, else the storyboard's planned
 // duration. Every segment is loudness-normalized to -16 LUFS before the join.
@@ -35,8 +35,6 @@ const stereo = "aresample=48000,aformat=channel_layouts=stereo";
 const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000";
 /** Air after the last spoken word of a narrated scene, so the line lands. */
 export const TAIL_AIR_SEC = 0.8;
-/** The most a voice track may be sped up to fit its clip. */
-export const ATEMPO_CAP = 1.26;
 /** A continuous low bed under the whole ad, so the joins between clips do not read as dead air. */
 const ROOM_TONE =
   "anoisesrc=color=brown:amplitude=0.0035:r=48000,highpass=f=60,lowpass=f=900,aformat=channel_layouts=stereo";
@@ -91,27 +89,18 @@ export function scenePlans(storyboard) {
 }
 
 /**
- * Fit a picture to its voice track. The segment runs as long as the voice plus
- * a beat of air. A clip that runs longer is trimmed; a voice that runs longer
- * is sped up to at most ATEMPO_CAP and the clip's last frame is held for
- * whatever is still left. A still (no clip) simply runs the voice's length.
+ * Fit a picture to its voice track. The segment always runs as long as the
+ * voice plus a beat of air, because the voice is never altered. A clip that
+ * runs longer is trimmed; a clip that runs shorter holds its last frame for the
+ * difference. A still (no clip) simply runs the voice's length.
  */
 export function fitNarration({ clipSeconds, voiceSeconds }) {
   const target = voiceSeconds + TAIL_AIR_SEC;
-  if (clipSeconds === null) return { seconds: target, atempo: 1, holdSec: 0, trimmedBy: 0 };
+  if (clipSeconds === null) return { seconds: target, holdSec: 0, trimmedBy: 0 };
   if (target <= clipSeconds) {
-    return { seconds: target, atempo: 1, holdSec: 0, trimmedBy: clipSeconds - target };
+    return { seconds: target, holdSec: 0, trimmedBy: clipSeconds - target };
   }
-  const room = Math.max(clipSeconds - TAIL_AIR_SEC, 0.1);
-  const atempo = Math.min(ATEMPO_CAP, voiceSeconds / room);
-  const fitted = voiceSeconds / atempo + TAIL_AIR_SEC;
-  if (fitted <= clipSeconds) return { seconds: fitted, atempo, holdSec: 0, trimmedBy: 0 };
-  return { seconds: fitted, atempo, holdSec: fitted - clipSeconds, trimmedBy: 0 };
-}
-
-function scaleWords(words, atempo) {
-  if (!words || atempo === 1) return words;
-  return words.map((w) => ({ ...w, s: w.s / atempo, e: w.e / atempo }));
+  return { seconds: target, holdSec: target - clipSeconds, trimmedBy: 0 };
 }
 
 export function cueOffsetOnSpine(spine, counts, cueLineId) {
@@ -186,27 +175,26 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
         const fit = fitNarration({ clipSeconds: clip.seconds, voiceSeconds: probe(voice).seconds });
         const how = [];
         if (fit.trimmedBy > 0.05) how.push(`clip trimmed ${clip.seconds.toFixed(1)}s -> ${fit.seconds.toFixed(1)}s`);
-        if (fit.atempo > 1.001) how.push(`voice sped up ${fit.atempo.toFixed(2)}x`);
         if (fit.holdSec > 0.05) how.push(`last frame held ${fit.holdSec.toFixed(1)}s`);
         spine.push({
-          ...base, audio: "narration", voice, seconds: fit.seconds, atempo: fit.atempo,
-          holdSec: fit.holdSec, words: scaleWords(readWords(scene.words), fit.atempo),
+          ...base, audio: "narration", voice, seconds: fit.seconds,
+          holdSec: fit.holdSec, words: readWords(scene.words),
           note: `${flag}, ${voice} replaces the clip's audio${how.length ? ` (${how.join(", ")})` : ""}`,
         });
       } else if (narrated) {
         spine.push({
-          ...base, audio: "silence", voice: null, seconds: clip.seconds, atempo: 1, holdSec: 0,
+          ...base, audio: "silence", voice: null, seconds: clip.seconds, holdSec: 0,
           words: null,
           note: `${flag}, narrated scene without its voice track: the clip's own audio is muted`,
         });
       } else if (clip.hasAudio) {
         spine.push({
-          ...base, audio: "clip", voice: null, seconds: clip.seconds, atempo: 1, holdSec: 0,
+          ...base, audio: "clip", voice: null, seconds: clip.seconds, holdSec: 0,
           words: readWords(scene.words), note: `${flag}, its own dialogue`,
         });
       } else {
         spine.push({
-          ...base, audio: "silence", voice: null, seconds: clip.seconds, atempo: 1, holdSec: 0,
+          ...base, audio: "silence", voice: null, seconds: clip.seconds, holdSec: 0,
           words: null, note: `${flag}, silent clip`,
         });
       }
@@ -216,10 +204,10 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
     if (exists(scene.keyframe)) {
       const fit = voice
         ? fitNarration({ clipSeconds: null, voiceSeconds: probe(voice).seconds })
-        : { seconds: plan.durationSec ?? 4, atempo: 1, holdSec: 0 };
+        : { seconds: plan.durationSec ?? 4, holdSec: 0 };
       spine.push({
         sceneIndex: n, source: "still", file: scene.keyframe, clipSeconds: null,
-        seconds: fit.seconds, audio: voice ? "narration" : "silence", voice, atempo: 1, holdSec: 0,
+        seconds: fit.seconds, audio: voice ? "narration" : "silence", voice, holdSec: 0,
         startSec, lineIds: plan.lineIds,
         // #1689: on a narrated scene the words are the voice track's, and the
         // voice starts where the segment does, so they need no offset here.
@@ -288,8 +276,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
     filters.push(`${norm(`${i}:v`)}${fit.length ? `,${fit.join(",")}` : ""}[v${i}]`);
     if (seg.audio === "narration") {
       const v = addInput("-i", resolve(seg.voice));
-      const tempo = seg.atempo > 1.001 ? `atempo=${seg.atempo.toFixed(4)},` : "";
-      filters.push(`[${v}:a]${stereo},${tempo}${LOUDNORM},apad,atrim=0:${sec(seg.seconds)}[a${i}]`);
+      filters.push(`[${v}:a]${stereo},${LOUDNORM},apad,atrim=0:${sec(seg.seconds)}[a${i}]`);
     } else if (seg.audio === "clip") {
       filters.push(`[${i}:a]${stereo},${LOUDNORM},apad,atrim=0:${sec(seg.seconds)}[a${i}]`);
     } else {
