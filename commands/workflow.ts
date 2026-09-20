@@ -35,6 +35,7 @@ import { getChannel, type Channel } from "../lib/channel.js";
 import {
   asVideoRun,
   classifyRun,
+  resolveStopAtPark,
   reviewUrl,
   stopLines,
   type RunStop,
@@ -4099,10 +4100,15 @@ async function waitForRun(
   // --json line (additive, only on this landing) in the same shape `exodus
   // video status --json` and `video wait --json` already use, so an agent can
   // branch on `stop.at` instead of re-deriving the park from the raw run.
-  const videoStop =
+  const parkStop =
     !pollResult.timedOut && isRecord(pollResult.data)
       ? videoParkStop(pollResult.data)
       : undefined;
+  // #1704: a final watch reads differently once a cut is attached, and only the
+  // ledger knows. Resolved after the poll loop, so the extra read happens once
+  // per wait — and by the same function `exodus video status` uses, so neither
+  // surface can invent its own rule for what "a cut is attached" means.
+  const videoStop = parkStop ? await resolveStopAtPark(parkStop, runId, deps) : undefined;
 
   if (opts.json) {
     return {

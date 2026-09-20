@@ -254,6 +254,22 @@ export function classifyRun(run) {
     const active = run.nodes.find((n) => n.status === "running");
     return { at: "running", stage: active?.kind ?? "starting" };
 }
+export function hasAttachedCut(items) {
+    return items.some((i) => i.itemKind === "final" && i.status === "done");
+}
+export function resolveStop(stop, cutAttached) {
+    if (stop.at !== "final-watch")
+        return stop;
+    return { at: "final-watch", cutAttached };
+}
+export async function resolveStopAtPark(stop, runId, deps) {
+    if (stop.at !== "final-watch")
+        return stop;
+    const res = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+    if (!res.ok)
+        return resolveStop(stop, null);
+    return resolveStop(stop, hasAttachedCut(res.data.items ?? []));
+}
 const STAGE_WORDS = {
     brief: "reading the script",
     storyboard: "writing the storyboard",
@@ -300,6 +316,21 @@ export function stopLines(stop, runId, runUrl) {
         return lines;
     }
     if (stop.at === "final-watch") {
+        if (stop.cutAttached === null) {
+            return [
+                "Parked: every piece is made.",
+                `Couldn't check whether a cut is already uploaded. See where it stands: exodus video status ${runId}`,
+                `Watch it here:   ${runUrl}`,
+            ];
+        }
+        if (stop.cutAttached) {
+            return [
+                "Parked: your cut is uploaded and waiting for your approval.",
+                `Approve it:      exodus video approve ${runId}`,
+                `Watch it here:   ${runUrl}`,
+                "Changed your mind? You can still redo a clip and upload a new cut.",
+            ];
+        }
         return [
             "Parked: every piece is made and the run is waiting for a cut.",
             `Pull the pieces: exodus video pull ${runId} --out ./ad-${runId}`,
@@ -891,15 +922,16 @@ export async function waitFlow(runId, opts, deps) {
             }
             continue;
         }
+        const resolved = await resolveStopAtPark(stop, runId, deps);
         if (opts.json) {
             return {
                 code: stop.at === "failed" ? 1 : 0,
-                lines: [JSON.stringify({ runId, stop, status: run.status, url: opts.url })],
+                lines: [JSON.stringify({ runId, stop: resolved, status: run.status, url: opts.url })],
             };
         }
         return {
             code: stop.at === "failed" ? 1 : 0,
-            lines: [...lines, ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run))],
+            lines: [...lines, ...stopLines(resolved, runId, reviewUrl(deps.dashboardUrl, run))],
         };
     }
     const timeoutLine = `Still running after ${Math.round((maxPolls * interval) / 60000)} minutes. Check in with: exodus video status ${runId}`;
@@ -933,15 +965,18 @@ export async function statusFlow(runId, json, deps) {
     if (!itemsRes.ok)
         return errorResult(itemsRes, json);
     const items = itemsRes.data.items ?? [];
-    const stop = classifyRun(run);
-    const hasFinal = items.some((i) => i.itemKind === "final" && i.status === "done");
+    const hasFinal = hasAttachedCut(items);
+    const stop = resolveStop(classifyRun(run), hasFinal);
+    const guidance = stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run));
     const warnings = run.nodes
         .filter((n) => n.warning)
         .map((n) => ({ nodeId: n.nodeId, step: n.kind, warning: n.warning }));
     if (json) {
         return {
             code: 0,
-            lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings })],
+            lines: [
+                JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings, guidance }),
+            ],
         };
     }
     const revoicedByScene = new Set();
@@ -972,7 +1007,7 @@ export async function statusFlow(runId, json, deps) {
         : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
     const lines = [
         headline,
-        ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+        ...guidance,
         ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
         ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
     ];
@@ -984,6 +1019,12 @@ export async function statusFlow(runId, json, deps) {
         for (const sceneIndex of [...byScene.keys()].sort((a, b) => a - b)) {
             const row = byScene.get(sceneIndex);
             lines.push(`${String(sceneIndex).padEnd(5)}  ${itemWord(row.clip).padEnd(8)}  ${itemWord(row.voiceover).padEnd(8)}  ${itemWord(row.frame)}`);
+            if (row.clip?.lastRedo)
+                lines.push(`       clip: ${row.clip.lastRedo.label}`);
+            if (row.voiceover?.lastRedo)
+                lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+            if (row.frame?.lastRedo)
+                lines.push(`       picture: ${row.frame.lastRedo.label}`);
             for (const finding of row.clip?.findings ?? []) {
                 lines.push(`       ${finding.code} (${finding.severity}): ${finding.detail}`);
                 const judgeSeverity = finding.judgeSeverity ?? finding.severity;
@@ -1201,7 +1242,7 @@ export function planClipRedo(run, items, target) {
     };
 }
 function findClipRow(run, items, target) {
-    const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
+    const uploadedCut = hasAttachedCut(items);
     const rows = items.filter((i) => i.itemKind === "clip" &&
         i.sceneIndex === target.sceneIndex &&
         (target.nodeId === undefined || i.nodeId === target.nodeId));

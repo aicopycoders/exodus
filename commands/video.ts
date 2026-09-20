@@ -295,6 +295,13 @@ export interface NodeItem {
    *  this package ships on its own release schedule. Absent on older backends,
    *  and absent means a running row is a running row. */
   staleClaim?: boolean;
+  /** #1855: what this row's last redo did. `label` is the finished sentence,
+   *  composed by the server and printed VERBATIM, because the run page prints
+   *  the same string — that is how the two surfaces cannot word it differently.
+   *  `outcome` stays a plain string on purpose: a new outcome the server starts
+   *  sending must not break a CLI that shipped before it. Absent on a row never
+   *  redone, and on every backend older than this field. */
+  lastRedo?: { take: number; outcome: string; label: string };
   /** Optional resolved media from listNodeItems (ledger clips + cast identity stills). */
   artifact?: ArtifactSubset;
 }
@@ -426,6 +433,23 @@ export type RunStop =
   | { at: "failed"; error?: string; repair?: true; nodeId?: string; step?: string }
   | { at: "finished"; status: string };
 
+/**
+ * #1704: a stop with everything its wording needs. The final watch is the one
+ * stop whose next step does not follow from the run alone — it depends on
+ * whether a cut is already attached, and only the ledger knows that. So
+ * `classifyRun` leaves that arm incomplete, `resolveStop` completes it, and
+ * `stopLines` takes THIS type. A caller cannot render a final watch without
+ * first saying which of its THREE states the run is in.
+ *
+ * `cutAttached: null` is "we could not find out" — the ledger read failed. It
+ * is its own state on purpose: folding it into `false` is what made a run whose
+ * cut IS uploaded tell the member to pull the pieces and upload a cut, which is
+ * the exact contradiction this ticket exists to remove.
+ */
+export type ResolvedStop =
+  | Exclude<RunStop, { at: "final-watch" }>
+  | { at: "final-watch"; cutAttached: boolean | null };
+
 const GATE_NODE_KINDS = new Set(["scene-frames", "storyboard"]);
 
 function isAwaitingApproval(status: string): boolean {
@@ -485,6 +509,44 @@ export function classifyRun(run: VideoRun): RunStop {
   return { at: "running", stage: active?.kind ?? "starting" };
 }
 
+/**
+ * #1704: the ONE definition of "a cut is attached". The final-watch guidance,
+ * the final-cut footer and the `hasFinal` field all read it, and `retry-clip`'s
+ * "your uploaded cut will not include this" warning reads it too, so no surface
+ * can decide a run has a cut by a rule of its own.
+ */
+export function hasAttachedCut(items: NodeItem[]): boolean {
+  return items.some((i) => i.itemKind === "final" && i.status === "done");
+}
+
+/** #1704: fill in the one fact `classifyRun` cannot see. `cutAttached` comes
+ *  from `hasAttachedCut`, or is null when the ledger could not be read. */
+export function resolveStop(
+  stop: RunStop,
+  cutAttached: boolean | null,
+): ResolvedStop {
+  if (stop.at !== "final-watch") return stop;
+  return { at: "final-watch", cutAttached };
+}
+
+/**
+ * #1704: the same resolution for a surface that polls the run and nothing else.
+ * It reads the ledger ONCE, at the moment it has actually parked at the final
+ * watch — not on every poll, and not at all for any other stop. A ledger read
+ * that FAILS resolves to null, not false: these surfaces know the run is parked
+ * and nothing else, and "waiting for a cut" is a claim, not a fallback.
+ */
+export async function resolveStopAtPark(
+  stop: RunStop,
+  runId: string,
+  deps: Pick<VideoDeps, "get">,
+): Promise<ResolvedStop> {
+  if (stop.at !== "final-watch") return stop;
+  const res = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!res.ok) return resolveStop(stop, null);
+  return resolveStop(stop, hasAttachedCut((res.data as { items?: NodeItem[] }).items ?? []));
+}
+
 const STAGE_WORDS: Record<string, string> = {
   brief: "reading the script",
   storyboard: "writing the storyboard",
@@ -533,7 +595,7 @@ export function reviewUrl(
   return `${dashboardUrl}/runs/${run._id}`;
 }
 
-export function stopLines(stop: RunStop, runId: string, runUrl: string): string[] {
+export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[] {
   if (stop.at === "storyboard-gate") {
     const lines = [
       "Parked: the storyboard is waiting for your yes.",
@@ -549,6 +611,29 @@ export function stopLines(stop: RunStop, runId: string, runUrl: string): string[
     return lines;
   }
   if (stop.at === "final-watch") {
+    // #1704: the ledger read failed, so every command below would be a guess —
+    // "upload a cut" to someone who already has one, or "approve" to someone
+    // who has nothing to approve. Say what IS known, and name the one command
+    // that looks again.
+    if (stop.cutAttached === null) {
+      return [
+        "Parked: every piece is made.",
+        `Couldn't check whether a cut is already uploaded. See where it stands: exodus video status ${runId}`,
+        `Watch it here:   ${runUrl}`,
+      ];
+    }
+    // #1704: the cut is in, so the next step is the approval — not the pull and
+    // upload the member has already done. The redo road stays open in one line,
+    // because the common case is that the cut is right. Nothing here promises
+    // the approval will be allowed; the server decides that (#1856).
+    if (stop.cutAttached) {
+      return [
+        "Parked: your cut is uploaded and waiting for your approval.",
+        `Approve it:      exodus video approve ${runId}`,
+        `Watch it here:   ${runUrl}`,
+        "Changed your mind? You can still redo a clip and upload a new cut.",
+      ];
+    }
     return [
       "Parked: every piece is made and the run is waiting for a cut.",
       `Pull the pieces: exodus video pull ${runId} --out ./ad-${runId}`,
@@ -1337,15 +1422,18 @@ export async function waitFlow(
       }
       continue;
     }
+    // #1704: after the loop, so an hour-long wait costs ONE extra read, not one
+    // per poll.
+    const resolved = await resolveStopAtPark(stop, runId, deps);
     if (opts.json) {
       return {
         code: stop.at === "failed" ? 1 : 0,
-        lines: [JSON.stringify({ runId, stop, status: run.status, url: opts.url })],
+        lines: [JSON.stringify({ runId, stop: resolved, status: run.status, url: opts.url })],
       };
     }
     return {
       code: stop.at === "failed" ? 1 : 0,
-      lines: [...lines, ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run))],
+      lines: [...lines, ...stopLines(resolved, runId, reviewUrl(deps.dashboardUrl, run))],
     };
   }
 
@@ -1388,8 +1476,11 @@ export async function statusFlow(
   if (!itemsRes.ok) return errorResult(itemsRes, json);
   const items = (itemsRes.data as { items?: NodeItem[] }).items ?? [];
 
-  const stop = classifyRun(run);
-  const hasFinal = items.some((i) => i.itemKind === "final" && i.status === "done");
+  // #1704: one fact, read once, driving the guidance block, the footer and the
+  // `hasFinal` field alike — the three used to be able to contradict each other.
+  const hasFinal = hasAttachedCut(items);
+  const stop = resolveStop(classifyRun(run), hasFinal);
+  const guidance = stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run));
 
   const warnings = run.nodes
     .filter((n) => n.warning)
@@ -1398,7 +1489,11 @@ export async function statusFlow(
   if (json) {
     return {
       code: 0,
-      lines: [JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings })],
+      // #1704: `guidance` is the very array the human render prints below, so a
+      // machine reader and a person are told the next step by one derivation.
+      lines: [
+        JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings, guidance }),
+      ],
     };
   }
 
@@ -1437,7 +1532,7 @@ export async function statusFlow(
       : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
   const lines = [
     headline,
-    ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+    ...guidance,
     // #1883: "Working" alone reads like a run going straight through, and a
     // healthy gated run was cancelled over exactly that.
     ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
@@ -1453,6 +1548,13 @@ export async function statusFlow(
       lines.push(
         `${String(sceneIndex).padEnd(5)}  ${itemWord(row.clip).padEnd(8)}  ${itemWord(row.voiceover).padEnd(8)}  ${itemWord(row.frame)}`,
       );
+      // #1855: a redo that fails its checks keeps the original take and leaves
+      // the row reading "done", so the grid word alone cannot say whether the
+      // member got a new take. The outcome goes first, above the findings that
+      // explain it, and names the column it belongs to.
+      if (row.clip?.lastRedo) lines.push(`       clip: ${row.clip.lastRedo.label}`);
+      if (row.voiceover?.lastRedo) lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+      if (row.frame?.lastRedo) lines.push(`       picture: ${row.frame.lastRedo.label}`);
       for (const finding of row.clip?.findings ?? []) {
         lines.push(`       ${finding.code} (${finding.severity}): ${finding.detail}`);
         // #1784: what the checker itself said, when it adds something.
@@ -1768,7 +1870,7 @@ function findClipRow(
   items: NodeItem[],
   target: ClipRedoTarget,
 ): { row: NodeItem; uploadedCut: boolean } | { reason: string } {
-  const uploadedCut = items.some((i) => i.itemKind === "final" && i.status === "done");
+  const uploadedCut = hasAttachedCut(items);
 
   const rows = items.filter(
     (i) =>

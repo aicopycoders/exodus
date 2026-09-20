@@ -1,6 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
 import { pollUntilDone } from "../lib/poll.js";
 import { displayRunStatus, formatGenesisRun, formatError, tickerRunStatus } from "../lib/format.js";
@@ -408,70 +407,26 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   }
 }
 
-/** List banked reels (Mode 2 browse). */
-async function listBank(limit: number): Promise<void> {
-  const res = await apiGet<{ ideas?: BankIdeaRow[]; error?: string }>(
-    `/api/v2/scout/bank?limit=${limit}`,
-  );
-  if (!res.ok) {
-    console.log(formatError(res));
-    process.exit(1);
-  }
-  const ideas = Array.isArray(res.data.ideas) ? res.data.ideas : [];
-  if (ideas.length === 0) {
-    console.log("Bank is empty.");
-    console.log('Fill it with: exodus genesis scrape   (or paste a reel: exodus genesis --reel "<url>")');
-    return;
-  }
-  console.log(`## Idea Bank (${ideas.length} reel${ideas.length === 1 ? "" : "s"})`);
-  console.log("");
-  for (const i of ideas) {
-    const hook = i.hook ?? "(no hook)";
-    const user =
-      typeof i.sourceUsername === "string" && i.sourceUsername.length > 0
-        ? `  @${i.sourceUsername.replace(/^@+/, "")}`
-        : "";
-    const score = typeof i.relevanceScore === "number" ? ` score=${i.relevanceScore.toFixed(2)}` : "";
-    const used = typeof i.useCount === "number" && i.useCount > 0 ? " · used" : "";
-    console.log(`  • ${hook}${user}${score}`);
-    console.log(`    id: ${i._id ?? "?"}  [${i.status ?? "new"}${used}]`);
-    if (i.sourceUrl) console.log(`    ${i.sourceUrl}`);
-  }
-  console.log("");
-  console.log("Write from one:  exodus genesis --from-bank --idea <id>");
+/**
+ * RETIRED: listBank called deleted route (/api/v2/scout/bank).
+ * The idea bank now lives in the dashboard. #1904
+ */
+async function listBank(_limit: number): Promise<void> {
+  console.error(`This command has been retired. View the idea bank in the dashboard: ${getDashboardUrl()}/idea-bank`);
+  process.exit(1);
 }
 
 /**
- * Resolve a banked reel's URL (scout bank), then write it through the standard
- * reel flow — transcribe → Idea Bank → Genesis writer — same as `--reel`. The
- * scout bank only stored the URL, so this re-transcribes; the point is the
- * routing: it no longer goes through the legacy viral-ads pipeline.
+ * RETIRED: runFromBank called deleted route (/api/v2/scout/bank/ideas).
+ * The idea bank now lives in the dashboard. #1904
  */
 async function runFromBank(
-  ideaId: string,
-  opts: GenesisOpts,
-  rt: { noWait: boolean; cc: string | undefined },
+  _ideaId: string,
+  _opts: GenesisOpts,
+  _rt: { noWait: boolean; cc: string | undefined },
 ): Promise<void> {
-  const res = await apiPost<{ ideas?: BankIdeaRow[]; error?: string }>(
-    "/api/v2/scout/bank/ideas",
-    { ideaIds: [ideaId] },
-    { ccCommand: rt.cc },
-  );
-  if (!res.ok) {
-    console.log(formatError(res));
-    process.exit(1);
-  }
-  const idea = (res.data.ideas ?? [])[0];
-  if (!idea) {
-    console.error(`No banked idea found for id "${ideaId}". List the bank: exodus genesis --from-bank`);
-    process.exit(1);
-  }
-  if (!idea.sourceUrl) {
-    console.error(`Banked idea "${ideaId}" has no source reel URL to write from.`);
-    process.exit(1);
-  }
-  console.log(`Writing from banked reel: ${idea.sourceUrl}`);
-  return runReel([idea.sourceUrl], opts, rt);
+  console.error(`This command has been retired. Write from banked ideas in the dashboard: ${getDashboardUrl()}/idea-bank`);
+  process.exit(1);
 }
 
 /**
@@ -902,127 +857,25 @@ function requireActiveBrand(): string {
 }
 
 /**
- * Mode 3 onboarding — connect this brand's Instagram account via a hosted
- * browser login (Browserbase, residential proxy). Opens a live-view URL, waits
- * for the user to log in, then confirms.
+ * RETIRED: connect-instagram called deleted routes (/api/v2/genesis/instagram/connect/*).
+ * The Instagram connection flow now lives in the dashboard. #1411
  */
 async function runConnectInstagram(
-  flags: Record<string, string | boolean>,
-  cc: string | undefined,
+  _flags: Record<string, string | boolean>,
+  _cc: string | undefined,
 ): Promise<void> {
-  const client = requireActiveBrand();
-
-  const start = await apiPost<{ liveViewUrl?: string; sessionId?: string; error?: string }>(
-    "/api/v2/genesis/instagram/connect/start",
-    { client },
-    { ccCommand: cc },
-  );
-  if (!start.ok || !start.data.liveViewUrl) {
-    console.log(formatError(start));
-    process.exit(1);
-  }
-
-  console.log(`\nConnecting an Instagram account to brand "${client}".`);
-  console.log("\n1. Open this link in your browser:\n");
-  console.log(`   ${start.data.liveViewUrl}\n`);
-  console.log('2. Go to instagram.com and log into the account for THIS brand.');
-  console.log("3. Scroll your feed for a bit so the algorithm learns the niche.");
-  console.log("4. Come back here and press Enter.\n");
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    await rl.question("Press Enter once you're logged in and done grooming... ");
-    let username = typeof flags["username"] === "string" ? (flags["username"] as string).trim() : "";
-    while (!username) {
-      username = (await rl.question("Instagram handle you just logged in as (e.g. mybrand): ")).trim();
-    }
-
-    const finish = await apiPost<{ ok?: boolean; error?: string }>(
-      "/api/v2/genesis/instagram/connect/finish",
-      { client, igUsername: username },
-      { ccCommand: cc },
-    );
-    if (!finish.ok) {
-      console.log(formatError(finish));
-      process.exit(1);
-    }
-    console.log(`\n✓ Instagram @${username.replace(/^@+/, "")} connected to "${client}".`);
-    console.log("Fill the idea bank now:  exodus genesis scrape --organic");
-  } finally {
-    rl.close();
-  }
+  console.error(`This command has been retired. Connect Instagram accounts in the dashboard: ${getDashboardUrl()}/settings`);
+  process.exit(1);
 }
 
 /**
- * Mode 3 — fill the idea bank for the active brand. `--organic` runs the
- * authenticated FYP walk via the connected account; otherwise a ScrapeCreators
- * discovery (no IG login needed). Banked reels are then written with
- * `exodus genesis --from-bank`.
+ * RETIRED: scrape (and scrape --organic) called deleted routes (/api/v2/scout/*).
+ * The idea-bank scraping flow now lives in the dashboard Mining page. #1904
  */
 async function runScrape(
-  flags: Record<string, string | boolean>,
-  cc: string | undefined,
+  _flags: Record<string, string | boolean>,
+  _cc: string | undefined,
 ): Promise<void> {
-  const client = requireActiveBrand();
-  const noWait = flags["wait"] === false || flags["no-wait"] === true;
-
-  if (flags["organic"] === true) {
-    const smoke = flags["smoke"] === true;
-    const res = await apiPost<{ runId?: string; triggerRunId?: string; error?: string }>(
-      "/api/v2/scout/organic",
-      { client, ...(smoke ? { smoke: true } : {}) },
-      { ccCommand: cc },
-    );
-    if (!res.ok || !res.data.runId) {
-      console.log(formatError(res));
-      process.exit(1);
-    }
-    console.log(`Organic scrape started for "${client}": ${res.data.runId}${smoke ? " (smoke)" : ""}`);
-    return pollScrape(res.data.runId, noWait, 1_800_000);
-  }
-
-  // ScrapeCreators discovery (no IG login). --term scopes it; otherwise pool mode.
-  const term = typeof flags["term"] === "string" ? (flags["term"] as string) : undefined;
-  const body: Record<string, unknown> = { sourceMode: "fresh", client };
-  if (term) body.term = term;
-  const res = await apiPost<{ runId?: string; error?: string }>("/api/v2/scout", body, { ccCommand: cc });
-  if (!res.ok || !res.data.runId) {
-    console.log(formatError(res));
-    process.exit(1);
-  }
-  console.log(`Discovery scrape started for "${client}": ${res.data.runId}`);
-  return pollScrape(res.data.runId, noWait, 1_200_000);
-}
-
-async function pollScrape(runId: string, noWait: boolean, timeoutMs: number): Promise<void> {
-  if (noWait) {
-    console.log(`Run ID: ${runId}`);
-    console.log(`Check status: exodus status --type scout --id ${runId}`);
-    return;
-  }
-  console.log("Polling for completion...");
-  const result = await pollUntilDone({
-    path: `/api/v2/scout?runId=${runId}`,
-    intervalMs: 15_000,
-    timeoutMs,
-    onProgress: (data) => {
-      const status = data["status"] as string | undefined;
-      const captured = data["organicCaptured"] as number | undefined;
-      const qualified = data["organicQualified"] as number | undefined;
-      const counts =
-        captured !== undefined || qualified !== undefined
-          ? ` captured=${captured ?? 0} qualified=${qualified ?? 0}`
-          : "";
-      // #994: mid-run scrape phases (walking/mining/scoring) stream verbatim —
-      // they ARE the progress signal; a settled run prints the ruled word.
-      if (status) process.stdout.write(`\r  status: ${tickerRunStatus(status)}${counts}              `);
-    },
-  });
-  console.log();
-  if (result.timedOut) {
-    console.log(`Timed out waiting. Check later: exodus status --type scout --id ${runId}`);
-  } else {
-    console.log(`Done. Banked reels are ready to write: exodus genesis --from-bank`);
-  }
-  if (!result.ok && !result.timedOut) process.exit(1);
+  console.error(`This command has been retired. Fill the idea bank from the Mining page in the dashboard: ${getDashboardUrl()}/mining`);
+  process.exit(1);
 }

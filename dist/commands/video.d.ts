@@ -117,6 +117,11 @@ export interface NodeItem {
     flagged?: boolean;
     findings?: ClipFinding[];
     staleClaim?: boolean;
+    lastRedo?: {
+        take: number;
+        outcome: string;
+        label: string;
+    };
     artifact?: ArtifactSubset;
 }
 export interface ShowRow {
@@ -184,11 +189,20 @@ export type RunStop = {
     at: "finished";
     status: string;
 };
+export type ResolvedStop = Exclude<RunStop, {
+    at: "final-watch";
+}> | {
+    at: "final-watch";
+    cutAttached: boolean | null;
+};
 export declare function classifyRun(run: VideoRun): RunStop;
+export declare function hasAttachedCut(items: NodeItem[]): boolean;
+export declare function resolveStop(stop: RunStop, cutAttached: boolean | null): ResolvedStop;
+export declare function resolveStopAtPark(stop: RunStop, runId: string, deps: Pick<VideoDeps, "get">): Promise<ResolvedStop>;
 export declare function stageWord(stage: string): string;
 export declare function stepName(kind: string | undefined): string;
 export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">): string;
-export declare function stopLines(stop: RunStop, runId: string, runUrl: string): string[];
+export declare function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[];
 export interface PullDownload {
     file: string;
     url: string;

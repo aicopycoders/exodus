@@ -10,7 +10,7 @@ import { runDisplayName, runHeadingWord, runTypeWord } from "../lib/runNames.js"
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
-import { asVideoRun, classifyRun, reviewUrl, stopLines, } from "./video.js";
+import { asVideoRun, classifyRun, resolveStopAtPark, reviewUrl, stopLines, } from "./video.js";
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
 
@@ -2085,9 +2085,10 @@ async function waitForRun(runId, opts, deps) {
     const saved = opts.out !== undefined && terminalRun
         ? await saveDeliveries(terminalRun, opts.out, deps)
         : undefined;
-    const videoStop = !pollResult.timedOut && isRecord(pollResult.data)
+    const parkStop = !pollResult.timedOut && isRecord(pollResult.data)
         ? videoParkStop(pollResult.data)
         : undefined;
+    const videoStop = parkStop ? await resolveStopAtPark(parkStop, runId, deps) : undefined;
     if (opts.json) {
         return {
             code: pollResult.ok ? 0 : 1,

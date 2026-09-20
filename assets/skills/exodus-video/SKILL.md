@@ -104,7 +104,10 @@ under it:
 - storyboard gate: needs `approve`. When the stop block prints a `Redo one
   frame:` line with a node id, one still can be redone first with `retry-frame`;
   a gate parked before the stills are drawn has nothing to redraw.
-- final watch: every piece is made; needs `pull`, a cut, and `upload`. It is also
+- final watch: every piece is made; needs `pull`, a cut, and `upload`. Once a
+  cut is uploaded the stop block leads with `approve` instead, and `status
+  --json` says which state it is in (`stop.cutAttached`, plus the same next-step
+  lines under `guidance`). It is also
   the one park where a finished clip can be redone, with `retry-clip`. A run
   only reaches this park if its video node sets `finalWatch: true` — otherwise
   it skips straight to finished.
@@ -677,8 +680,11 @@ them. If the words are wrong, that is a new run.
 **A redo whose take fails the checks keeps the original clip.** On a finished
 clip the row stays `done` with the ORIGINAL take and only its findings are
 refreshed, because a worse take must never replace a delivered one. So never
-report that the clip changed. Read `status` again for the new findings, then pull
-and compare the file before and after.
+report that the clip changed without reading `status` again: under the scene it
+prints what the redo did, `new take accepted (take N)` or `new take rejected,
+original kept (take N)`, and `status --json` carries the same sentence on the
+row as `lastRedo.label`. A row with no `lastRedo` was redone before outcomes
+were recorded; for those, pull and compare the file before and after.
 
 **Re-cut afterwards.** A cut you already uploaded still holds the old clip, and
 the CLI says so when that is the case. Pull again, re-cut and upload again before

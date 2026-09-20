@@ -1,6 +1,5 @@
-import { apiGet } from "../lib/client.js";
+import { apiGet, getDashboardUrl } from "../lib/client.js";
 import { formatGeneration, formatGenesisRun, formatError, displayRunStatus } from "../lib/format.js";
-import { hydrateScoutIdeasCount } from "../lib/scout-hydrate.js";
 import { formatIntelResult as formatIntelResultRich } from "../lib/intel-format.js";
 
 export const helpText = `
@@ -13,19 +12,13 @@ Required:
   --id <runId>           The generation or run ID returned by a prior exodus command
 
 Options:
-  --type <pipeline>      Pipeline type: generation (default) | genesis | intel | pulse | scout
+  --type <pipeline>      Pipeline type: generation (default) | genesis | intel | pulse
                          | creative | template
                          Spark, Viral, Mirror, Remix runs use --type generation (default).
-                         Intel, Pulse, Scout require --type intel|pulse|scout.
+                         Intel, Pulse require --type intel|pulse.
                          Creative-suite (native/copy-derived/ref-match/meme)
                          use --type creative; Template uses --type template.
 `.trim();
-
-async function fetchScoutIdeasCount(runId: string): Promise<number | null> {
-  const res = await apiGet<{ count?: number }>(`/api/v2/scout/ideas?runId=${runId}&limit=1`);
-  if (res.ok && typeof res.data.count === "number") return res.data.count;
-  return null;
-}
 
 // Delegate to the Intel command's formatter so `exodus status --type intel`
 // shows the same fields (phase1DocUrl, phase3DocUrl, googleSheetUrl, combo
@@ -175,12 +168,17 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
 
   const type = (flags["type"] as string | undefined) ?? "generation";
 
+  // RETIRED: --type scout called deleted route (/api/v2/scout). #1904
+  if (type === "scout") {
+    console.error(`--type scout has been retired. Check run status in the dashboard: ${getDashboardUrl()}/runs`);
+    process.exit(1);
+  }
+
   const pathMap: Record<string, string> = {
     generation: `/api/v2/generations?id=${id}`,
     genesis: `/api/v2/genesis?id=${id}`,
     intel: `/api/v2/intel?id=${id}`,
     pulse: `/api/v2/pulse?id=${id}`,
-    scout: `/api/v2/scout?runId=${id}`,
     creative: `/api/v2/creative?runId=${id}`,
     template: `/api/v2/template?runId=${id}`,
   };
@@ -188,7 +186,7 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   const path = pathMap[type];
   if (!path) {
     console.error(
-      `Unknown type: "${type}". Valid types: generation, genesis, intel, pulse, scout, creative, template`,
+      `Unknown type: "${type}". Valid types: generation, genesis, intel, pulse, creative, template`,
     );
     process.exit(1);
   }
@@ -198,10 +196,6 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   if (!res.ok) {
     console.log(formatError(res));
     process.exit(1);
-  }
-
-  if (type === "scout") {
-    await hydrateScoutIdeasCount(id, res.data, fetchScoutIdeasCount);
   }
 
   switch (type) {
@@ -216,9 +210,6 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
       break;
     case "pulse":
       console.log(formatPulseResult(res.data));
-      break;
-    case "scout":
-      console.log(formatScoutResult(res.data));
       break;
     case "creative":
       console.log(formatCreativeSuiteStatus("Creative Suite Status", res.data));
