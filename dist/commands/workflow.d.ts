@@ -386,6 +386,9 @@ export interface WorkflowRun {
     _id: string;
     workflowId: string;
     workflowName: string;
+    runTitle?: string;
+    title?: string;
+    moduleKey?: string;
     status: WorkflowRunStatus;
     error?: string;
     counts?: WorkflowCounts;
@@ -408,7 +411,12 @@ export interface WorkflowRun {
         approvedAt: number;
     }[];
     provenance?: RunProvenance;
+    pauseAhead?: {
+        nodeId: string;
+        after: "frames" | "storyboard";
+    };
 }
+export declare function pauseAheadLine(ahead: NonNullable<WorkflowRun["pauseAhead"]>): string;
 export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & {
     nodes?: never;
 };

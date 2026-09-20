@@ -5,7 +5,7 @@ import { apiGet, apiPost, getDashboardUrl } from "../lib/client.js";
 import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
-import { ASSET_UPLOAD_POLICY } from "./workflow.js";
+import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
 export const helpText = `
 exodus video — make an ad from a Show, pull every piece, upload your cut
 
@@ -921,6 +921,8 @@ const ITEM_STATUS_WORD = {
 function itemWord(item) {
     if (!item)
         return "—";
+    if (item.staleClaim === true)
+        return "stopped";
     if (item.flagged === true)
         return "flagged";
     return ITEM_STATUS_WORD[item.status] ?? item.status;
@@ -974,6 +976,7 @@ export async function statusFlow(runId, json, deps) {
     const lines = [
         headline,
         ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+        ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
         ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
     ];
     if (byScene.size === 0) {
@@ -1176,6 +1179,7 @@ export function planClipRedo(run, items, target) {
         return { ok: false, reason: found.reason };
     const { row, uploadedCut } = found;
     const redoable = row.status === "failed" ||
+        row.staleClaim === true ||
         (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
     if (!redoable) {
         if (row.status === "done") {
@@ -1228,7 +1232,7 @@ function findClipRow(run, items, target) {
                 "and one clip can only be redone on a step that finished.",
         };
     }
-    if (row.status === "running") {
+    if (row.status === "running" && row.staleClaim !== true) {
         return { reason: `Scene ${target.sceneIndex} is already being redone.` };
     }
     return { row, uploadedCut };
@@ -1294,20 +1298,34 @@ export async function retryClipFlow(runId, target, note, json, deps) {
 }
 function clipIsStillRaw(item) {
     const a = item.artifact;
-    return (item.status === "done" &&
+    return ((item.status === "done" || item.staleClaim === true) &&
         a?.type === "video" &&
         a.revoiced !== true &&
         a.speechTrimmed !== true &&
         a.tailTrimmed !== true);
 }
 const VOICE_NOT_CHANGED_CODES = new Set(["voice-unpinned", "voice-not-applied"]);
+export const VOICE_PATHS_NEVER_HEARD = new Set(["native-prompt", "omni-audio-ids", "gemini-direct"]);
+async function neverHeardRunLine(runId, deps) {
+    const res = await deps
+        .get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`)
+        .catch(() => null);
+    if (!res?.ok)
+        return null;
+    const path = res.data?.treatment?.path;
+    if (typeof path !== "string" || !VOICE_PATHS_NEVER_HEARD.has(path))
+        return null;
+    return (`This run's clips are not voiced by ElevenLabs — the "${path}" way settles each voice as ` +
+        "the clip is rendered — so no clip on this run has a voice pass to redo. Nothing was queued " +
+        "and nothing was spent. To make a clip again from scratch, redo the clip instead.");
+}
 export function planClipRevoice(run, items, target) {
     const found = findClipRow(run, items, target);
     if ("reason" in found)
         return { ok: false, reason: found.reason };
     const { row, uploadedCut } = found;
     const remake = `To make the clip again from scratch: exodus video retry-clip ${run._id} --scene ${target.sceneIndex}`;
-    if (row.status !== "done" || row.artifact?.type !== "video") {
+    if ((row.status !== "done" && row.staleClaim !== true) || row.artifact?.type !== "video") {
         return {
             ok: false,
             reason: `Scene ${target.sceneIndex} has no finished clip, so there is no voice to redo. ${remake}`,
@@ -1351,10 +1369,11 @@ export async function revoiceFlow(runId, target, json, deps) {
             .map((i) => ({ sceneIndex: i.sceneIndex, nodeId: i.nodeId }))
         : [target];
     if (targets.length === 0) {
-        const nothing = "No clip on this run is waiting for a voice pass, so nothing was started.";
+        const note = (await neverHeardRunLine(runId, deps)) ??
+            "No clip on this run is waiting for a voice pass, so nothing was started.";
         return {
             code: 0,
-            lines: json ? [JSON.stringify({ ok: true, runId, scenes: [], note: nothing })] : [nothing],
+            lines: json ? [JSON.stringify({ ok: true, runId, scenes: [], note })] : [note],
         };
     }
     const scenes = [];
@@ -1551,7 +1570,8 @@ export function voiceSheetLines(sheet) {
     for (const row of sheet.cast) {
         const voice = voiceWords(row);
         lines.push(`  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
-            `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`);
+            `speaks in ${row.spokenScenes} scene${row.spokenScenes === 1 ? "" : "s"}, ` +
+            `about ${row.spokenSeconds}s`);
         if (row.description)
             lines.push(`      written voice: ${row.description}`);
     }
@@ -1565,8 +1585,9 @@ export function voiceSheetLines(sheet) {
             : "Nothing changed — those voices were already set. Pictures and script were not touched.");
     }
     lines.push(`How voices are applied: ${sheet.treatment.summary}${sheet.treatment.speedChange ? "" : " No speed change."}`);
-    const rendersOwnVoice = sheet.treatment.kind === "render-owns-voice";
-    if (!rendersOwnVoice || sheet.treatment.usesElevenLabs === undefined) {
+    const playsPinnedVoices = sheet.treatment.kind !== "render-owns-voice";
+    const convertsClips = playsPinnedVoices && sheet.treatment.usage.clips > 0;
+    if (convertsClips || sheet.treatment.usesElevenLabs === undefined) {
         lines.push(`Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
             `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
             `${sheet.treatment.usage.clips} clips will be converted.`);

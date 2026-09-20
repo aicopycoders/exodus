@@ -6,6 +6,7 @@ import { formatApiError } from "../lib/format.js";
 import { pollUntilDone } from "../lib/poll.js";
 import { normalizeRunStatus, isTerminalRunStatus, storedWorkflowStatusForms, TERMINAL_RUN_STATUSES, } from "../lib/runStatus.js";
 import { runVerdict } from "../lib/runVerdict.js";
+import { runDisplayName, runHeadingWord, runTypeWord } from "../lib/runNames.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
@@ -365,6 +366,11 @@ export function formatRulesLine(provenance) {
         ? ` The rules come from "${rulesFrom.rigName}".`
         : "";
     return `Format rules: ${rigName}${version}${where}.${borrowed}`;
+}
+export function pauseAheadLine(ahead) {
+    return ahead.after === "frames"
+        ? "This run will pause for your approval once the frames are ready. The reference, cast and scene pictures are made first (a few cents each). Nothing bigger is spent until you approve."
+        : "This run will pause for your approval once the storyboard is written. Nothing is spent on pictures, voices or clips until you approve.";
 }
 const LIST_PATH = "/api/v2/workflows";
 const RUN_PATH = "/api/v2/workflows/run";
@@ -1114,7 +1120,13 @@ const RECENT_RUNS_PAGE = 25;
 export function formatRecentRuns(runs) {
     if (runs.length === 0)
         return "No workflow runs found for the active brand.";
-    const rows = table(["workflow", "status", "created", "id"], runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]));
+    const rows = table(["run", "type", "status", "created", "id"], runs.map((r) => [
+        runDisplayName(r),
+        runTypeWord(r),
+        runVerdict(r),
+        dateOnly(r.createdAt),
+        r._id,
+    ]));
     const notes = [];
     if (runs.length >= RECENT_RUNS_PAGE) {
         notes.push(`Showing the ${RECENT_RUNS_PAGE} newest runs — there may be older ones this list doesn't reach.`);
@@ -1195,7 +1207,7 @@ export function formatImportSummary(result, mode = {}) {
 export function formatWorkflowRun(run) {
     const lines = [];
     const counts = formatCounts(run.counts);
-    lines.push(`Workflow run — ${run.workflowName}`);
+    lines.push(`${runHeadingWord(run)} — ${runDisplayName(run)}`);
     lines.push(`runId:        ${run._id}`);
     lines.push(`workflowId:   ${run.workflowId}`);
     if (run.triggerRunId)
@@ -1217,6 +1229,10 @@ export function formatWorkflowRun(run) {
     }
     if (run.autoApprovals && run.autoApprovals.length > 0) {
         lines.push(`auto-approved: ${run.autoApprovals.length} checkpoint stop${run.autoApprovals.length === 1 ? "" : "s"} (${run.autoApprovals.map((a) => a.nodeId).join(", ")}) — launched with --auto-approve, nobody reviewed these`);
+    }
+    if (run.pauseAhead) {
+        lines.push("");
+        lines.push(pauseAheadLine(run.pauseAhead));
     }
     const parkedNodeId = gateParkedNodeId(run.status, run.pauseReason, run.pausedNodeId);
     if (run.nodes.length > 0) {

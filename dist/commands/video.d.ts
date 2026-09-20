@@ -1,6 +1,6 @@
 import { type ApiResponse } from "../lib/client.js";
 import type { FlagOccurrence } from "../lib/args.js";
-import { type RunProvenance } from "./workflow.js";
+import { type RunProvenance, type WorkflowRun } from "./workflow.js";
 export declare const helpText: string;
 export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
@@ -100,6 +100,7 @@ export interface VideoRun {
     pauseReason?: BuilderPauseReason;
     pausedNodeId?: string;
     nodes: VideoRunNode[];
+    pauseAhead?: WorkflowRun["pauseAhead"];
     castLock?: PullCastLock | null;
     provenance?: RunProvenance;
     workflowId?: string;
@@ -115,6 +116,7 @@ export interface NodeItem {
     attempt?: number;
     flagged?: boolean;
     findings?: ClipFinding[];
+    staleClaim?: boolean;
     artifact?: ArtifactSubset;
 }
 export interface ShowRow {
@@ -296,6 +298,7 @@ export interface ClipRedoTarget {
 }
 export declare function planClipRedo(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
 export declare function retryClipFlow(runId: string, target: ClipRedoTarget, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare const VOICE_PATHS_NEVER_HEARD: Set<string>;
 export declare function planClipRevoice(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
 export type RevoiceTarget = ClipRedoTarget | {
     all: true;

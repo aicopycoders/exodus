@@ -237,7 +237,7 @@ Two limits worth knowing before you treat an empty inbox as proof of anything:
 
 **What `inbox` does not list is work that isn't waiting on anybody.** A queued run, a running run, and any automation that ran start-to-finish without an approval step never appear there — not because they're hidden, but because there is nothing for you to decide. Plenty of workflows are built that way on purpose; the shipped **Winner Flywheel** starter is one (brief → splitter → output, no Checkpoint box anywhere), so its run *can never* show up in `inbox`. An empty inbox after a promote means "nothing needs you", not "nothing ran".
 
-**To see runs that aren't waiting on you, run `workflow status` with no `--id`.** That prints the brand's recent runs — newest first, one row each with the workflow name, its status, the **date** it started, and its **run id**. That bare list is how you discover a background run at all, including one that started and finished while you weren't looking; take the id from it and `status --id <runId>` for the full detail.
+**To see runs that aren't waiting on you, run `workflow status` with no `--id`.** That prints the brand's recent runs — newest first, one row each with the run's own name (the name you gave it, else the first line of its brief, else the workflow's name), its type ("Copy run" or "Workflow"), its status, the **date** it started, and its **run id**. That bare list is how you discover a background run at all, including one that started and finished while you weren't looking; take the id from it and `status --id <runId>` for the full detail.
 
 Two things about that list you have to know before you answer a question with it:
 

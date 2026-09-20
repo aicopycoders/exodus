@@ -23,6 +23,7 @@ import {
   type RunStatus,
 } from "../lib/runStatus.js";
 import { runVerdict, type RunDeliverySummary } from "../lib/runVerdict.js";
+import { runDisplayName, runHeadingWord, runTypeWord } from "../lib/runNames.js";
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel, type Channel } from "../lib/channel.js";
@@ -1168,6 +1169,17 @@ export interface WorkflowRun {
   _id: string;
   workflowId: string;
   workflowName: string;
+  /**
+   * #1347: the run's OWN name, and the module face that launched it. All
+   * three already ride `projectRun`, conditionally — the CLI simply never
+   * declared them. Every run of the hidden "+ New → Copy" face shares one
+   * `workflowName`, so without them this screen lists them all under the same
+   * word. Optional for deploy skew as much as for absence: an older backend
+   * sends none of them, and the naming rules fall back to `workflowName`.
+   */
+  runTitle?: string;
+  title?: string;
+  moduleKey?: string;
   status: WorkflowRunStatus;
   error?: string;
   counts?: WorkflowCounts;
@@ -1212,6 +1224,22 @@ export interface WorkflowRun {
    * none, and on every backend older than #1869.
    */
   provenance?: RunProvenance;
+  /**
+   * #1883: the approval stop this run is still headed for. The server owns the
+   * whole predicate, so absence is the wire shape of a run that is already
+   * parked there, one that was approved, a terminal run, a run with no gated
+   * storyboard, and every backend older than #1883. `after` says what has been
+   * rendered by the time it parks: "frames" means the cheap pictures came
+   * first, "storyboard" means nothing was drawn yet.
+   */
+  pauseAhead?: { nodeId: string; after: "frames" | "storyboard" };
+}
+
+/** #1883: the one sentence both status commands say about a coming pause. */
+export function pauseAheadLine(ahead: NonNullable<WorkflowRun["pauseAhead"]>): string {
+  return ahead.after === "frames"
+    ? "This run will pause for your approval once the frames are ready. The reference, cast and scene pictures are made first (a few cents each). Nothing bigger is spent until you approve."
+    : "This run will pause for your approval once the storyboard is written. Nothing is spent on pictures, voices or clips until you approve.";
 }
 
 export type WorkflowRunProjection = Omit<WorkflowRun, "nodes"> & { nodes?: never };
@@ -2583,14 +2611,23 @@ const RECENT_RUNS_PAGE = 25;
 
 export function formatRecentRuns(runs: WorkflowRunProjection[]): string {
   if (runs.length === 0) return "No workflow runs found for the active brand.";
+  // #1347: the first column is the RUN's name, not its workflow's — a page of
+  // copy runs was 25 rows reading "Copy run". The kind moved to its own column
+  // because it is a different fact from the name and every row has one.
   const rows = table(
-    ["workflow", "status", "created", "id"],
+    ["run", "type", "status", "created", "id"],
     // #994: the ruled display word, never the raw stored value. #1249: with the
     // park detail when the projection carries pauseReason — a row the server
     // sends without it degrades to the bare ruled word. #1261: the SAME shared
     // verdict the run detail prints, fed the server's `deliverySummary` so the
     // "Failed — nothing delivered" demotion reaches this screen too.
-    runs.map((r) => [r.workflowName, runVerdict(r), dateOnly(r.createdAt), r._id]),
+    runs.map((r) => [
+      runDisplayName(r),
+      runTypeWord(r),
+      runVerdict(r),
+      dateOnly(r.createdAt),
+      r._id,
+    ]),
   );
   const notes: string[] = [];
   // #934: the server caps this list at 25 (convex/workflows.ts listRuns) and the
@@ -2703,7 +2740,7 @@ export function formatImportSummary(
 export function formatWorkflowRun(run: WorkflowRun): string {
   const lines: string[] = [];
   const counts = formatCounts(run.counts);
-  lines.push(`Workflow run — ${run.workflowName}`);
+  lines.push(`${runHeadingWord(run)} — ${runDisplayName(run)}`);
   lines.push(`runId:        ${run._id}`);
   lines.push(`workflowId:   ${run.workflowId}`);
   if (run.triggerRunId) lines.push(`triggerRunId: ${run.triggerRunId}`);
@@ -2735,6 +2772,18 @@ export function formatWorkflowRun(run: WorkflowRun): string {
         run.autoApprovals.length === 1 ? "" : "s"
       } (${run.autoApprovals.map((a) => a.nodeId).join(", ")}) — launched with --auto-approve, nobody reviewed these`,
     );
+  }
+
+  // #1883: a gated run draws its cheap pictures BEFORE it parks, and nothing
+  // used to say the pause was coming — a reader watching a healthy run render
+  // for minutes had no way to tell it apart from one running straight through,
+  // and cancelled it. The server decides whether the stop is still ahead (it
+  // alone can see the graph); this only speaks what it was told.
+  if (run.pauseAhead) {
+    // Its own paragraph: it is a sentence, and the header above it is a column
+    // of `key: value` lines a reader skims rather than reads.
+    lines.push("");
+    lines.push(pauseAheadLine(run.pauseAhead));
   }
 
   // #923/#929: while the run is parked at a REVIEW stop (a checkpoint, or a

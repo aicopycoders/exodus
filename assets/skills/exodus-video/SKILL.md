@@ -147,9 +147,15 @@ minutes with "Still running after 60 minutes" and exit 0; that is not done, so
 check `status` before treating it as finished. Do not poll `status` in a tight
 loop; a full run is several minutes.
 
-**What costs money.** Starting the run creates the storyboard. Approving the
-storyboard is the cost gate: it releases the paid rendering of every picture,
-voice and clip. `shows`, `workflow list`, `workflow describe`, `video status`,
+**What costs money.** Starting the run writes the storyboard and then draws the
+reference, cast and scene pictures, and only then pauses. Each picture is a few
+cents and each scene draws a few to choose from: about 25 cents on a small test,
+and it can approach a dollar on a longer ad. Approving releases the expensive
+part: the voices and the clips. So a run that has not paused yet is already
+spending a little, and a run still drawing pictures is healthy. `exodus workflow
+status` and `exodus video status` both print "This run will pause for your
+approval once the frames are ready" on a run that is headed for the gate. Do not
+cancel it because the pause has not arrived. `shows`, `workflow list`, `workflow describe`, `video status`,
 `storyboard` and `pull` are free reads; run them as often as you like. Never
 start a second run to "retry" without the user asking; flag the storyboard (Show
 runs) or tell them what failed instead.
@@ -157,7 +163,7 @@ runs) or tell them what failed instead.
 **`--auto-approve` does not cover either video gate.** It releases Checkpoint
 boxes only (`convex/workflows.ts:7266` keys on `pauseReason === "checkpoint"`),
 and the storyboard gate and the final watch carry no pause reason. An unattended
-`workflow run --auto-approve` still stops dead at the cost gate — which is the
+`workflow run --auto-approve` still stops dead at the storyboard gate — which is the
 safe behaviour, since nothing should approve paid rendering or ship an uncut ad
 on its own.
 
@@ -276,8 +282,9 @@ for the user, then ask one question.
 On a **workflow run** the question is approve or don't — there is no flag. If
 the storyboard is wrong, say so plainly and let the user decide between
 approving anyway, cancelling (`exodus workflow cancel <runId>`) and re-running
-with a better script, or changing the workflow. Approving is the cost gate, so
-do not approve a storyboard you have just told the user is wrong.
+with a better script, or changing the workflow. Approving is what releases the
+voices and the clips — the expensive part — so do not approve a storyboard you
+have just told the user is wrong.
 
 On a **Show run** you can also send it back: `video flag <runId> --note "…"`.
 The note is read by the model that rewrites the storyboard, so make it concrete
@@ -457,7 +464,10 @@ changed[]             the characters whose voice actually moved (set only)
 canChange             false once the run has left the storyboard review
 whyNot                why, in one sentence, when canChange is false
 treatment.path        which way of making voices this run froze, or null
-treatment.kind        "performance-then-conversion" or "render-owns-voice"
+treatment.kind        "performance-then-conversion", "voiceover-then-lipsync" or
+                      "render-owns-voice"
+treatment.pinsHeard   true when the chosen ElevenLabs voices are heard on this
+                      run; false only for "render-owns-voice"
 cast[]                one per character
   characterId, name
   voice               { voiceId, label }: the voice this character's clips are

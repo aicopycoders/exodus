@@ -6,7 +6,12 @@ import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import type { FlagOccurrence } from "../lib/args.js";
-import { ASSET_UPLOAD_POLICY, type RunProvenance } from "./workflow.js";
+import {
+  ASSET_UPLOAD_POLICY,
+  pauseAheadLine,
+  type RunProvenance,
+  type WorkflowRun,
+} from "./workflow.js";
 
 export const helpText = `
 exodus video — make an ad from a Show, pull every piece, upload your cut
@@ -254,6 +259,8 @@ export interface VideoRun {
   pauseReason?: BuilderPauseReason;
   pausedNodeId?: string;
   nodes: VideoRunNode[];
+  /** #1883: the approval stop a still-running run is headed for. Server-decided. */
+  pauseAhead?: WorkflowRun["pauseAhead"];
   castLock?: PullCastLock | null;
   /**
    * #1869: whose saved format rules this run followed (`runProvenance`). Read
@@ -286,6 +293,11 @@ export interface NodeItem {
   attempt?: number;
   flagged?: boolean;
   findings?: ClipFinding[];
+  /** #1870: the server's own verdict that this row has been "running" so long
+   *  its worker must be dead. The threshold lives there and only there, because
+   *  this package ships on its own release schedule. Absent on older backends,
+   *  and absent means a running row is a running row. */
+  staleClaim?: boolean;
   /** Optional resolved media from listNodeItems (ledger clips + cast identity stills). */
   artifact?: ArtifactSubset;
 }
@@ -1357,6 +1369,11 @@ const ITEM_STATUS_WORD: Record<string, string> = {
 
 function itemWord(item: NodeItem | undefined): string {
   if (!item) return "—";
+  // #1870: first, because nothing clears `flagged` when a redo dies. A flagged
+  // clip whose redo stopped would otherwise still read "flagged", hiding the
+  // one thing the member has to act on. The grid has one word per cell, so it
+  // says the true one and the redo commands take the scene again.
+  if (item.staleClaim === true) return "stopped";
   if (item.flagged === true) return "flagged";
   return ITEM_STATUS_WORD[item.status] ?? item.status;
 }
@@ -1424,6 +1441,9 @@ export async function statusFlow(
   const lines = [
     headline,
     ...stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run)),
+    // #1883: "Working" alone reads like a run going straight through, and a
+    // healthy gated run was cancelled over exactly that.
+    ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
     ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
   ];
 
@@ -1712,8 +1732,11 @@ export function planClipRedo(
   if ("reason" in found) return { ok: false, reason: found.reason };
   const { row, uploadedCut } = found;
 
+  // #1870: a redo the server has called dead is a failure nobody recorded, and
+  // the server retries it like one whatever the run is parked at.
   const redoable =
     row.status === "failed" ||
+    row.staleClaim === true ||
     (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
   if (!redoable) {
     if (row.status === "done") {
@@ -1784,7 +1807,7 @@ function findClipRow(
         "and one clip can only be redone on a step that finished.",
     };
   }
-  if (row.status === "running") {
+  if (row.status === "running" && row.staleClaim !== true) {
     return { reason: `Scene ${target.sceneIndex} is already being redone.` };
   }
   return { row, uploadedCut };
@@ -1862,7 +1885,9 @@ export async function retryClipFlow(
 function clipIsStillRaw(item: NodeItem): boolean {
   const a = item.artifact;
   return (
-    item.status === "done" &&
+    // #1870: a stopped voice redo never let go of the clip it was working on,
+    // so that clip is still the generator's own and still re-performable.
+    (item.status === "done" || item.staleClaim === true) &&
     a?.type === "video" &&
     a.revoiced !== true &&
     a.speechTrimmed !== true &&
@@ -1879,6 +1904,38 @@ function clipIsStillRaw(item: NodeItem): boolean {
 const VOICE_NOT_CHANGED_CODES = new Set(["voice-unpinned", "voice-not-applied"]);
 
 /**
+ * #1888: the voice paths the server refuses a redo on, mirroring its
+ * `VOICE_PATH_NEEDS[path].pins === "never-heard"` test. The sheet's other two
+ * fields answer different questions and would both be wrong here:
+ * `usesElevenLabs` is true on a described run that still bills for narration,
+ * and `treatment.kind` follows `revoicesAfterRender`, which calls
+ * lipsync-retarget render-owned even though a redo there is allowed.
+ */
+export const VOICE_PATHS_NEVER_HEARD = new Set(["native-prompt", "omni-audio-ids", "gemini-direct"]);
+
+/**
+ * #1888: the run-level twin of the server's per-scene refusal, for the one
+ * caller that never reaches the route to hear it. Null when the sheet cannot be
+ * read or the run's path allows a redo, so a harmless "nothing to do" is never
+ * turned into an error.
+ */
+async function neverHeardRunLine(runId: string, deps: VideoDeps): Promise<string | null> {
+  // `get` is a bare fetch and rejects on a dropped connection. This read only
+  // picks the wording of a no-op, so it must never be what fails the command.
+  const res = await deps
+    .get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`)
+    .catch(() => null);
+  if (!res?.ok) return null;
+  const path = (res.data as { treatment?: { path?: string | null } } | null)?.treatment?.path;
+  if (typeof path !== "string" || !VOICE_PATHS_NEVER_HEARD.has(path)) return null;
+  return (
+    `This run's clips are not voiced by ElevenLabs — the "${path}" way settles each voice as ` +
+    "the clip is rendered — so no clip on this run has a voice pass to redo. Nothing was queued " +
+    "and nothing was spent. To make a clip again from scratch, redo the clip instead."
+  );
+}
+
+/**
  * #1858: decide a voice-only redo before anything is queued. Mirrors the
  * server's rule the way `planClipRedo` mirrors its own: a finished clip whose
  * file is still the video model's own. The server stays the authority.
@@ -1893,7 +1950,7 @@ export function planClipRevoice(
   const { row, uploadedCut } = found;
   const remake = `To make the clip again from scratch: exodus video retry-clip ${run._id} --scene ${target.sceneIndex}`;
 
-  if (row.status !== "done" || row.artifact?.type !== "video") {
+  if ((row.status !== "done" && row.staleClaim !== true) || row.artifact?.type !== "video") {
     return {
       ok: false,
       reason: `Scene ${target.sceneIndex} has no finished clip, so there is no voice to redo. ${remake}`,
@@ -1957,10 +2014,12 @@ export async function revoiceFlow(
       : [target];
 
   if (targets.length === 0) {
-    const nothing = "No clip on this run is waiting for a voice pass, so nothing was started.";
+    const note =
+      (await neverHeardRunLine(runId, deps)) ??
+      "No clip on this run is waiting for a voice pass, so nothing was started.";
     return {
       code: 0,
-      lines: json ? [JSON.stringify({ ok: true, runId, scenes: [], note: nothing })] : [nothing],
+      lines: json ? [JSON.stringify({ ok: true, runId, scenes: [], note })] : [note],
     };
   }
 
@@ -2242,7 +2301,8 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
     const voice = voiceWords(row);
     lines.push(
       `  ${row.characterId}  ${row.name}  ${voice}  ${availabilityWords(row)}  ` +
-        `speaks in ${row.spokenScenes} scenes, about ${row.spokenSeconds}s`,
+        `speaks in ${row.spokenScenes} scene${row.spokenScenes === 1 ? "" : "s"}, ` +
+        `about ${row.spokenSeconds}s`,
     );
     // #1869: a written voice is the whole answer on a described run, so it gets
     // its own line rather than being squeezed into the row above.
@@ -2260,13 +2320,16 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
     );
   }
   lines.push(`How voices are applied: ${sheet.treatment.summary}${sheet.treatment.speedChange ? "" : " No speed change."}`);
-  // #1869: `usage` counts the clips the CONVERSION leg re-performs, and a run
-  // whose voices the render owns converts none of them — so on a described run
-  // those counters are zero and printing them would read as "this costs
-  // nothing" next to a narration bill that is very real. An older backend sends
-  // neither field, and then this prints exactly as it always did.
-  const rendersOwnVoice = sheet.treatment.kind === "render-owns-voice";
-  if (!rendersOwnVoice || sheet.treatment.usesElevenLabs === undefined) {
+  // #1869 + #1876: `usage` counts only the CAST clips ElevenLabs voices, so the
+  // counters are the honest answer when there is at least one of them and this
+  // run plays its pinned voices at all. Zero counters beside a real narration
+  // bill would read as "this costs nothing", which is what a described run
+  // prints and what a lipsync run whose only speaker is the narrator would have
+  // printed. An older backend sends no `usesElevenLabs`, and then this prints
+  // exactly as it always did.
+  const playsPinnedVoices = sheet.treatment.kind !== "render-owns-voice";
+  const convertsClips = playsPinnedVoices && sheet.treatment.usage.clips > 0;
+  if (convertsClips || sheet.treatment.usesElevenLabs === undefined) {
     lines.push(
       `Cost: billed to your own ElevenLabs key. ${sheet.treatment.costNote} ` +
         `About ${sheet.treatment.usage.seconds} seconds of speech across ` +
