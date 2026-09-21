@@ -10,7 +10,7 @@ import { runDisplayName, runHeadingWord, runTypeWord } from "../lib/runNames.js"
 import { workflowToYaml, parseWorkflowText } from "../lib/workflowText.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { getChannel } from "../lib/channel.js";
-import { asVideoRun, classifyRun, resolveStopAtPark, reviewUrl, stopLines, } from "./video.js";
+import { asVideoRun, classifyRun, resolveStopAtPark, reviewUrl, scenePrefix, stopLines, } from "./video.js";
 export const helpText = `
 exodus workflow — List, describe, run, inspect, import, and export saved workflows
 
@@ -1382,6 +1382,43 @@ function planArtifactFile(artifact) {
         url,
     };
 }
+function artifactFileSuffixes(artifacts) {
+    const sceneBearing = artifacts.some((a) => typeof a.sceneIndex === "number" || a.final === true);
+    if (!sceneBearing) {
+        return artifacts.map((_, i) => ({
+            suffix: i === 0 ? "" : `-${i + 1}`,
+            renamed: false,
+        }));
+    }
+    const taken = new Set();
+    let fullCount = 0;
+    return artifacts.map((a, i) => {
+        let suffix;
+        if (typeof a.sceneIndex === "number") {
+            suffix = `-${scenePrefix(a.sceneIndex)}`;
+        }
+        else if (a.final === true) {
+            suffix = "-final";
+        }
+        else if (a.type === "audio") {
+            fullCount += 1;
+            suffix = fullCount === 1 ? "-full" : `-full-${fullCount}`;
+        }
+        else {
+            suffix = i === 0 ? "" : `-${i + 1}`;
+        }
+        if (taken.has(suffix)) {
+            let fallback = `${suffix}-${i + 1}`;
+            while (taken.has(fallback))
+                fallback = `${fallback}-${i + 1}`;
+            suffix = fallback;
+            taken.add(suffix);
+            return { suffix, renamed: true };
+        }
+        taken.add(suffix);
+        return { suffix, renamed: false };
+    });
+}
 export async function saveDeliveries(run, dir, deps) {
     const paths = [];
     if (!run.isTerminal) {
@@ -1416,9 +1453,10 @@ export async function saveDeliveries(run, dir, deps) {
             lines.push(`  skipped  ${delivery.label} (${delivery.key}) — ${why}`);
             continue;
         }
+        const suffixes = artifactFileSuffixes(delivery.artifacts);
         for (let i = 0; i < delivery.artifacts.length; i++) {
             const plan = planArtifactFile(delivery.artifacts[i]);
-            const suffix = i === 0 ? "" : `-${i + 1}`;
+            const { suffix, renamed } = suffixes[i];
             if (plan.kind === "none") {
                 lines.push(`  skipped  ${delivery.label} (${delivery.key})${suffix} — ${plan.reason}`);
                 continue;
@@ -1429,7 +1467,7 @@ export async function saveDeliveries(run, dir, deps) {
                     deps.writeFile(file, plan.body);
                 else
                     await downloadToFile(plan.url, file);
-                lines.push(`  wrote    ${file}`);
+                lines.push(`  wrote    ${file}${renamed ? " — renamed to avoid a collision" : ""}`);
                 paths.push(file);
             }
             catch (e) {

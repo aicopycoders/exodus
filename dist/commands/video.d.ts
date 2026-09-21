@@ -173,6 +173,7 @@ export type RunStop = {
     at: "storyboard-gate";
     nodeId?: string;
     framesNodeId?: string;
+    showAd?: true;
 } | {
     at: "final-watch";
 } | {
@@ -201,6 +202,7 @@ export declare function resolveStop(stop: RunStop, cutAttached: boolean | null):
 export declare function resolveStopAtPark(stop: RunStop, runId: string, deps: Pick<VideoDeps, "get">): Promise<ResolvedStop>;
 export declare function stageWord(stage: string): string;
 export declare function stepName(kind: string | undefined): string;
+export declare function isShowAd(run: Pick<VideoRun, "moduleOwned">): boolean;
 export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">): string;
 export declare function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[];
 export interface PullDownload {

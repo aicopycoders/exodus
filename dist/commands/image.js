@@ -184,7 +184,7 @@ async function runTemplate(text, flags, who) {
         renderMode: "images",
         inputAds: text,
         aspectRatio: aspect,
-        model: "gpt-image-2",
+        model: "gpt-image-2.5",
         realismMode: realisticFlag ? "realistic" : "off",
         ...(steering ? { steering } : {}),
         ...(requestedImageCount !== undefined ? { requestedImageCount } : {}),

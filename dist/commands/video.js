@@ -250,6 +250,7 @@ export function classifyRun(run) {
                 ...(pausedNode.kind === "scene-frames"
                     ? { framesNodeId: pausedNode.nodeId }
                     : {}),
+                ...(isShowAd(run) ? { showAd: true } : {}),
             };
         }
         if (parkedAtFinalWatch(run))
@@ -300,8 +301,11 @@ export function stepName(kind) {
         return "A step in this run";
     return STEP_NAMES[kind] ?? `The ${kind} step`;
 }
+export function isShowAd(run) {
+    return run.moduleOwned === true;
+}
 export function reviewUrl(dashboardUrl, run) {
-    if (run.moduleOwned === true)
+    if (isShowAd(run))
         return `${dashboardUrl}/video?ad=${run._id}`;
     if (run.workflowId)
         return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
@@ -313,8 +317,10 @@ export function stopLines(stop, runId, runUrl) {
             "Parked: the storyboard is waiting for your yes.",
             `Read it:    exodus video storyboard ${runId}`,
             `Approve it: exodus video approve ${runId}`,
-            `Send back:  exodus video flag ${runId} --note "what's wrong"`,
         ];
+        if (stop.showAd) {
+            lines.push(`Send back:  exodus video flag ${runId} --note "what's wrong"`);
+        }
         if (stop.framesNodeId) {
             lines.push(`Redo one frame: exodus video retry-frame ${runId} --node ${stop.framesNodeId} --scene <n>`);
         }
@@ -1119,7 +1125,14 @@ export async function storyboardFlow(runId, json, deps) {
             }
         }
     }
-    lines.push("", `approve with: exodus video approve ${runId}`, `send it back: exodus video flag ${runId} --note "what's wrong"`);
+    const runRes = await deps
+        .get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`)
+        .catch(() => null);
+    const showAd = runRes?.ok === true && isShowAd(asVideoRun(runRes.data));
+    lines.push("", `approve with: exodus video approve ${runId}`);
+    if (showAd) {
+        lines.push(`send it back: exodus video flag ${runId} --note "what's wrong"`);
+    }
     if (cards.framesNodeId) {
         lines.push(`redo one frame: exodus video retry-frame ${runId} --node ${cards.framesNodeId} --scene <n>`);
     }

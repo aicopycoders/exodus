@@ -37,6 +37,7 @@ import {
   classifyRun,
   resolveStopAtPark,
   reviewUrl,
+  scenePrefix,
   stopLines,
   type RunStop,
   type VoiceMap,
@@ -1316,10 +1317,13 @@ export interface WorkflowRun {
   /**
    * #1883: the approval stop this run is still headed for. The server owns the
    * whole predicate, so absence is the wire shape of a run that is already
-   * parked there, one that was approved, a terminal run, a run with no gated
-   * storyboard, and every backend older than #1883. `after` says what has been
-   * rendered by the time it parks: "frames" means the cheap pictures came
-   * first, "storyboard" means nothing was drawn yet.
+   * parked there, one that was approved, a terminal run, a run nothing will
+   * stop (#1893 d: neither the author's gate switch nor the direction fence),
+   * a board whose worker recorded no fence verdict, and every backend older
+   * than #1883. A promise is therefore worth acting on and silence is not
+   * worth reading anything into. `after` says what has been rendered by the
+   * time it parks: "frames" means the cheap pictures came first, "storyboard"
+   * means nothing was drawn yet.
    */
   pauseAhead?: { nodeId: string; after: "frames" | "storyboard" };
 }
@@ -3118,6 +3122,61 @@ function planArtifactFile(artifact: WorkflowRunOutput): ArtifactPlan {
 }
 
 /**
+ * #1953: the per-artifact filename suffix for ONE delivery slot, named after
+ * what each artifact IS rather than where it sat in the array — matching the
+ * run page's deliveries rail (`-scene-NN`, `-full`, `-final`) word for word.
+ * A slot whose artifacts carry no scene information (copy, documents, images,
+ * storyboards) keeps today's positional counter byte-for-byte, `-2` included.
+ *
+ * `renamed` is true when an identity name collided with an earlier artifact's
+ * and the old positional counter was appended instead, so the caller can say
+ * so rather than silently overwrite. Pure so it is unit-testable on its own.
+ */
+function artifactFileSuffixes(
+  artifacts: readonly WorkflowRunOutput[],
+): Array<{ suffix: string; renamed: boolean }> {
+  const sceneBearing = artifacts.some(
+    (a) => typeof a.sceneIndex === "number" || a.final === true,
+  );
+  if (!sceneBearing) {
+    return artifacts.map((_, i) => ({
+      suffix: i === 0 ? "" : `-${i + 1}`,
+      renamed: false,
+    }));
+  }
+
+  const taken = new Set<string>();
+  let fullCount = 0;
+  return artifacts.map((a, i) => {
+    let suffix: string;
+    if (typeof a.sceneIndex === "number") {
+      suffix = `-${scenePrefix(a.sceneIndex)}`;
+    } else if (a.final === true) {
+      suffix = "-final";
+    } else if (a.type === "audio") {
+      // A scene-less audio in a scene-bearing slot is the whole-ad take (or an
+      // uploaded track — the rail treats them the same), numbered like the rail.
+      fullCount += 1;
+      suffix = fullCount === 1 ? "-full" : `-full-${fullCount}`;
+    } else {
+      suffix = i === 0 ? "" : `-${i + 1}`;
+    }
+
+    if (taken.has(suffix)) {
+      // Two artifacts resolved to the same name (e.g. two takes of scene 3) —
+      // append the old positional counter rather than overwrite.
+      let fallback = `${suffix}-${i + 1}`;
+      while (taken.has(fallback)) fallback = `${fallback}-${i + 1}`;
+      suffix = fallback;
+      taken.add(suffix);
+      return { suffix, renamed: true };
+    }
+    taken.add(suffix);
+    return { suffix, renamed: false };
+  });
+}
+
+/**
  * #1002 (`--out <dir>`): write every DELIVERED output of a terminal run to
  * files under `dir`, named `<workflow-slug>-<runId tail>-<key>[-n].<ext>`. The
  * slot `key` is unique within the run, so the name is stable and collision-free
@@ -3171,9 +3230,10 @@ export async function saveDeliveries(
       lines.push(`  skipped  ${delivery.label} (${delivery.key}) — ${why}`);
       continue;
     }
+    const suffixes = artifactFileSuffixes(delivery.artifacts);
     for (let i = 0; i < delivery.artifacts.length; i++) {
       const plan = planArtifactFile(delivery.artifacts[i]);
-      const suffix = i === 0 ? "" : `-${i + 1}`;
+      const { suffix, renamed } = suffixes[i];
       if (plan.kind === "none") {
         lines.push(`  skipped  ${delivery.label} (${delivery.key})${suffix} — ${plan.reason}`);
         continue;
@@ -3187,7 +3247,7 @@ export async function saveDeliveries(
       try {
         if (plan.kind === "text") deps.writeFile(file, plan.body);
         else await downloadToFile(plan.url, file);
-        lines.push(`  wrote    ${file}`);
+        lines.push(`  wrote    ${file}${renamed ? " — renamed to avoid a collision" : ""}`);
         paths.push(file);
       } catch (e) {
         lines.push(`  failed   ${file} — ${e instanceof Error ? e.message : String(e)}`);

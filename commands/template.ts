@@ -42,7 +42,8 @@ Run options:
   --mode auto|manual              Generation mode (default: auto)
   --render-mode images|prompts    Skip render and return prompts only (default: images)
   --aspect 1:1|9:16               Image aspect ratio (default: 1:1)
-  --model gpt-image-2|nano-banana-pro   Kie.ai model (default: gpt-image-2)
+  --model gpt-image-2.5|gpt-image-2.5-sunburst|gpt-image-2|nano-banana-pro
+                                  Kie.ai model (default: gpt-image-2.5)
   --realism off|realistic         Realism enforcement (default: off)
   --quantities <slug:N,slug:N>    Manual-mode per-type counts (e.g. "testimonial:3,hero:2")
   --requested-count N             Auto-mode total render target (optional)
@@ -169,9 +170,15 @@ async function runTemplate(flags: Record<string, string | boolean>): Promise<voi
     return;
   }
 
-  const model = typeof flags["model"] === "string" ? flags["model"] : "gpt-image-2";
-  if (model !== "gpt-image-2" && model !== "nano-banana-pro") {
-    console.error(`Error: --model must be gpt-image-2 | nano-banana-pro (got "${model}").`);
+  const TEMPLATE_MODELS = [
+    "gpt-image-2.5",
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2",
+    "nano-banana-pro",
+  ];
+  const model = typeof flags["model"] === "string" ? flags["model"] : "gpt-image-2.5";
+  if (!TEMPLATE_MODELS.includes(model)) {
+    console.error(`Error: --model must be one of ${TEMPLATE_MODELS.join(" | ")} (got "${model}").`);
     process.exit(1);
     return;
   }

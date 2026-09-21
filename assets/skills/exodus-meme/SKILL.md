@@ -244,6 +244,7 @@ internals into chat.
 - The rig's child image runs are still `creativeSuiteRuns` with engine `meme`,
   so finished memes appear in the creative-suite library alongside other engines
   and `exodus browse --agent meme` still covers them.
-- `run` accepts only the two models the rig renders (`gpt-image-2`,
-  `nano-banana-pro`, or their Kie slugs); anything else is a 400 listing the
-  accepted values. It used to accept any value and silently ignore it.
+- `run` accepts only the models the rig renders (`gpt-image-2.5`, the house
+  default, plus `gpt-image-2.5-sunburst`, `gpt-image-2` and `nano-banana-pro`,
+  or their Kie slugs); anything else is a 400 listing the accepted values. It
+  used to accept any value and silently ignore it.

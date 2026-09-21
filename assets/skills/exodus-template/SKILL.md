@@ -17,7 +17,8 @@ run options:
   --mode auto|manual|hybrid   Generation mode (default: auto)
   --render-mode images|prompts   prompts = skip render, return LLM prompts only (default: images)
   --aspect 1:1|9:16     Image aspect ratio (default: 1:1)
-  --model gpt-image-2|nano-banana-pro   Kie.ai model (default: gpt-image-2)
+  --model gpt-image-2.5|gpt-image-2.5-sunburst|gpt-image-2|nano-banana-pro
+                        Kie.ai model (default: gpt-image-2.5)
   --realism off|realistic   Realism enforcement (default: off)
   --quantities "slug:N,slug:N"   manual-mode per-type counts (e.g. "testimonial:3,hero:2")
   --pairings '<JSON>'   hybrid-mode host/modifier pairs: '[{"host":"testimonial","modifier":"hero"}]'

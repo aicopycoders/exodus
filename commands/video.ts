@@ -426,7 +426,9 @@ function errorResult(res: ApiResponse<unknown>, json: boolean): FlowResult {
 
 export type RunStop =
   | { at: "running"; stage: string }
-  | { at: "storyboard-gate"; nodeId?: string; framesNodeId?: string }
+  // #1908: `showAd` is optional so a run snapshot taken before this shipped
+  // still parses, and reads as the reduced block rather than crashing.
+  | { at: "storyboard-gate"; nodeId?: string; framesNodeId?: string; showAd?: true }
   | { at: "final-watch" }
   | { at: "paused"; nodeId?: string; reason?: string }
   // #1687: a "repair" park rides the FAILED arm rather than a new one of its
@@ -507,6 +509,7 @@ export function classifyRun(run: VideoRun): RunStop {
         ...(pausedNode.kind === "scene-frames"
           ? { framesNodeId: pausedNode.nodeId }
           : {}),
+        ...(isShowAd(run) ? { showAd: true } : {}),
       };
     }
     if (parkedAtFinalWatch(run)) return { at: "final-watch" };
@@ -584,6 +587,18 @@ export function stepName(kind: string | undefined): string {
   return STEP_NAMES[kind] ?? `The ${kind} step`;
 }
 
+/** #1908: `exodus video flag` is refused on any run whose row carries no
+ *  `showId` (`prepareStoryboardFlag`, convex/videoModule.ts). The CLI is never
+ *  told showId, and `moduleOwned` is all it gets. At a storyboard gate the two
+ *  facts agree. The only module-owned workflows that reach that gate are the
+ *  Show ones (show-ad, and the show-setup founding ad), and both stamp showId
+ *  at creation. copy-face, meme-rig and the organic moves have no storyboard or
+ *  scene-frames node to park on. An absent marker means "not a Show ad", on
+ *  purpose. */
+export function isShowAd(run: Pick<VideoRun, "moduleOwned">): boolean {
+  return run.moduleOwned === true;
+}
+
 /**
  * #1851: the ONE place the CLI composes a link to a run's review page. A Show ad
  * opens on the /video page. A showless workflow run cannot, because /video
@@ -597,7 +612,7 @@ export function reviewUrl(
   dashboardUrl: string,
   run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">,
 ): string {
-  if (run.moduleOwned === true) return `${dashboardUrl}/video?ad=${run._id}`;
+  if (isShowAd(run)) return `${dashboardUrl}/video?ad=${run._id}`;
   if (run.workflowId) return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
   return `${dashboardUrl}/runs/${run._id}`;
 }
@@ -608,8 +623,10 @@ export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): st
       "Parked: the storyboard is waiting for your yes.",
       `Read it:    exodus video storyboard ${runId}`,
       `Approve it: exodus video approve ${runId}`,
-      `Send back:  exodus video flag ${runId} --note "what's wrong"`,
     ];
+    if (stop.showAd) {
+      lines.push(`Send back:  exodus video flag ${runId} --note "what's wrong"`);
+    }
     if (stop.framesNodeId) {
       lines.push(
         `Redo one frame: exodus video retry-frame ${runId} --node ${stop.framesNodeId} --scene <n>`,
@@ -1697,11 +1714,18 @@ export async function storyboardFlow(
     }
   }
 
-  lines.push(
-    "",
-    `approve with: exodus video approve ${runId}`,
-    `send it back: exodus video flag ${runId} --note "what's wrong"`,
-  );
+  // #1908: the cards say nothing about who owns the run, and `video flag` is a
+  // Show-ad-only door. So a THIRD non-fatal read, for the one line it decides.
+  // A refusal or a dropped connection costs the send-back line and nothing else.
+  const runRes = await deps
+    .get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`)
+    .catch(() => null);
+  const showAd = runRes?.ok === true && isShowAd(asVideoRun(runRes.data));
+
+  lines.push("", `approve with: exodus video approve ${runId}`);
+  if (showAd) {
+    lines.push(`send it back: exodus video flag ${runId} --note "what's wrong"`);
+  }
   if (cards.framesNodeId) {
     lines.push(
       `redo one frame: exodus video retry-frame ${runId} --node ${cards.framesNodeId} --scene <n>`,
