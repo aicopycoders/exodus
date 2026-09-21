@@ -69,12 +69,23 @@ export type ArtifactSubset = {
 } | {
     type: "text" | "primer" | "session" | "document";
 };
+export interface PlanFailureRecord {
+    kind: string;
+    partsTotal?: number;
+    acceptedParts?: number;
+    acceptedScenes?: number;
+    failedPart?: number;
+    reasons?: string[];
+    lines: string[];
+}
 export interface VideoRunNode {
     nodeId: string;
     kind: string;
     status: "idle" | "running" | "done" | "failed" | "skipped" | "out-of-scope";
     error?: string;
     warning?: string;
+    planFailure?: PlanFailureRecord;
+    hasRejectedDraft?: boolean;
     outputs?: ArtifactSubset[];
 }
 export type BuilderPauseReason = "taste" | "repair" | "slots" | "call" | "checkpoint";
@@ -205,6 +216,9 @@ export declare function stepName(kind: string | undefined): string;
 export declare function isShowAd(run: Pick<VideoRun, "moduleOwned">): boolean;
 export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">): string;
 export declare function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[];
+export declare function failedStoryboardNode(run: VideoRun): VideoRunNode | undefined;
+export declare function errorEchoesReasons(error: string | undefined, record: PlanFailureRecord | undefined): boolean;
+export declare function planFailureLines(node: VideoRunNode | undefined, runId: string): string[];
 export interface PullDownload {
     file: string;
     url: string;
@@ -294,6 +308,7 @@ export declare function waitFlow(runId: string, opts: {
     maxPolls?: number;
 }, deps: VideoDeps): Promise<FlowResult>;
 export declare function statusFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function rejectedDraftFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function storyboardFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function approveFlow(runId: string, opts: {
     json: boolean;

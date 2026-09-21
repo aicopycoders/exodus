@@ -48,7 +48,13 @@ The whole loop, in order:
        Redo ONE still at the pixel gate. Neighbours stay. The gate holds.
 
   7. exodus video status <runId>
-     Where the run is and how each scene's clip turned out.
+     Where the run is and how each scene's clip turned out. If the storyboard
+     failed, it also says which parts of it were accepted and why the next one
+     was turned down.
+
+     exodus video status <runId> --rejected-draft
+       Prints the storyboard draft that was turned down. A record of what
+       happened, thrown away by the system — never something to act on.
 
   8. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
@@ -74,7 +80,7 @@ The whole loop, in order:
       or add --approve-stale-cut to deliver the cut you already uploaded.
 
 Usage:
-  exodus video status <runId> [--json]
+  exodus video status <runId> [--rejected-draft] [--json]
   exodus video storyboard <runId> [--json]
   exodus video approve <runId> [--approve-stale-cut] [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
@@ -106,6 +112,8 @@ Options:
   --clear <who>        Take a character's voice off again (voices). Repeatable
   --from <file.json>   A file of characters and voice IDs (voices). --set and
                        --clear win over the same name in the file
+  --rejected-draft     Print the storyboard draft the system turned down
+                       (status). It was thrown away — a record only
   --json               Machine-readable output
   --help, -h           Print this help
 
@@ -132,6 +140,12 @@ const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
 const RUN_PATH = "/api/v2/workflow";
 const ITEMS_PATH = "/api/v2/workflow/items";
+// #1902: the rejected planner reply, fetched on demand and never on the poll.
+// It is up to 100k chars, so the run read carries only a flag saying one exists.
+const REJECTED_DRAFT_PATH = "/api/v2/workflow/rejected-draft";
+const REJECTED_DRAFT_NOT_ON_THIS_SERVER =
+  "This Exodus server does not keep rejected drafts yet, so there is nothing to read. It arrives " +
+  "with the next server update.";
 const STORYBOARD_PATH = "/api/v2/video/storyboard";
 const FLAG_PATH = "/api/v2/video/storyboard/flag";
 const APPROVE_PATH = "/api/v2/workflow/approve";
@@ -228,6 +242,29 @@ export type ArtifactSubset =
     }
   | { type: "text" | "primer" | "session" | "document" };
 
+/**
+ * #1902: the record of what happened to a storyboard step that failed, as the
+ * server composed it (convex/lib/workflow/planFailure.ts). `lines` is the
+ * member-facing copy, authored THERE and printed verbatim here, because the run
+ * page prints the same strings — that is how the two surfaces cannot word one
+ * failure differently.
+ *
+ * Every field but `lines` is tolerant: `kind` stays a plain string so a new kind
+ * the server starts sending does not break a CLI that shipped before it, and the
+ * counts are optional so an older or fuller record still parses. Absent on a
+ * step that did not fail, and on every backend older than this field.
+ */
+export interface PlanFailureRecord {
+  kind: string;
+  partsTotal?: number;
+  acceptedParts?: number;
+  acceptedScenes?: number;
+  failedPart?: number;
+  /** The contract violations, which are the tail of `lines` on a "rejected" record. */
+  reasons?: string[];
+  lines: string[];
+}
+
 export interface VideoRunNode {
   nodeId: string;
   kind: string;
@@ -235,6 +272,13 @@ export interface VideoRunNode {
   error?: string;
   /** A member-safe note on a step that still finished (the dashboard shows it on the step). */
   warning?: string;
+  /** #1902: what happened when this step failed, in words a member can read. */
+  planFailure?: PlanFailureRecord;
+  /** #1902: there is a rejected draft on file that this caller may read. The
+   *  server sends it to entitled callers only, and sends NOTHING otherwise — an
+   *  absence here is a plain absence, never "there is something you may not
+   *  see". */
+  hasRejectedDraft?: boolean;
   outputs?: ArtifactSubset[];
 }
 
@@ -695,6 +739,66 @@ export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): st
     ];
   }
   return [`Working: ${stageWord(stop.stage)}.`];
+}
+
+/**
+ * #1902: the step the failure record belongs to. ONE finder, read by the status
+ * block, the --json object and the draft fetch alike, so the three can never
+ * disagree about which step is being talked about.
+ *
+ * Deliberately not routed through `classifyRun`: that one names a dead step only
+ * for a repair park or a failed run, and a storyboard can fail on a run that is
+ * still running or already parked elsewhere. The record shows wherever it exists.
+ */
+export function failedStoryboardNode(run: VideoRun): VideoRunNode | undefined {
+  return run.nodes.find((n) => n.kind === "storyboard" && n.status === "failed");
+}
+
+/**
+ * #1902: an entitled reader's storyboard error carries the violations verbatim,
+ * which the record below re-renders as a list. A surface that prints BOTH says
+ * the same thing twice, the first time with the contract module's prefix on it.
+ * Detected by content rather than by that prefix, which is the contract's
+ * business — the same test the run page folds the duplicate away by
+ * (src/components/run-detail/node-drawer.tsx).
+ */
+export function errorEchoesReasons(
+  error: string | undefined,
+  record: PlanFailureRecord | undefined,
+): boolean {
+  if (!error || record?.kind !== "rejected") return false;
+  const reasons = record.reasons ?? [];
+  return reasons.length > 0 && reasons.every((reason) => error.includes(reason));
+}
+
+/**
+ * #1902: the failure record as a block of screen lines, or nothing at all when
+ * the server sent no record. Nothing is re-worded here: `lines` is printed as it
+ * arrived, indented under a header.
+ */
+export function planFailureLines(node: VideoRunNode | undefined, runId: string): string[] {
+  const record = node?.planFailure;
+  if (!record || !Array.isArray(record.lines) || !node) return [];
+
+  // The reasons are the TAIL of `lines` on a rejected record (planFailure.ts
+  // pushes them last), which is how they can be set out as a list without this
+  // surface deciding which line is a reason.
+  const reasons = record.kind === "rejected" ? (record.reasons ?? []) : [];
+  const bodyCount = Math.max(0, record.lines.length - reasons.length);
+
+  // #2133: a run can hold two storyboard steps, so the record names its own
+  // step rather than leaving "which storyboard?" for the reader to guess.
+  const lines = [`What happened to the storyboard step (${node.nodeId}):`];
+  record.lines.forEach((line, i) => {
+    lines.push(i < bodyCount ? `  ${line}` : `    - ${line}`);
+  });
+  if (node?.hasRejectedDraft === true) {
+    lines.push(
+      "  A rejected draft is on file. The system threw it away, so it is a record of what happened and nothing to act on.",
+      `  Read it: exodus video status ${runId} --rejected-draft`,
+    );
+  }
+  return lines;
 }
 
 export interface PullDownload {
@@ -1520,7 +1624,23 @@ export async function statusFlow(
   // `hasFinal` field alike — the three used to be able to contradict each other.
   const hasFinal = hasAttachedCut(items);
   const stop = resolveStop(classifyRun(run), hasFinal);
-  const guidance = stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run));
+
+  // #1902: what happened to a storyboard that failed. Read once, printed below
+  // and reported in --json from the one node, so the screen and the machine
+  // answer cannot describe different steps.
+  const failedStoryboard = failedStoryboardNode(run);
+
+  // This is the one surface that prints the record UNDER the stop, so it is the
+  // one that can drop the raw error the record restates. `wait` keeps its error:
+  // it prints no record, so there the error is the whole story. The `stop` the
+  // --json object carries is untouched either way.
+  const guidance = stopLines(
+    stop.at === "failed" && errorEchoesReasons(stop.error, failedStoryboard?.planFailure)
+      ? { ...stop, error: undefined }
+      : stop,
+    runId,
+    reviewUrl(deps.dashboardUrl, run),
+  );
 
   const warnings = run.nodes
     .filter((n) => n.warning)
@@ -1532,7 +1652,26 @@ export async function statusFlow(
       // #1704: `guidance` is the very array the human render prints below, so a
       // machine reader and a person are told the next step by one derivation.
       lines: [
-        JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings, guidance }),
+        JSON.stringify({
+          runId,
+          status: run.status,
+          stop,
+          items,
+          hasFinal,
+          warnings,
+          guidance,
+          // Both fields stay ABSENT when the server sent none. An empty record
+          // would read as "nothing happened", and an explicit
+          // `hasRejectedDraft: false` would tell an unentitled caller there is
+          // something here they may not see.
+          ...(failedStoryboard?.planFailure ? { planFailure: failedStoryboard.planFailure } : {}),
+          // #2133: which step the failure record belongs to — a run can hold
+          // two storyboard steps, and the record must name its own.
+          ...(failedStoryboard?.planFailure
+            ? { storyboardNodeId: failedStoryboard.nodeId }
+            : {}),
+          ...(failedStoryboard?.hasRejectedDraft === true ? { hasRejectedDraft: true } : {}),
+        }),
       ],
     };
   }
@@ -1577,6 +1716,7 @@ export async function statusFlow(
     // #1883: "Working" alone reads like a run going straight through, and a
     // healthy gated run was cancelled over exactly that.
     ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
+    ...planFailureLines(failedStoryboard, runId),
     ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
   ];
 
@@ -1630,6 +1770,61 @@ export async function statusFlow(
         : "Final cut: not uploaded yet.",
   );
   return { code: 0, lines };
+}
+
+/**
+ * #1902: the planner reply a failed storyboard step had turned down.
+ *
+ * It is printed and nothing else. It is never written into a pull manifest or
+ * any other file, for the same reason the checker's own words are not
+ * (`withoutJudgeFields`): a draft nobody accepted must not end up somewhere it
+ * can be mistaken for the ad, or edited and handed back.
+ */
+export async function rejectedDraftFlow(
+  runId: string,
+  json: boolean,
+  deps: VideoDeps,
+): Promise<FlowResult> {
+  const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
+  if (!runRes.ok) return errorResult(runRes, json);
+  const node = failedStoryboardNode(asVideoRun(runRes.data));
+  if (!node) {
+    const note = "The storyboard on this run didn't fail, so there is no rejected draft to read.";
+    return {
+      code: 0,
+      lines: json ? [JSON.stringify({ runId, nodeId: null, draft: null })] : [note],
+    };
+  }
+
+  const res = await deps.get(
+    `${REJECTED_DRAFT_PATH}?runId=${encodeURIComponent(runId)}&nodeId=${encodeURIComponent(node.nodeId)}`,
+  );
+  // An older backend has never heard of the path and answers a plain 404. A
+  // deployed route that will not show this caller a draft answers the semantic
+  // shape instead, and falls through to the usual video wording.
+  if (missingRouteLine(res, "exodus video status --rejected-draft")) {
+    return {
+      code: 1,
+      lines: json
+        ? [JSON.stringify({ ok: false, status: 404, error: REJECTED_DRAFT_NOT_ON_THIS_SERVER })]
+        : [REJECTED_DRAFT_NOT_ON_THIS_SERVER],
+    };
+  }
+  if (!res.ok) return errorResult(res, json);
+
+  const draft = (res.data as { draft?: string | null }).draft ?? null;
+  if (json) return { code: 0, lines: [JSON.stringify({ runId, nodeId: node.nodeId, draft })] };
+  if (!draft) return { code: 0, lines: ["No rejected draft was kept for this attempt."] };
+  return {
+    code: 0,
+    lines: [
+      `REJECTED DRAFT — ad run ${runId}, step ${node.nodeId}`,
+      "The system turned this draft down and threw it away. It is kept only as a record of what happened.",
+      "Nothing in it is part of your ad. There is nothing here to act on or edit.",
+      "",
+      ...draft.split("\n"),
+    ],
+  };
 }
 
 interface GateSceneCard {
@@ -2986,7 +3181,15 @@ export async function run(
     usage(`video ${sub} needs a run id: exodus video ${sub} <runId>`);
   }
 
-  if (sub === "status") return printResult(await statusFlow(runId, json, defaultDeps));
+  if (sub === "status") {
+    // Not `=== true`: `--rejected-draft` typed BEFORE the run id swallows the id
+    // as its value (lib/args.ts), and silently printing the ordinary status to
+    // someone who asked for the draft is the worst answer available.
+    if (flags["rejected-draft"] !== undefined && flags["rejected-draft"] !== false) {
+      return printResult(await rejectedDraftFlow(runId, json, defaultDeps));
+    }
+    return printResult(await statusFlow(runId, json, defaultDeps));
+  }
   if (sub === "storyboard") return printResult(await storyboardFlow(runId, json, defaultDeps));
   if (sub === "approve") {
     return printResult(

@@ -115,6 +115,11 @@ under it:
   `exodus workflow checkpoint <runId>` is the verb for that one.
 - failed: `status` shows how far it got, and a `--wait` that was running exits
   1 with the error. Tell the user; do not start another run on your own.
+  When the storyboard is the step that failed, `status` adds a "What happened
+  to the storyboard" block: which parts of the plan were accepted, which part
+  was turned down, and why (#1902). Relay it as written. On an admin key it may
+  also offer `status <runId> --rejected-draft`. That prints the draft the system
+  threw away. It is a record only: never build on it, edit it, or re-run it.
 - finished: pull what it made.
 
 **`--wait` stops at both video parks** (#1818). `workflow run --wait` ends at

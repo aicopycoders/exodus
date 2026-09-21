@@ -41,7 +41,13 @@ The whole loop, in order:
        Redo ONE still at the pixel gate. Neighbours stay. The gate holds.
 
   7. exodus video status <runId>
-     Where the run is and how each scene's clip turned out.
+     Where the run is and how each scene's clip turned out. If the storyboard
+     failed, it also says which parts of it were accepted and why the next one
+     was turned down.
+
+     exodus video status <runId> --rejected-draft
+       Prints the storyboard draft that was turned down. A record of what
+       happened, thrown away by the system — never something to act on.
 
   8. exodus video pull <runId> --out ./ad
      Writes every piece to that folder plus a manifest.json index.
@@ -67,7 +73,7 @@ The whole loop, in order:
       or add --approve-stale-cut to deliver the cut you already uploaded.
 
 Usage:
-  exodus video status <runId> [--json]
+  exodus video status <runId> [--rejected-draft] [--json]
   exodus video storyboard <runId> [--json]
   exodus video approve <runId> [--approve-stale-cut] [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
@@ -99,6 +105,8 @@ Options:
   --clear <who>        Take a character's voice off again (voices). Repeatable
   --from <file.json>   A file of characters and voice IDs (voices). --set and
                        --clear win over the same name in the file
+  --rejected-draft     Print the storyboard draft the system turned down
+                       (status). It was thrown away — a record only
   --json               Machine-readable output
   --help, -h           Print this help
 
@@ -124,6 +132,9 @@ const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
 const RUN_PATH = "/api/v2/workflow";
 const ITEMS_PATH = "/api/v2/workflow/items";
+const REJECTED_DRAFT_PATH = "/api/v2/workflow/rejected-draft";
+const REJECTED_DRAFT_NOT_ON_THIS_SERVER = "This Exodus server does not keep rejected drafts yet, so there is nothing to read. It arrives " +
+    "with the next server update.";
 const STORYBOARD_PATH = "/api/v2/video/storyboard";
 const FLAG_PATH = "/api/v2/video/storyboard/flag";
 const APPROVE_PATH = "/api/v2/workflow/approve";
@@ -376,6 +387,30 @@ export function stopLines(stop, runId, runUrl) {
         ];
     }
     return [`Working: ${stageWord(stop.stage)}.`];
+}
+export function failedStoryboardNode(run) {
+    return run.nodes.find((n) => n.kind === "storyboard" && n.status === "failed");
+}
+export function errorEchoesReasons(error, record) {
+    if (!error || record?.kind !== "rejected")
+        return false;
+    const reasons = record.reasons ?? [];
+    return reasons.length > 0 && reasons.every((reason) => error.includes(reason));
+}
+export function planFailureLines(node, runId) {
+    const record = node?.planFailure;
+    if (!record || !Array.isArray(record.lines) || !node)
+        return [];
+    const reasons = record.kind === "rejected" ? (record.reasons ?? []) : [];
+    const bodyCount = Math.max(0, record.lines.length - reasons.length);
+    const lines = [`What happened to the storyboard step (${node.nodeId}):`];
+    record.lines.forEach((line, i) => {
+        lines.push(i < bodyCount ? `  ${line}` : `    - ${line}`);
+    });
+    if (node?.hasRejectedDraft === true) {
+        lines.push("  A rejected draft is on file. The system threw it away, so it is a record of what happened and nothing to act on.", `  Read it: exodus video status ${runId} --rejected-draft`);
+    }
+    return lines;
 }
 export const CAST_LEDGER_BASE = 910000;
 const FALLBACK_EXT = {
@@ -983,7 +1018,10 @@ export async function statusFlow(runId, json, deps) {
     const items = itemsRes.data.items ?? [];
     const hasFinal = hasAttachedCut(items);
     const stop = resolveStop(classifyRun(run), hasFinal);
-    const guidance = stopLines(stop, runId, reviewUrl(deps.dashboardUrl, run));
+    const failedStoryboard = failedStoryboardNode(run);
+    const guidance = stopLines(stop.at === "failed" && errorEchoesReasons(stop.error, failedStoryboard?.planFailure)
+        ? { ...stop, error: undefined }
+        : stop, runId, reviewUrl(deps.dashboardUrl, run));
     const warnings = run.nodes
         .filter((n) => n.warning)
         .map((n) => ({ nodeId: n.nodeId, step: n.kind, warning: n.warning }));
@@ -991,7 +1029,20 @@ export async function statusFlow(runId, json, deps) {
         return {
             code: 0,
             lines: [
-                JSON.stringify({ runId, status: run.status, stop, items, hasFinal, warnings, guidance }),
+                JSON.stringify({
+                    runId,
+                    status: run.status,
+                    stop,
+                    items,
+                    hasFinal,
+                    warnings,
+                    guidance,
+                    ...(failedStoryboard?.planFailure ? { planFailure: failedStoryboard.planFailure } : {}),
+                    ...(failedStoryboard?.planFailure
+                        ? { storyboardNodeId: failedStoryboard.nodeId }
+                        : {}),
+                    ...(failedStoryboard?.hasRejectedDraft === true ? { hasRejectedDraft: true } : {}),
+                }),
             ],
         };
     }
@@ -1026,6 +1077,7 @@ export async function statusFlow(runId, json, deps) {
         ...(carryingOn(run) ? [CARRYING_ON_LINE] : []),
         ...guidance,
         ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
+        ...planFailureLines(failedStoryboard, runId),
         ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
     ];
     if (byScene.size === 0) {
@@ -1073,6 +1125,45 @@ export async function statusFlow(runId, json, deps) {
             ? `Final cut: uploaded. Approve it with: exodus video approve ${runId}`
             : "Final cut: not uploaded yet.");
     return { code: 0, lines };
+}
+export async function rejectedDraftFlow(runId, json, deps) {
+    const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
+    if (!runRes.ok)
+        return errorResult(runRes, json);
+    const node = failedStoryboardNode(asVideoRun(runRes.data));
+    if (!node) {
+        const note = "The storyboard on this run didn't fail, so there is no rejected draft to read.";
+        return {
+            code: 0,
+            lines: json ? [JSON.stringify({ runId, nodeId: null, draft: null })] : [note],
+        };
+    }
+    const res = await deps.get(`${REJECTED_DRAFT_PATH}?runId=${encodeURIComponent(runId)}&nodeId=${encodeURIComponent(node.nodeId)}`);
+    if (missingRouteLine(res, "exodus video status --rejected-draft")) {
+        return {
+            code: 1,
+            lines: json
+                ? [JSON.stringify({ ok: false, status: 404, error: REJECTED_DRAFT_NOT_ON_THIS_SERVER })]
+                : [REJECTED_DRAFT_NOT_ON_THIS_SERVER],
+        };
+    }
+    if (!res.ok)
+        return errorResult(res, json);
+    const draft = res.data.draft ?? null;
+    if (json)
+        return { code: 0, lines: [JSON.stringify({ runId, nodeId: node.nodeId, draft })] };
+    if (!draft)
+        return { code: 0, lines: ["No rejected draft was kept for this attempt."] };
+    return {
+        code: 0,
+        lines: [
+            `REJECTED DRAFT — ad run ${runId}, step ${node.nodeId}`,
+            "The system turned this draft down and threw it away. It is kept only as a record of what happened.",
+            "Nothing in it is part of your ad. There is nothing here to act on or edit.",
+            "",
+            ...draft.split("\n"),
+        ],
+    };
 }
 export async function storyboardFlow(runId, json, deps) {
     const res = await deps.get(`${STORYBOARD_PATH}?runId=${encodeURIComponent(runId)}`);
@@ -2066,8 +2157,12 @@ export async function run(flags, occurrences) {
     if (needsRunId.includes(sub) && !runId) {
         usage(`video ${sub} needs a run id: exodus video ${sub} <runId>`);
     }
-    if (sub === "status")
+    if (sub === "status") {
+        if (flags["rejected-draft"] !== undefined && flags["rejected-draft"] !== false) {
+            return printResult(await rejectedDraftFlow(runId, json, defaultDeps));
+        }
         return printResult(await statusFlow(runId, json, defaultDeps));
+    }
     if (sub === "storyboard")
         return printResult(await storyboardFlow(runId, json, defaultDeps));
     if (sub === "approve") {
