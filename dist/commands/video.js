@@ -6,6 +6,7 @@ import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
+import { HELPER_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -148,6 +149,40 @@ const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
 const ASSETS_PATH = "/api/v2/workflows/assets";
 function withoutJudgeFields({ judgeDetail: _d, judgeSeverity: _s, ...rest }) {
     return rest;
+}
+export function qcWithoutJudgeWording(qc) {
+    if (!qc.takes)
+        return qc;
+    return {
+        ...qc,
+        takes: qc.takes.map(({ judgeWording: _w, ...rest }) => rest),
+    };
+}
+export const NO_TAKE_HISTORY_LINE = "no history recorded for this clip";
+const TAKE_NEIGHBOUR_SENTENCE = {
+    "not-applicable": () => "never compared",
+    "not-attached": () => "no neighbours attached",
+    "none-accepted": () => "no accepted neighbours yet",
+    attached: ({ scenes }) => `compared against scene${scenes.length === 1 ? "" : "s"} ${scenes.join(", ")}`,
+};
+export function renderQcTakeHistory(takes) {
+    if (!takes || takes.length === 0)
+        return [NO_TAKE_HISTORY_LINE];
+    const lines = [];
+    takes.forEach((take, index) => {
+        const say = TAKE_NEIGHBOUR_SENTENCE[take.neighbours.state];
+        const parts = [
+            take.failCodes.length ? `failed ${take.failCodes.join(", ")}` : "passed",
+            ...(take.warnCodes.length ? [`warned ${take.warnCodes.join(", ")}`] : []),
+            say(take.neighbours),
+        ];
+        const bonus = take.kind === "soft-retry" ? " (bonus take)" : "";
+        lines.push(`take ${index + 1}${bonus}: ${parts.join("; ")}`);
+        for (const { code, wording } of take.judgeWording ?? []) {
+            lines.push(`  checker said (${code}): ${wording}`);
+        }
+    });
+    return lines;
 }
 export function asVideoRun(data) {
     const run = (data ?? {});
@@ -363,6 +398,13 @@ export function stopLines(stop, runId, runUrl) {
     }
     if (stop.at === "failed") {
         if (stop.repair) {
+            if (!stop.step) {
+                return [
+                    "This run stopped at a step that can't be picked back up from here.",
+                    "Start a fresh run to get this ad made.",
+                    `Open the run:        ${runUrl}`,
+                ];
+            }
             return [
                 `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
                 `Try that step again: exodus workflow repair ${runId} retry`,
@@ -412,7 +454,10 @@ export function planFailureLines(node, runId) {
     }
     return lines;
 }
-export const CAST_LEDGER_BASE = 910000;
+export const CAST_LEDGER_BASE = HELPER_LEDGER_BASE + 10000;
+function isPullSceneIndex(sceneIndex) {
+    return sceneIndex >= 0 && sceneIndex < HELPER_LEDGER_BASE;
+}
 const FALLBACK_EXT = {
     image: "png",
     video: "mp4",
@@ -428,6 +473,10 @@ function extFor(url, family) {
 }
 export function scenePrefix(sceneIndex) {
     return `scene-${String(sceneIndex).padStart(2, "0")}`;
+}
+function clipQcOf(item) {
+    const artifact = item?.artifact;
+    return artifact && artifact.type === "video" ? artifact.qc?.takes : undefined;
 }
 function outputsOfNodeKind(run, kind) {
     return run.nodes.filter((n) => n.kind === kind).flatMap((n) => n.outputs ?? []);
@@ -611,6 +660,8 @@ export function planPull(run, items, opts) {
         for (const frame of artifact.frames ?? []) {
             if (!frame.imageUrl)
                 continue;
+            if (!isPullSceneIndex(frame.sceneIndex))
+                continue;
             keyframeByScene.set(frame.sceneIndex, keyframeDownload(frame.sceneIndex, frame.imageUrl));
         }
     }
@@ -628,7 +679,7 @@ export function planPull(run, items, opts) {
             };
             continue;
         }
-        if (typeof artifact.sceneIndex !== "number" || artifact.sceneIndex < 0)
+        if (typeof artifact.sceneIndex !== "number" || !isPullSceneIndex(artifact.sceneIndex))
             continue;
         voiceByScene.set(artifact.sceneIndex, {
             download: {
@@ -669,6 +720,8 @@ export function planPull(run, items, opts) {
         }
         if (artifact.type !== "video" || typeof artifact.sceneIndex !== "number")
             continue;
+        if (!isPullSceneIndex(artifact.sceneIndex))
+            continue;
         const clip = clipFromArtifact(artifact.sceneIndex, artifact);
         if (!clip)
             continue;
@@ -678,6 +731,8 @@ export function planPull(run, items, opts) {
     const frameItemByScene = new Map();
     const sceneFrameNodeIds = new Set(run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId));
     for (const item of items) {
+        if (!isPullSceneIndex(item.sceneIndex))
+            continue;
         if (item.itemKind === "clip")
             clipItemByScene.set(item.sceneIndex, item);
         if (item.itemKind === "frame" && sceneFrameNodeIds.has(item.nodeId)) {
@@ -709,7 +764,7 @@ export function planPull(run, items, opts) {
             ...frameItemByScene.keys(),
         ]),
     ]
-        .filter((sceneIndex) => sceneIndex >= 0 && sceneIndex < CAST_LEDGER_BASE)
+        .filter((sceneIndex) => isPullSceneIndex(sceneIndex))
         .sort((a, b) => a - b);
     const scenes = sceneIndexes.map((sceneIndex) => {
         const clip = clipByScene.get(sceneIndex);
@@ -744,7 +799,7 @@ export function planPull(run, items, opts) {
                     : "this-file",
             voice: voice?.download.file ?? null,
             keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
-            qc: clip?.qc ?? null,
+            qc: clip?.qc ? qcWithoutJudgeWording(clip.qc) : null,
             revoiced: clip ? clip.revoiced : null,
             speechTrimmed: clip ? clip.speechTrimmed : null,
             rawStorageId: clip ? clip.rawStorageId : null,
@@ -1090,6 +1145,11 @@ export async function statusFlow(runId, json, deps) {
             lines.push(`${String(sceneIndex).padEnd(5)}  ${itemWord(row.clip).padEnd(8)}  ${itemWord(row.voiceover).padEnd(8)}  ${itemWord(row.frame)}`);
             if (row.clip?.lastRedo)
                 lines.push(`       clip: ${row.clip.lastRedo.label}`);
+            if (row.clip?.lastRedo || row.clip?.flagged) {
+                for (const line of renderQcTakeHistory(clipQcOf(row.clip))) {
+                    lines.push(`       ${line}`);
+                }
+            }
             if (row.voiceover?.lastRedo)
                 lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
             if (row.frame?.lastRedo)

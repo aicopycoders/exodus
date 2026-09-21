@@ -12,6 +12,7 @@ import {
   type RunProvenance,
   type WorkflowRun,
 } from "./workflow.js";
+import { HELPER_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
@@ -168,6 +169,29 @@ export interface ClipWord {
   e: number;
 }
 
+/** #1716: what happened about neighbours on ONE take. MIRROR of
+ *  QcTakeNeighbours in convex/lib/workflow/qcTakes.ts — exodus compiles
+ *  standalone (tsconfig rootDir ".") and cannot import the canonical type. */
+export type ClipQcTakeNeighbours =
+  | { state: "not-applicable" }
+  | { state: "not-attached" }
+  | { state: "none-accepted" }
+  | { state: "attached"; scenes: number[] };
+
+/** #1716: one take of a clip. MIRROR of QcTake in
+ *  convex/lib/workflow/qcTakes.ts. `kind` stays a plain string union of what
+ *  the server sends today; an older CLI reading a newer record is why every
+ *  field here is read, never re-derived. */
+export interface ClipQcTake {
+  kind: "take" | "soft-retry";
+  failCodes: string[];
+  warnCodes: string[];
+  neighbours: ClipQcTakeNeighbours;
+  /** The checker's own words. Admin-only, exactly like ClipFinding.judgeDetail
+   *  (#1784), and never written into a pull manifest. */
+  judgeWording?: { code: string; wording: string }[];
+}
+
 export interface ClipQc {
   verdict: "pass" | "fail";
   attempts: number;
@@ -176,6 +200,10 @@ export interface ClipQc {
    *  demo scene, a run with no locked set); empty when it is compared and
    *  nothing was attached to the shipped take. */
   neighbours?: number[];
+  /** #1716: every take, first take first, `takes.length === attempts`. Absent
+   *  on a clip recorded before that ticket — which reads as "no history
+   *  recorded for this clip", never as an empty list. */
+  takes?: ClipQcTake[];
 }
 
 export interface ClipFinding {
@@ -193,6 +221,60 @@ export interface ClipFinding {
 /** A finding without the admin-only checker fields (#1784). */
 function withoutJudgeFields({ judgeDetail: _d, judgeSeverity: _s, ...rest }: ClipFinding): ClipFinding {
   return rest;
+}
+
+/** #1716: a clip's QC stamp with the checker's words out of its take history.
+ *  Applied to the pull manifest under the SAME rule as `withoutJudgeFields` —
+ *  unconditionally, because the checker's words are never written into a pulled
+ *  file whoever is pulling. */
+export function qcWithoutJudgeWording(qc: ClipQc): ClipQc {
+  if (!qc.takes) return qc;
+  return {
+    ...qc,
+    takes: qc.takes.map(({ judgeWording: _w, ...rest }) => rest),
+  };
+}
+
+/** #1716: the line a clip with no recorded history reads as. LOCKSTEP with
+ *  NO_TAKE_HISTORY_LINE in convex/lib/workflow/qcTakes.ts and with the same
+ *  sentence in scripts/video-qa/prove-consistency.sh. */
+export const NO_TAKE_HISTORY_LINE = "no history recorded for this clip";
+
+const TAKE_NEIGHBOUR_SENTENCE: {
+  [S in ClipQcTakeNeighbours["state"]]: (
+    neighbours: Extract<ClipQcTakeNeighbours, { state: S }>,
+  ) => string;
+} = {
+  "not-applicable": () => "never compared",
+  "not-attached": () => "no neighbours attached",
+  "none-accepted": () => "no accepted neighbours yet",
+  attached: ({ scenes }) =>
+    `compared against scene${scenes.length === 1 ? "" : "s"} ${scenes.join(", ")}`,
+};
+
+/** #1716: the take history as plain lines. LOCKSTEP MIRROR of
+ *  renderQcTakeHistory in convex/lib/workflow/qcTakes.ts — the literal lines
+ *  are pinned by this package's tests and by that module's, so a wording change
+ *  that reaches only one side fails a test. */
+export function renderQcTakeHistory(takes: ClipQcTake[] | undefined): string[] {
+  if (!takes || takes.length === 0) return [NO_TAKE_HISTORY_LINE];
+  const lines: string[] = [];
+  takes.forEach((take, index) => {
+    const say = TAKE_NEIGHBOUR_SENTENCE[take.neighbours.state] as (
+      n: ClipQcTakeNeighbours,
+    ) => string;
+    const parts = [
+      take.failCodes.length ? `failed ${take.failCodes.join(", ")}` : "passed",
+      ...(take.warnCodes.length ? [`warned ${take.warnCodes.join(", ")}`] : []),
+      say(take.neighbours),
+    ];
+    const bonus = take.kind === "soft-retry" ? " (bonus take)" : "";
+    lines.push(`take ${index + 1}${bonus}: ${parts.join("; ")}`);
+    for (const { code, wording } of take.judgeWording ?? []) {
+      lines.push(`  checker said (${code}): ${wording}`);
+    }
+  });
+  return lines;
 }
 
 /** A SUBSET of the server's artifact union (convex/schema.ts): exodus compiles
@@ -481,8 +563,11 @@ export type RunStop =
   // consumer already treats `at: "failed"` that way, so the honest reading is
   // the default one; a separate arm would let any consumer that forgot about
   // it quietly call a dead run a success. `repair` only adds the detail that
-  // this failure is retryable step-by-step, and `step`/`nodeId` name which
-  // step died.
+  // this failure is a repair park, and `step`/`nodeId` name which step died.
+  // #2168: `step` is therefore what makes the park retryable. Named ⇒ that step
+  // died and `exodus workflow repair <run> retry` redoes it; absent ⇒ no step
+  // in the list failed, the server refuses that retry, and only a fresh run
+  // moves this ad on.
   | { at: "failed"; error?: string; repair?: true; nodeId?: string; step?: string }
   | { at: "finished"; status: string };
 
@@ -715,6 +800,16 @@ export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): st
     // instead of the old "waiting on someone (repair)" — nobody was waiting,
     // and there was nothing to wait for.
     if (stop.repair) {
+      // #2168: the retry redoes the steps that FAILED, and the server refuses
+      // it outright when none did. With no step named there is nothing to
+      // retry, so say so plainly rather than offer a command that throws.
+      if (!stop.step) {
+        return [
+          "This run stopped at a step that can't be picked back up from here.",
+          "Start a fresh run to get this ad made.",
+          `Open the run:        ${runUrl}`,
+        ];
+      }
       return [
         `${stepName(stop.step)} failed${stop.error ? `: ${stop.error}` : "."}`,
         `Try that step again: exodus workflow repair ${runId} retry`,
@@ -889,7 +984,11 @@ export interface VideoManifest {
   provenance?: RunProvenance;
 }
 
-export const CAST_LEDGER_BASE = 910000;
+export const CAST_LEDGER_BASE = HELPER_LEDGER_BASE + 10000;
+
+function isPullSceneIndex(sceneIndex: number): boolean {
+  return sceneIndex >= 0 && sceneIndex < HELPER_LEDGER_BASE;
+}
 
 export interface PullPlan {
   downloads: PullDownload[];
@@ -915,6 +1014,12 @@ function extFor(url: string, family: "image" | "video" | "audio"): string {
 
 export function scenePrefix(sceneIndex: number): string {
   return `scene-${String(sceneIndex).padStart(2, "0")}`;
+}
+
+/** #1716: the QC stamp on a ledger row's clip, when it has one. */
+function clipQcOf(item: NodeItem | undefined): ClipQcTake[] | undefined {
+  const artifact = item?.artifact;
+  return artifact && artifact.type === "video" ? artifact.qc?.takes : undefined;
 }
 
 function outputsOfNodeKind(run: VideoRun, kind: string): ArtifactSubset[] {
@@ -1156,6 +1261,7 @@ export function planPull(
     if (artifact.type !== "frames") continue;
     for (const frame of artifact.frames ?? []) {
       if (!frame.imageUrl) continue;
+      if (!isPullSceneIndex(frame.sceneIndex)) continue;
       keyframeByScene.set(frame.sceneIndex, keyframeDownload(frame.sceneIndex, frame.imageUrl));
     }
   }
@@ -1173,7 +1279,7 @@ export function planPull(
       };
       continue;
     }
-    if (typeof artifact.sceneIndex !== "number" || artifact.sceneIndex < 0) continue;
+    if (typeof artifact.sceneIndex !== "number" || !isPullSceneIndex(artifact.sceneIndex)) continue;
     voiceByScene.set(artifact.sceneIndex, {
       download: {
         file: `${scenePrefix(artifact.sceneIndex)}.voice.${extFor(artifact.audioUrl, "audio")}`,
@@ -1215,6 +1321,7 @@ export function planPull(
       continue;
     }
     if (artifact.type !== "video" || typeof artifact.sceneIndex !== "number") continue;
+    if (!isPullSceneIndex(artifact.sceneIndex)) continue;
     const clip = clipFromArtifact(artifact.sceneIndex, artifact);
     if (!clip) continue;
     clipByScene.set(artifact.sceneIndex, clip);
@@ -1228,6 +1335,7 @@ export function planPull(
     run.nodes.filter((n) => n.kind === "scene-frames").map((n) => n.nodeId),
   );
   for (const item of items) {
+    if (!isPullSceneIndex(item.sceneIndex)) continue;
     if (item.itemKind === "clip") clipItemByScene.set(item.sceneIndex, item);
     if (item.itemKind === "frame" && sceneFrameNodeIds.has(item.nodeId)) {
       frameItemByScene.set(item.sceneIndex, item);
@@ -1256,7 +1364,7 @@ export function planPull(
       ...frameItemByScene.keys(),
     ]),
   ]
-    .filter((sceneIndex) => sceneIndex >= 0 && sceneIndex < CAST_LEDGER_BASE)
+    .filter((sceneIndex) => isPullSceneIndex(sceneIndex))
     .sort((a, b) => a - b);
 
   const scenes: ManifestScene[] = sceneIndexes.map((sceneIndex) => {
@@ -1298,7 +1406,10 @@ export function planPull(
             : "this-file",
       voice: voice?.download.file ?? null,
       keyframe: keyframeByScene.get(sceneIndex)?.file ?? null,
-      qc: clip?.qc ?? null,
+      // #1716: the take history rides the manifest with the checker's own words
+      // taken out — the same rule `withoutJudgeFields` applies to the findings
+      // just below, and for the same reason.
+      qc: clip?.qc ? qcWithoutJudgeWording(clip.qc) : null,
       revoiced: clip ? clip.revoiced : null,
       speechTrimmed: clip ? clip.speechTrimmed : null,
       rawStorageId: clip ? clip.rawStorageId : null,
@@ -1734,6 +1845,16 @@ export async function statusFlow(
       // member got a new take. The outcome goes first, above the findings that
       // explain it, and names the column it belongs to.
       if (row.clip?.lastRedo) lines.push(`       clip: ${row.clip.lastRedo.label}`);
+      // #1716: the take history hangs UNDER the redo outcome, so the two read
+      // as one record of what this clip went through rather than as two
+      // competing ones. Printed only where a reason is already being shown —
+      // a flagged clip, or one somebody redid — so an ordinary run grows no
+      // noise. A clip from before #1716 says so in as many words.
+      if (row.clip?.lastRedo || row.clip?.flagged) {
+        for (const line of renderQcTakeHistory(clipQcOf(row.clip))) {
+          lines.push(`       ${line}`);
+        }
+      }
       if (row.voiceover?.lastRedo) lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
       if (row.frame?.lastRedo) lines.push(`       picture: ${row.frame.lastRedo.label}`);
       for (const finding of row.clip?.findings ?? []) {

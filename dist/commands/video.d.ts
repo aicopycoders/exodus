@@ -8,10 +8,31 @@ export interface ClipWord {
     s: number;
     e: number;
 }
+export type ClipQcTakeNeighbours = {
+    state: "not-applicable";
+} | {
+    state: "not-attached";
+} | {
+    state: "none-accepted";
+} | {
+    state: "attached";
+    scenes: number[];
+};
+export interface ClipQcTake {
+    kind: "take" | "soft-retry";
+    failCodes: string[];
+    warnCodes: string[];
+    neighbours: ClipQcTakeNeighbours;
+    judgeWording?: {
+        code: string;
+        wording: string;
+    }[];
+}
 export interface ClipQc {
     verdict: "pass" | "fail";
     attempts: number;
     neighbours?: number[];
+    takes?: ClipQcTake[];
 }
 export interface ClipFinding {
     check: string;
@@ -21,6 +42,9 @@ export interface ClipFinding {
     judgeDetail?: string;
     judgeSeverity?: "fail" | "warn";
 }
+export declare function qcWithoutJudgeWording(qc: ClipQc): ClipQc;
+export declare const NO_TAKE_HISTORY_LINE = "no history recorded for this clip";
+export declare function renderQcTakeHistory(takes: ClipQcTake[] | undefined): string[];
 export type ArtifactSubset = {
     type: "storyboard";
     storyboard?: unknown;
@@ -277,7 +301,7 @@ export interface VideoManifest {
     failed: PullFailure[];
     provenance?: RunProvenance;
 }
-export declare const CAST_LEDGER_BASE = 910000;
+export declare const CAST_LEDGER_BASE: number;
 export interface PullPlan {
     downloads: PullDownload[];
     texts: PullTextFile[];
