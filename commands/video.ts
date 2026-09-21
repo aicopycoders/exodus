@@ -12,7 +12,7 @@ import {
   type RunProvenance,
   type WorkflowRun,
 } from "./workflow.js";
-import { HELPER_LEDGER_BASE } from "../lib/helperLedgerBase.js";
+import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
@@ -277,6 +277,16 @@ export function renderQcTakeHistory(takes: ClipQcTake[] | undefined): string[] {
   return lines;
 }
 
+function printDisplacedHistory(
+  lines: string[],
+  lastRedo: { displacedHistory?: { title: string; lines: string[] } },
+) {
+  const history = lastRedo.displacedHistory;
+  if (!history) return;
+  lines.push(`       ${history.title}`);
+  for (const line of history.lines) lines.push(`         ${line}`);
+}
+
 /** A SUBSET of the server's artifact union (convex/schema.ts): exodus compiles
  *  standalone (tsconfig rootDir ".") and cannot import the canonical type. */
 export type ArtifactSubset =
@@ -434,7 +444,12 @@ export interface NodeItem {
    *  `outcome` stays a plain string on purpose: a new outcome the server starts
    *  sending must not break a CLI that shipped before it. Absent on a row never
    *  redone, and on every backend older than this field. */
-  lastRedo?: { take: number; outcome: string; label: string };
+  lastRedo?: {
+    take: number;
+    outcome: string;
+    label: string;
+    displacedHistory?: { title: string; lines: string[] };
+  };
   /** Optional resolved media from listNodeItems (ledger clips + cast identity stills). */
   artifact?: ArtifactSubset;
 }
@@ -1067,7 +1082,16 @@ function keyframeDownload(sceneIndex: number, imageUrl: string): PullDownload {
 function reservedCastFrames(items: NodeItem[]): Map<number, NodeItem> {
   const byIndex = new Map<number, NodeItem>();
   for (const item of items) {
-    if (item.itemKind === "frame" && item.sceneIndex >= CAST_LEDGER_BASE) {
+    // Cast identity stills only ([CAST_LEDGER_BASE, SET_OPTION_LEDGER_BASE)).
+    // Set-gate room options (SET_OPTION_LEDGER_BASE) and cast-gate option
+    // renders (CAST_OPTION_LEDGER_BASE) are spend/render records, not cast
+    // references (#2202), so they must not leak into the pull manifest as
+    // cast-ref files.
+    if (
+      item.itemKind === "frame" &&
+      item.sceneIndex >= CAST_LEDGER_BASE &&
+      item.sceneIndex < SET_OPTION_LEDGER_BASE
+    ) {
       byIndex.set(item.sceneIndex, item);
     }
   }
@@ -1844,7 +1868,10 @@ export async function statusFlow(
       // the row reading "done", so the grid word alone cannot say whether the
       // member got a new take. The outcome goes first, above the findings that
       // explain it, and names the column it belongs to.
-      if (row.clip?.lastRedo) lines.push(`       clip: ${row.clip.lastRedo.label}`);
+      if (row.clip?.lastRedo) {
+        lines.push(`       clip: ${row.clip.lastRedo.label}`);
+        printDisplacedHistory(lines, row.clip.lastRedo);
+      }
       // #1716: the take history hangs UNDER the redo outcome, so the two read
       // as one record of what this clip went through rather than as two
       // competing ones. Printed only where a reason is already being shown —
@@ -1855,7 +1882,10 @@ export async function statusFlow(
           lines.push(`       ${line}`);
         }
       }
-      if (row.voiceover?.lastRedo) lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+      if (row.voiceover?.lastRedo) {
+        lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+        printDisplacedHistory(lines, row.voiceover.lastRedo);
+      }
       if (row.frame?.lastRedo) lines.push(`       picture: ${row.frame.lastRedo.label}`);
       for (const finding of row.clip?.findings ?? []) {
         lines.push(`       ${finding.code} (${finding.severity}): ${finding.detail}`);

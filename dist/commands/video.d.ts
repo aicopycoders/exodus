@@ -156,6 +156,10 @@ export interface NodeItem {
         take: number;
         outcome: string;
         label: string;
+        displacedHistory?: {
+            title: string;
+            lines: string[];
+        };
     };
     artifact?: ArtifactSubset;
 }

@@ -6,7 +6,7 @@ import { displayRunStatus, formatApiError } from "../lib/format.js";
 import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
-import { HELPER_LEDGER_BASE } from "../lib/helperLedgerBase.js";
+import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -183,6 +183,14 @@ export function renderQcTakeHistory(takes) {
         }
     });
     return lines;
+}
+function printDisplacedHistory(lines, lastRedo) {
+    const history = lastRedo.displacedHistory;
+    if (!history)
+        return;
+    lines.push(`       ${history.title}`);
+    for (const line of history.lines)
+        lines.push(`         ${line}`);
 }
 export function asVideoRun(data) {
     const run = (data ?? {});
@@ -507,7 +515,9 @@ function keyframeDownload(sceneIndex, imageUrl) {
 function reservedCastFrames(items) {
     const byIndex = new Map();
     for (const item of items) {
-        if (item.itemKind === "frame" && item.sceneIndex >= CAST_LEDGER_BASE) {
+        if (item.itemKind === "frame" &&
+            item.sceneIndex >= CAST_LEDGER_BASE &&
+            item.sceneIndex < SET_OPTION_LEDGER_BASE) {
             byIndex.set(item.sceneIndex, item);
         }
     }
@@ -1143,15 +1153,19 @@ export async function statusFlow(runId, json, deps) {
         for (const sceneIndex of [...byScene.keys()].sort((a, b) => a - b)) {
             const row = byScene.get(sceneIndex);
             lines.push(`${String(sceneIndex).padEnd(5)}  ${itemWord(row.clip).padEnd(8)}  ${itemWord(row.voiceover).padEnd(8)}  ${itemWord(row.frame)}`);
-            if (row.clip?.lastRedo)
+            if (row.clip?.lastRedo) {
                 lines.push(`       clip: ${row.clip.lastRedo.label}`);
+                printDisplacedHistory(lines, row.clip.lastRedo);
+            }
             if (row.clip?.lastRedo || row.clip?.flagged) {
                 for (const line of renderQcTakeHistory(clipQcOf(row.clip))) {
                     lines.push(`       ${line}`);
                 }
             }
-            if (row.voiceover?.lastRedo)
+            if (row.voiceover?.lastRedo) {
                 lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+                printDisplacedHistory(lines, row.voiceover.lastRedo);
+            }
             if (row.frame?.lastRedo)
                 lines.push(`       picture: ${row.frame.lastRedo.label}`);
             for (const finding of row.clip?.findings ?? []) {
