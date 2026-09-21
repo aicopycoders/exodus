@@ -69,12 +69,14 @@ The whole loop, in order:
       Attaches your cut to the run and prints the page to approve it on.
 
   11. exodus video approve <runId>
-      Or click Approve on the page from step 10.
+      Or click Approve on the page from step 10. If you redid a clip after
+      uploading, this stops and says which scenes changed. Upload a fresh cut,
+      or add --approve-stale-cut to deliver the cut you already uploaded.
 
 Usage:
   exodus video status <runId> [--json]
   exodus video storyboard <runId> [--json]
-  exodus video approve <runId> [--json]
+  exodus video approve <runId> [--approve-stale-cut] [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
   exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
@@ -95,6 +97,9 @@ Options:
                        (retry-frame, retry-clip, revoice)
   --all                Every finished clip that kept the video model's voice
                        (revoice)
+  --approve-stale-cut  Deliver the cut you uploaded even though a clip changed
+                       after you uploaded it (approve). Without it, approving
+                       stops and names the scenes that changed
   --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
                        character by its ID or by the name your script uses.
                        Repeat it once per character
@@ -152,8 +157,10 @@ export interface ClipWord {
 export interface ClipQc {
   verdict: "pass" | "fail";
   attempts: number;
-  /** #1711: the accepted neighbour scenes this take was judged against for
-   *  continuity. Present only on a set-locked identity reroll. */
+  /** #1711/#1714: the accepted neighbour scenes this take was judged against
+   *  for continuity. Absent on a scene that is never compared (a cutaway, a
+   *  demo scene, a run with no locked set); empty when it is compared and
+   *  nothing was attached to the shipped take. */
   neighbours?: number[];
 }
 
@@ -224,7 +231,7 @@ export type ArtifactSubset =
 export interface VideoRunNode {
   nodeId: string;
   kind: string;
-  status: "idle" | "running" | "done" | "failed" | "skipped";
+  status: "idle" | "running" | "done" | "failed" | "skipped" | "out-of-scope";
   error?: string;
   /** A member-safe note on a step that still finished (the dashboard shows it on the step). */
   warning?: string;
@@ -1463,6 +1470,22 @@ function itemWord(item: NodeItem | undefined): string {
   return ITEM_STATUS_WORD[item.status] ?? item.status;
 }
 
+/**
+ * #1903: a queued run that has ALREADY worked — an approved gate, a retry, or a
+ * long step handing itself to a fresh worker. "Queued" alone reads like nothing
+ * has happened yet, which is what made a hand-over look like a loss. Same rule
+ * and same words as the run page's queued sentence.
+ */
+const CARRYING_ON_LINE =
+  "Waiting for a worker to carry on. Everything finished so far is kept — the run picks up from there by itself.";
+
+function carryingOn(run: VideoRun): boolean {
+  return (
+    run.status === "queued" &&
+    run.nodes.some((n) => n.status !== "idle" && n.status !== "out-of-scope")
+  );
+}
+
 export async function statusFlow(
   runId: string,
   json: boolean,
@@ -1532,6 +1555,7 @@ export async function statusFlow(
       : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
   const lines = [
     headline,
+    ...(carryingOn(run) ? [CARRYING_ON_LINE] : []),
     ...guidance,
     // #1883: "Working" alone reads like a run going straight through, and a
     // healthy gated run was cancelled over exactly that.
@@ -1707,19 +1731,48 @@ function sceneCardLines(scene: GateSceneCard): string[] {
 
 export async function approveFlow(
   runId: string,
-  json: boolean,
+  opts: { json: boolean; approveStaleCut: boolean },
   deps: VideoDeps,
 ): Promise<FlowResult> {
-  const res = await deps.post(APPROVE_PATH, { runId });
+  const res = await deps.post(APPROVE_PATH, {
+    runId,
+    // #1856: the server refuses a cut its clips have moved past. Only the member's
+    // own --approve-stale-cut overrides that, so the key is sent only when they
+    // typed the flag. It is never defaulted and never inferred from the run.
+    ...(opts.approveStaleCut ? { approveStaleCut: true } : {}),
+  });
   // #1845: a refused approve (a chosen voice ElevenLabs is certain is gone) comes
   // back 400 with one plain sentence — printed as-is, exit 1, nothing approved.
-  if (!res.ok) return errorResult(res, json);
-  if (json) return { code: 0, lines: [JSON.stringify({ ok: true, runId, data: res.data })] };
+  // #1856: an out-of-date cut is refused the same way. The server's sentence
+  // says "approve this cut anyway"; on the command line that is one flag, so
+  // name it rather than leave the member to find it in the help.
+  if (!res.ok) {
+    const refusal = errorResult(res, opts.json);
+    const staleCut = !opts.json && videoApiError(res).includes("approve this cut anyway");
+    return staleCut
+      ? {
+          ...refusal,
+          lines: [
+            ...refusal.lines,
+            `To deliver it anyway: exodus video approve ${runId} --approve-stale-cut`,
+          ],
+        }
+      : refusal;
+  }
+  const data = res.data as {
+    voices?: { cast?: CastVoiceRow[]; notices?: string[] };
+    warnings?: string[];
+  } | null;
+  // #1856: things the member should know about the approve that went through
+  // anyway, worded by the server. Absent on older backends.
+  const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+  if (opts.json) {
+    return { code: 0, lines: [JSON.stringify({ ok: true, runId, warnings, data: res.data })] };
+  }
   // #1845: approving is the last moment a wrong voice can still be caught, so the
   // receipt names the voice each speaking character got. Absent on older backends
   // and on approves that are not the storyboard stop.
-  const voices = (res.data as { voices?: { cast?: CastVoiceRow[]; notices?: string[] } } | null)
-    ?.voices;
+  const voices = data?.voices;
   const summary = voices
     ? voiceSummaryLines(
         Array.isArray(voices.cast) ? voices.cast : [],
@@ -1730,6 +1783,7 @@ export async function approveFlow(
     code: 0,
     lines: [
       "Approved.",
+      ...warnings,
       ...(summary.length > 0 ? ["", ...summary, ""] : []),
       `See what happens next: exodus video status ${runId}`,
     ],
@@ -1808,9 +1862,13 @@ export interface ClipRedoTarget {
   nodeId?: string;
 }
 
+// #1856: guidance before the redo, not a second verdict. The server decides at
+// approve time whether the uploaded cut is out of date, and this names the one
+// flag that gets past that refusal.
 const UPLOADED_CUT_WARNING =
-  "The cut you already uploaded will not include the new clip. Pull the pieces again, " +
-  "re-cut, and upload again.";
+  "The cut you already uploaded will not include the new clip. If this redo replaces the clip, " +
+  "exodus video approve stops until you pull the pieces again, re-cut and upload again, " +
+  "or pass --approve-stale-cut to deliver the cut you uploaded as it is.";
 
 /**
  * #1851: decide a clip redo before anything is enqueued. The server's
@@ -2906,7 +2964,15 @@ export async function run(
 
   if (sub === "status") return printResult(await statusFlow(runId, json, defaultDeps));
   if (sub === "storyboard") return printResult(await storyboardFlow(runId, json, defaultDeps));
-  if (sub === "approve") return printResult(await approveFlow(runId, json, defaultDeps));
+  if (sub === "approve") {
+    return printResult(
+      await approveFlow(
+        runId,
+        { json, approveStaleCut: flags["approve-stale-cut"] === true },
+        defaultDeps,
+      ),
+    );
+  }
 
   if (sub === "flag") {
     const note = flagString(flags, "note");

@@ -34,14 +34,60 @@ export interface WorkflowEdge {
     targetHandle: string;
 }
 export type WorkflowTriggerEvent = "winner-promoted";
+export interface ImageRigLineOverride {
+    count?: number;
+    aspects?: string[];
+    adType?: string;
+    style?: string;
+    memeFormat?: string;
+    steering?: string;
+    copyPin?: string;
+}
+export interface ImageRigPlanOverride {
+    lines?: unknown[];
+    steering?: string;
+    defaultAspects?: string[];
+    defaultStyle?: string;
+    model?: string;
+    confirmLargeRun?: boolean;
+}
+export interface ImageRigNodeOverride {
+    plan?: ImageRigPlanOverride;
+    lines?: Record<string, ImageRigLineOverride>;
+    confirmLargeRun?: boolean;
+    model?: string;
+}
+export type ImageRigOverrides = Record<string, ImageRigNodeOverride>;
+export interface VoiceRequest {
+    who: string;
+    choice: {
+        kind: "pin";
+        voiceId: string;
+        label?: string;
+    } | {
+        kind: "clear";
+    };
+}
+export type TriggerVoiceMap = Record<string, string | {
+    voiceId: string;
+    label?: string;
+} | null>;
 export type WorkflowTrigger = {
     type: "event";
     event: WorkflowTriggerEvent;
     enabled: boolean;
+    imageRigOverrides?: ImageRigOverrides;
+    voices?: VoiceRequest[];
 } | {
     type: "cron";
     cron: string;
     enabled: boolean;
+    imageRigOverrides?: ImageRigOverrides;
+    voices?: VoiceRequest[];
+};
+type WithoutVoices<T> = T extends unknown ? Omit<T, "voices"> : never;
+export type WorkflowContractTrigger = WithoutVoices<WorkflowTrigger> & {
+    voices?: TriggerVoiceMap;
 };
 export interface WorkflowContractJson {
     contract: "exodus-workflow";
@@ -51,7 +97,7 @@ export interface WorkflowContractJson {
     name: string;
     description?: string;
     slots?: WorkflowSlot[];
-    triggers?: WorkflowTrigger[];
+    triggers?: WorkflowContractTrigger[];
     nodes: WorkflowNode[];
     edges: WorkflowEdge[];
 }
@@ -530,12 +576,13 @@ export declare function parseVersionFlag(flags: Record<string, string | boolean>
 export declare function versionsFlow(workflowRef: string, opts: {
     json: boolean;
 }, deps: WorkflowRunDeps, channel?: Channel): Promise<FlowResult>;
-export declare function triggerExpect(t: WorkflowTrigger): {
+type AnyTrigger = WorkflowTrigger | WorkflowContractTrigger;
+export declare function triggerExpect(t: AnyTrigger): {
     type: string;
     event?: string;
     cron?: string;
 };
-export declare function formatTriggers(triggers: WorkflowTrigger[]): string;
+export declare function formatTriggers(triggers: AnyTrigger[]): string;
 export declare function triggersListFlow(workflowRef: string, opts: {
     json: boolean;
 }, deps: WorkflowRunDeps): Promise<FlowResult>;
@@ -546,6 +593,7 @@ export declare function triggersFireFlow(workflowRef: string, opts: {
     n?: number;
     text?: string;
     imageRigOverrides?: Record<string, unknown>;
+    voices?: VoiceMap;
     wait: boolean;
     json: boolean;
     onProgressLine?: (line: string) => void;

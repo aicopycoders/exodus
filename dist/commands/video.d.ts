@@ -72,7 +72,7 @@ export type ArtifactSubset = {
 export interface VideoRunNode {
     nodeId: string;
     kind: string;
-    status: "idle" | "running" | "done" | "failed" | "skipped";
+    status: "idle" | "running" | "done" | "failed" | "skipped" | "out-of-scope";
     error?: string;
     warning?: string;
     outputs?: ArtifactSubset[];
@@ -293,7 +293,10 @@ export declare function waitFlow(runId: string, opts: {
 }, deps: VideoDeps): Promise<FlowResult>;
 export declare function statusFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function storyboardFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
-export declare function approveFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function approveFlow(runId: string, opts: {
+    json: boolean;
+    approveStaleCut: boolean;
+}, deps: VideoDeps): Promise<FlowResult>;
 export declare function flagFlow(runId: string, note: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function retryFrameFlow(runId: string, nodeId: string, sceneIndex: number, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export type ClipRedoPlan = {

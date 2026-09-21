@@ -63,7 +63,7 @@ Usage:
   exodus workflow triggers <workflowId|name> [--json]
   exodus workflow triggers <workflowId|name> enable <n> [--json]
   exodus workflow triggers <workflowId|name> disable <n> [--json]
-  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--wait] [--json]
+  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--wait] [--json]
   exodus workflow inbox [--json]
   exodus workflow checkpoint <runId> [show] [--json]
   exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
@@ -115,9 +115,9 @@ Flags:
                          before anything runs, and the error names it. On
                          "triggers fire" it REPLACES the schedule's own
                          overrides for that one test fire.
-  --voices <json>        (run) Give the ad's characters their voices at the
-                         moment the run starts, instead of at the storyboard
-                         review. Keyed by the names the SCRIPT uses for its
+  --voices <json>        (run, triggers fire) Give the ad's characters their
+                         voices at the moment the run starts, instead of at the
+                         storyboard review. Keyed by the names the SCRIPT uses for its
                          speakers ("HOST 1") — the planner's character ids
                          (C1, C2) do not exist yet when a run starts. Takes a
                          JSON object, or @path to a .json file holding one:
@@ -134,6 +134,14 @@ Flags:
                          <run>" at the storyboard review instead. Voice ids
                          belong to the brand's own folder — never put them in a
                          shared workflow or template.
+                         A schedule can carry the same map in its YAML
+                         ("voices:" beside the schedule), so a weekly ad arrives
+                         already voiced. On "triggers fire" this flag REPLACES
+                         the schedule's own voices for that one test fire. A
+                         schedule whose voice has been deleted, or whose
+                         ElevenLabs key is missing or refused, does not start at
+                         all: it leaves a failed run saying which speaker and
+                         what to fix, and spends nothing.
   --voice-treatment <v>  (run) Say HOW this run makes its voices. Two kinds of
                          answer. A name on its own picks a way of working that
                          uses voices you already have:
@@ -310,7 +318,9 @@ Notes:
   panel in the app); anything you name that isn't there stops the launch and the
   message says which key was wrong. A trigger can carry the same payload in its
   YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
-  Friday one can fire the same workflow at different sizes.
+  Friday one can fire the same workflow at different sizes. A trigger can carry
+  "voices:" the same way — the same map "workflow run --voices" takes — so a run
+  that starts on a schedule arrives at the storyboard already voiced.
   "workflow run --voices" hands a video run its voices at the start, so a brand
   that always uses the same hosts stops choosing them by hand on every run. The
   file is keyed by the names the script uses for its speakers, because that is
@@ -487,9 +497,86 @@ export interface WorkflowEdge {
 // union (not string) so the mutual-assignment pin holds; a new platform event
 // is a one-line addition here in lockstep with the convex catalog.
 export type WorkflowTriggerEvent = "winner-promoted";
+// A trigger's two optional payloads. The CLI only carries them between the file
+// and the server, which owns every rule about what is legal in them — but they
+// are mirrored in full rather than left opaque, because the mutual-assignment
+// pin below is what stops an export/import from silently dropping one.
+
+/** Mirror of convex ImageRigLineOverride (#1084) — a per-run patch to ONE
+ *  firing line, merged field-wise into the stored one. */
+export interface ImageRigLineOverride {
+  count?: number;
+  aspects?: string[];
+  adType?: string;
+  style?: string;
+  memeFormat?: string;
+  steering?: string;
+  copyPin?: string;
+}
+
+/** Mirror of convex ImageRigPlanOverride — a WHOLE-plan replacement. */
+export interface ImageRigPlanOverride {
+  lines?: unknown[];
+  steering?: string;
+  defaultAspects?: string[];
+  defaultStyle?: string;
+  model?: string;
+  confirmLargeRun?: boolean;
+}
+
+/** Mirror of convex ImageRigNodeOverride — what one Image Rig node accepts. */
+export interface ImageRigNodeOverride {
+  plan?: ImageRigPlanOverride;
+  lines?: Record<string, ImageRigLineOverride>;
+  confirmLargeRun?: boolean;
+  model?: string;
+}
+
+/** Mirror of convex ImageRigOverrides — one entry per Image Rig node re-aimed. */
+export type ImageRigOverrides = Record<string, ImageRigNodeOverride>;
+
+/** Mirror of convex VoiceRequest (#1863) — one launch voice as the STORED list
+ *  holds it, keyed by the speaker name the run's own script declares. */
+export interface VoiceRequest {
+  who: string;
+  choice: { kind: "pin"; voiceId: string; label?: string } | { kind: "clear" };
+}
+
+/** Mirror of convex TriggerVoiceMap — the same voices as a member AUTHORS them,
+ *  identical to a voices.json: a string pins, an object pins with a label, null
+ *  clears. */
+export type TriggerVoiceMap = Record<
+  string,
+  string | { voiceId: string; label?: string } | null
+>;
+
 export type WorkflowTrigger =
-  | { type: "event"; event: WorkflowTriggerEvent; enabled: boolean }
-  | { type: "cron"; cron: string; enabled: boolean };
+  | {
+      type: "event";
+      event: WorkflowTriggerEvent;
+      enabled: boolean;
+      imageRigOverrides?: ImageRigOverrides;
+      voices?: VoiceRequest[];
+    }
+  | {
+      type: "cron";
+      cron: string;
+      enabled: boolean;
+      imageRigOverrides?: ImageRigOverrides;
+      voices?: VoiceRequest[];
+    };
+
+type WithoutVoices<T> = T extends unknown ? Omit<T, "voices"> : never;
+
+/**
+ * Mirror of convex WorkflowContractTrigger (#1863): a trigger AS IT READS IN A
+ * CONTRACT file. Identical to the stored union except `voices`, which an export
+ * writes — and a member authors — as the voices.json map, so a workflow file
+ * reads like the voices file beside it.
+ */
+export type WorkflowContractTrigger = WithoutVoices<WorkflowTrigger> & {
+  voices?: TriggerVoiceMap;
+};
 
 export interface WorkflowContractJson {
   contract: "exodus-workflow";
@@ -501,8 +588,9 @@ export interface WorkflowContractJson {
   description?: string;
   /** #861 (MS-7): exposed slots — optional, omitted when absent (mirror). */
   slots?: WorkflowSlot[];
-  /** #862 (MS-8): triggers — optional, omitted when absent (mirror). */
-  triggers?: WorkflowTrigger[];
+  /** #862 (MS-8): triggers — optional, omitted when absent (mirror). In a FILE,
+   *  so `voices` is the authored map (#1863), not the stored list. */
+  triggers?: WorkflowContractTrigger[];
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 }
@@ -4414,8 +4502,12 @@ async function runImport(
 // sends that fingerprint as `expect`, so a concurrent edit fails loud
 // server-side instead of flipping the wrong trigger.
 
+/** A trigger in either form. Every display path below reads only `type`,
+ *  `event`/`cron` and `enabled` — the keys both forms share. */
+type AnyTrigger = WorkflowTrigger | WorkflowContractTrigger;
+
 /** The `expect` fingerprint the server matches a trigger against by position. */
-export function triggerExpect(t: WorkflowTrigger): {
+export function triggerExpect(t: AnyTrigger): {
   type: string;
   event?: string;
   cron?: string;
@@ -4425,7 +4517,7 @@ export function triggerExpect(t: WorkflowTrigger): {
     : { type: "cron", cron: t.cron };
 }
 
-function triggerDetail(t: WorkflowTrigger): string {
+function triggerDetail(t: AnyTrigger): string {
   return t.type === "event" ? t.event : t.cron;
 }
 
@@ -4433,7 +4525,7 @@ const NO_TRIGGERS =
   "no triggers — add them via `exodus workflow export` / `import`";
 
 /** One numbered (1-based) row per trigger: `n · type · detail · enabled|disabled`. */
-export function formatTriggers(triggers: WorkflowTrigger[]): string {
+export function formatTriggers(triggers: AnyTrigger[]): string {
   if (triggers.length === 0) return NO_TRIGGERS;
   return triggers
     .map((t, i) => {
@@ -4465,7 +4557,7 @@ function triggerErrorResult(
 async function fetchTriggers(
   workflowId: string,
   deps: WorkflowRunDeps,
-): Promise<{ ok: true; triggers: WorkflowTrigger[] } | { ok: false; res: ApiResponse<unknown> }> {
+): Promise<{ ok: true; triggers: WorkflowContractTrigger[] } | { ok: false; res: ApiResponse<unknown> }> {
   const res = await deps.get(`${EXPORT_PATH}?id=${encodeURIComponent(workflowId)}`);
   if (!res.ok) return { ok: false, res };
   const triggers = (res.data as WorkflowContractJson).triggers ?? [];
@@ -4500,7 +4592,7 @@ export async function triggersListFlow(
 /** Shared render for an out-of-range / ambiguous <n> — echoes the live list. */
 function triggerIndexError(
   message: string,
-  triggers: WorkflowTrigger[],
+  triggers: AnyTrigger[],
   json: boolean,
 ): FlowResult {
   if (json) {
@@ -4579,6 +4671,13 @@ export async function triggersFireFlow(
      * the fire simulates the schedule faithfully, its own overrides included.
      */
     imageRigOverrides?: Record<string, unknown>;
+    /**
+     * #1863: a per-FIRE voices map, with the same precedence as the re-aim
+     * above — it REPLACES whatever voices the trigger definition carries rather
+     * than merging with them. Omitted = the fire simulates the schedule
+     * faithfully, its own voices included.
+     */
+    voices?: VoiceMap;
     wait: boolean;
     json: boolean;
     onProgressLine?: (line: string) => void;
@@ -4650,6 +4749,9 @@ export async function triggersFireFlow(
     ...(opts.imageRigOverrides
       ? { imageRigOverrides: opts.imageRigOverrides }
       : {}),
+    // #1863: the per-fire voices, as the MAP — the route parses it into the
+    // list Convex can carry, exactly as the run route does.
+    ...(opts.voices ? { voices: opts.voices } : {}),
   });
   if (!res.ok) return triggerErrorResult(res, verb, opts.json);
 
@@ -6059,8 +6161,11 @@ export async function run(
       // #1084 (F2): same parse the run verb uses — a bad payload must fail
       // here, before a run fires on the owner's keys.
       let fireOverrides: Record<string, unknown> | undefined;
+      // #1863: and the per-fire voices, parsed here for the same reason.
+      let fireVoices: VoiceMap | undefined;
       try {
         fireOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
+        fireVoices = parseVoicesFlag(occurrences, defaultDeps.readFile);
       } catch (e) {
         console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
         process.exit(1);
@@ -6072,6 +6177,7 @@ export async function run(
             n,
             text: flagString(flags, "text"),
             imageRigOverrides: fireOverrides,
+            voices: fireVoices,
             wait: flags["wait"] === true,
             json,
             onProgressLine: (line) => console.log(line),

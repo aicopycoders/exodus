@@ -62,12 +62,14 @@ The whole loop, in order:
       Attaches your cut to the run and prints the page to approve it on.
 
   11. exodus video approve <runId>
-      Or click Approve on the page from step 10.
+      Or click Approve on the page from step 10. If you redid a clip after
+      uploading, this stops and says which scenes changed. Upload a fresh cut,
+      or add --approve-stale-cut to deliver the cut you already uploaded.
 
 Usage:
   exodus video status <runId> [--json]
   exodus video storyboard <runId> [--json]
-  exodus video approve <runId> [--json]
+  exodus video approve <runId> [--approve-stale-cut] [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
   exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
@@ -88,6 +90,9 @@ Options:
                        (retry-frame, retry-clip, revoice)
   --all                Every finished clip that kept the video model's voice
                        (revoice)
+  --approve-stale-cut  Deliver the cut you uploaded even though a clip changed
+                       after you uploaded it (approve). Without it, approving
+                       stops and names the scenes that changed
   --set <who>=<id>     Give a character an ElevenLabs voice (voices). Name the
                        character by its ID or by the name your script uses.
                        Repeat it once per character
@@ -956,6 +961,11 @@ function itemWord(item) {
         return "flagged";
     return ITEM_STATUS_WORD[item.status] ?? item.status;
 }
+const CARRYING_ON_LINE = "Waiting for a worker to carry on. Everything finished so far is kept — the run picks up from there by itself.";
+function carryingOn(run) {
+    return (run.status === "queued" &&
+        run.nodes.some((n) => n.status !== "idle" && n.status !== "out-of-scope"));
+}
 export async function statusFlow(runId, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
@@ -1007,6 +1017,7 @@ export async function statusFlow(runId, json, deps) {
         : `Ad run ${runId} — ${displayRunStatus(run.status)}`;
     const lines = [
         headline,
+        ...(carryingOn(run) ? [CARRYING_ON_LINE] : []),
         ...guidance,
         ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
         ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
@@ -1136,14 +1147,30 @@ function sceneCardLines(scene) {
         lines.push(`    picture: ${scene.frame.status}`);
     return lines;
 }
-export async function approveFlow(runId, json, deps) {
-    const res = await deps.post(APPROVE_PATH, { runId });
-    if (!res.ok)
-        return errorResult(res, json);
-    if (json)
-        return { code: 0, lines: [JSON.stringify({ ok: true, runId, data: res.data })] };
-    const voices = res.data
-        ?.voices;
+export async function approveFlow(runId, opts, deps) {
+    const res = await deps.post(APPROVE_PATH, {
+        runId,
+        ...(opts.approveStaleCut ? { approveStaleCut: true } : {}),
+    });
+    if (!res.ok) {
+        const refusal = errorResult(res, opts.json);
+        const staleCut = !opts.json && videoApiError(res).includes("approve this cut anyway");
+        return staleCut
+            ? {
+                ...refusal,
+                lines: [
+                    ...refusal.lines,
+                    `To deliver it anyway: exodus video approve ${runId} --approve-stale-cut`,
+                ],
+            }
+            : refusal;
+    }
+    const data = res.data;
+    const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+    if (opts.json) {
+        return { code: 0, lines: [JSON.stringify({ ok: true, runId, warnings, data: res.data })] };
+    }
+    const voices = data?.voices;
     const summary = voices
         ? voiceSummaryLines(Array.isArray(voices.cast) ? voices.cast : [], Array.isArray(voices.notices) ? voices.notices : [])
         : [];
@@ -1151,6 +1178,7 @@ export async function approveFlow(runId, json, deps) {
         code: 0,
         lines: [
             "Approved.",
+            ...warnings,
             ...(summary.length > 0 ? ["", ...summary, ""] : []),
             `See what happens next: exodus video status ${runId}`,
         ],
@@ -1208,8 +1236,9 @@ export async function retryFrameFlow(runId, nodeId, sceneIndex, note, json, deps
         ],
     };
 }
-const UPLOADED_CUT_WARNING = "The cut you already uploaded will not include the new clip. Pull the pieces again, " +
-    "re-cut, and upload again.";
+const UPLOADED_CUT_WARNING = "The cut you already uploaded will not include the new clip. If this redo replaces the clip, " +
+    "exodus video approve stops until you pull the pieces again, re-cut and upload again, " +
+    "or pass --approve-stale-cut to deliver the cut you uploaded as it is.";
 export function planClipRedo(run, items, target) {
     const stop = classifyRun(run);
     const found = findClipRow(run, items, target);
@@ -2028,8 +2057,9 @@ export async function run(flags, occurrences) {
         return printResult(await statusFlow(runId, json, defaultDeps));
     if (sub === "storyboard")
         return printResult(await storyboardFlow(runId, json, defaultDeps));
-    if (sub === "approve")
-        return printResult(await approveFlow(runId, json, defaultDeps));
+    if (sub === "approve") {
+        return printResult(await approveFlow(runId, { json, approveStaleCut: flags["approve-stale-cut"] === true }, defaultDeps));
+    }
     if (sub === "flag") {
         const note = flagString(flags, "note");
         if (!note)

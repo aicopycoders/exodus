@@ -32,7 +32,7 @@ Usage:
   exodus workflow triggers <workflowId|name> [--json]
   exodus workflow triggers <workflowId|name> enable <n> [--json]
   exodus workflow triggers <workflowId|name> disable <n> [--json]
-  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--wait] [--json]
+  exodus workflow triggers <workflowId|name> fire [<n>] [--text "..."] [--rig-overrides <json|@file>] [--voices <json|@voices.json>] [--wait] [--json]
   exodus workflow inbox [--json]
   exodus workflow checkpoint <runId> [show] [--json]
   exodus workflow checkpoint <runId> edit <n> [--text "..." | --file <path> | (stdin)] [--json]
@@ -84,9 +84,9 @@ Flags:
                          before anything runs, and the error names it. On
                          "triggers fire" it REPLACES the schedule's own
                          overrides for that one test fire.
-  --voices <json>        (run) Give the ad's characters their voices at the
-                         moment the run starts, instead of at the storyboard
-                         review. Keyed by the names the SCRIPT uses for its
+  --voices <json>        (run, triggers fire) Give the ad's characters their
+                         voices at the moment the run starts, instead of at the
+                         storyboard review. Keyed by the names the SCRIPT uses for its
                          speakers ("HOST 1") — the planner's character ids
                          (C1, C2) do not exist yet when a run starts. Takes a
                          JSON object, or @path to a .json file holding one:
@@ -103,6 +103,14 @@ Flags:
                          <run>" at the storyboard review instead. Voice ids
                          belong to the brand's own folder — never put them in a
                          shared workflow or template.
+                         A schedule can carry the same map in its YAML
+                         ("voices:" beside the schedule), so a weekly ad arrives
+                         already voiced. On "triggers fire" this flag REPLACES
+                         the schedule's own voices for that one test fire. A
+                         schedule whose voice has been deleted, or whose
+                         ElevenLabs key is missing or refused, does not start at
+                         all: it leaves a failed run saying which speaker and
+                         what to fix, and spends nothing.
   --voice-treatment <v>  (run) Say HOW this run makes its voices. Two kinds of
                          answer. A name on its own picks a way of working that
                          uses voices you already have:
@@ -279,7 +287,9 @@ Notes:
   panel in the app); anything you name that isn't there stops the launch and the
   message says which key was wrong. A trigger can carry the same payload in its
   YAML ("imageRigOverrides:" beside its schedule), so a Monday schedule and a
-  Friday one can fire the same workflow at different sizes.
+  Friday one can fire the same workflow at different sizes. A trigger can carry
+  "voices:" the same way — the same map "workflow run --voices" takes — so a run
+  that starts on a schedule arrives at the storyboard already voiced.
   "workflow run --voices" hands a video run its voices at the start, so a brand
   that always uses the same hosts stops choosing them by hand on every run. The
   file is keyed by the names the script uses for its speakers, because that is
@@ -2450,6 +2460,7 @@ export async function triggersFireFlow(workflowRef, opts, deps) {
         ...(opts.imageRigOverrides
             ? { imageRigOverrides: opts.imageRigOverrides }
             : {}),
+        ...(opts.voices ? { voices: opts.voices } : {}),
     });
     if (!res.ok)
         return triggerErrorResult(res, verb, opts.json);
@@ -3313,8 +3324,10 @@ export async function run(flags, occurrences) {
                 }
             }
             let fireOverrides;
+            let fireVoices;
             try {
                 fireOverrides = parseRigOverridesFlag(occurrences, defaultDeps.readFile);
+                fireVoices = parseVoicesFlag(occurrences, defaultDeps.readFile);
             }
             catch (e) {
                 console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -3324,6 +3337,7 @@ export async function run(flags, occurrences) {
                 n,
                 text: flagString(flags, "text"),
                 imageRigOverrides: fireOverrides,
+                voices: fireVoices,
                 wait: flags["wait"] === true,
                 json,
                 onProgressLine: (line) => console.log(line),
