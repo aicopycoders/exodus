@@ -7,6 +7,19 @@ import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
 import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
+const CONCEIT_KEYS = ["podcast", "ugc", "stage", "street", "personification"];
+const STYLE_SLUGS = [
+    "pixar-3d",
+    "claymation-stop-motion",
+    "lego-toy-brick",
+    "balloon",
+    "video-game-8bit",
+];
+function joinedOr(items) {
+    if (items.length <= 1)
+        return items[0] ?? "";
+    return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+}
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -83,6 +96,7 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--no-music] [--wait] [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -108,6 +122,13 @@ Options:
                        --clear win over the same name in the file
   --rejected-draft     Print the storyboard draft the system turned down
                        (status). It was thrown away — a record only
+  --script <file>      Text file of what the ad says (start)
+  --conceit <key>      Kind of ad: ${joinedOr(CONCEIT_KEYS)} (start)
+  --style <slug>       Look: ${joinedOr(STYLE_SLUGS)} (start)
+  --direction "<note>" Note for the whole ad (start)
+  --voice-path <path>  How the voices are made (start)
+  --no-music           Leave the music bed off (start)
+  --wait               Wait until the storyboard needs a yes (start)
   --json               Machine-readable output
   --help, -h           Print this help
 
@@ -131,6 +152,7 @@ Examples:
 `.trim();
 const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
+const SCRIPT_RUNS_PATH = "/api/v2/video/script-runs";
 const RUN_PATH = "/api/v2/workflow";
 const ITEMS_PATH = "/api/v2/workflow/items";
 const REJECTED_DRAFT_PATH = "/api/v2/workflow/rejected-draft";
@@ -1006,6 +1028,182 @@ export async function startFlow(opts, deps) {
     return {
         code: waited.code,
         lines: opts.json ? waited.lines : [`Started ad run ${runId}`, `Watch it: ${url}`, "", ...waited.lines],
+    };
+}
+function nonBlank(value) {
+    if (value === undefined || value.trim().length === 0)
+        return undefined;
+    return value;
+}
+function isConceit(value) {
+    return CONCEIT_KEYS.some((key) => key === value);
+}
+export function planVideoStart(flags) {
+    const showId = nonBlank(flagString(flags, "show"));
+    const scriptFile = nonBlank(flagString(flags, "script"));
+    const conceit = nonBlank(flagString(flags, "conceit"));
+    const style = nonBlank(flagString(flags, "style"));
+    if (showId && (conceit || style)) {
+        return {
+            kind: "usage",
+            line: "Pass either --show <id>, or --conceit and --style. Not both.",
+        };
+    }
+    if (!scriptFile) {
+        return {
+            kind: "usage",
+            line: "video start needs --script <file>, a text file of what the ad says.",
+        };
+    }
+    if (showId) {
+        return {
+            kind: "show",
+            opts: {
+                showId,
+                scriptFile,
+                voicePath: flagString(flags, "voice-path"),
+                music: flags["music"] === false ? false : undefined,
+                wait: flags["wait"] === true,
+                json: flags["json"] === true,
+            },
+        };
+    }
+    if (!conceit) {
+        return {
+            kind: "usage",
+            line: `video start needs --conceit <${CONCEIT_KEYS.join("|")}>.`,
+        };
+    }
+    if (!isConceit(conceit)) {
+        return {
+            kind: "usage",
+            line: `video start --conceit must be one of ${joinedOr(CONCEIT_KEYS)}.`,
+        };
+    }
+    if (!style) {
+        return {
+            kind: "usage",
+            line: `video start needs --style <${STYLE_SLUGS.join("|")}>.`,
+        };
+    }
+    const direction = nonBlank(flagString(flags, "direction"));
+    const voicePath = nonBlank(flagString(flags, "voice-path"));
+    const opts = {
+        scriptFile,
+        conceit,
+        style,
+        wait: flags["wait"] === true,
+        json: flags["json"] === true,
+    };
+    if (direction)
+        opts.direction = direction;
+    if (voicePath)
+        opts.voicePath = voicePath;
+    if (flags["music"] === false)
+        opts.music = false;
+    return { kind: "script", opts };
+}
+function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isResolvedCard(value) {
+    if (!isRecord(value))
+        return false;
+    if (!isRecord(value.conceit) || !isRecord(value.style))
+        return false;
+    if (typeof value.conceit.key !== "string" || typeof value.conceit.label !== "string")
+        return false;
+    if (typeof value.family !== "string")
+        return false;
+    if (!("wrapper" in value))
+        return false;
+    if (value.wrapper !== null && typeof value.wrapper !== "string")
+        return false;
+    if (typeof value.style.slug !== "string" || typeof value.style.label !== "string")
+        return false;
+    return true;
+}
+function scriptStartedLines(runId, url, card) {
+    return [
+        `Started ad run ${runId}`,
+        ...(card
+            ? [
+                `Conceit: ${card.conceit.label}`,
+                `Family: ${card.family}`,
+                `Wrapper: ${card.wrapper ?? ""}`,
+                `Style: ${card.style.label}`,
+            ]
+            : ["The server did not include a resolved card."]),
+        `Watch it: ${url}`,
+    ];
+}
+function waitJsonWithCard(waited, card) {
+    const first = waited.lines[0];
+    if (typeof first !== "string")
+        return waited;
+    let parsed;
+    try {
+        parsed = JSON.parse(first);
+    }
+    catch {
+        return waited;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+        return waited;
+    return { code: waited.code, lines: [JSON.stringify({ ...parsed, card })] };
+}
+export async function startScriptFlow(opts, deps) {
+    let script;
+    try {
+        script = deps.readFile(opts.scriptFile);
+    }
+    catch (e) {
+        return {
+            code: 1,
+            lines: [
+                `Can't read the script file "${opts.scriptFile}": ${e instanceof Error ? e.message : String(e)}`,
+            ],
+        };
+    }
+    if (script.trim().length === 0) {
+        return { code: 1, lines: [`The script file "${opts.scriptFile}" is empty.`] };
+    }
+    const res = await deps.post(SCRIPT_RUNS_PATH, {
+        script,
+        conceit: opts.conceit,
+        style: opts.style,
+        ...(opts.direction ? { direction: opts.direction } : {}),
+        ...(opts.voicePath ? { voicePath: opts.voicePath } : {}),
+        ...(opts.music === false ? { music: false } : {}),
+    });
+    if (!res.ok)
+        return errorResult(res, opts.json);
+    const started = res.data;
+    if (!started.runId) {
+        return { code: 1, lines: ["The server started the ad but did not say which run it is."] };
+    }
+    const runId = started.runId;
+    const url = typeof started.url === "string" ? started.url : "";
+    const card = isResolvedCard(started.card) ? started.card : null;
+    if (!opts.wait) {
+        return {
+            code: 0,
+            lines: opts.json
+                ? [JSON.stringify({ runId, url, card })]
+                : [
+                    ...scriptStartedLines(runId, url, card),
+                    "",
+                    "Wait for the storyboard here instead: exodus video start … --wait",
+                    `Or check in whenever:                exodus video status ${runId}`,
+                ],
+        };
+    }
+    const waited = await waitFlow(runId, { json: opts.json, url }, deps);
+    if (opts.json)
+        return waitJsonWithCard(waited, card);
+    return {
+        code: waited.code,
+        lines: [...scriptStartedLines(runId, url, card), "", ...waited.lines],
     };
 }
 const POLL_INTERVAL_MS = 5000;
@@ -2147,6 +2345,9 @@ export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
 const VALUE_FLAGS = new Set([
     "show",
     "script",
+    "conceit",
+    "style",
+    "direction",
     "voice-path",
     "note",
     "out",
@@ -2200,20 +2401,12 @@ export async function run(flags, occurrences) {
     if (sub === "shows")
         return printResult(await showsFlow(json, defaultDeps));
     if (sub === "start") {
-        const showId = flagString(flags, "show");
-        const scriptFile = flagString(flags, "script");
-        if (!showId)
-            usage("video start needs --show <id>. List them with: exodus video shows");
-        if (!scriptFile)
-            usage("video start needs --script <file>, a text file of what the ad says.");
-        return printResult(await startFlow({
-            showId,
-            scriptFile,
-            voicePath: flagString(flags, "voice-path"),
-            music: flags["music"] === false ? false : undefined,
-            wait: flags["wait"] === true,
-            json,
-        }, defaultDeps));
+        const plan = planVideoStart(flags);
+        if (plan.kind === "usage")
+            usage(plan.line);
+        if (plan.kind === "show")
+            return printResult(await startFlow(plan.opts, defaultDeps));
+        return printResult(await startScriptFlow(plan.opts, defaultDeps));
     }
     const runId = rest[0];
     const needsRunId = [

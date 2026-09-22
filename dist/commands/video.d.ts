@@ -1,6 +1,7 @@
 import { type ApiResponse } from "../lib/client.js";
 import type { FlagOccurrence } from "../lib/args.js";
 import { type RunProvenance, type WorkflowRun } from "./workflow.js";
+declare const CONCEIT_KEYS: readonly ["podcast", "ugc", "stage", "street", "personification"];
 export declare const helpText: string;
 export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
@@ -328,7 +329,29 @@ export interface StartOptions {
     wait: boolean;
     json: boolean;
 }
+export interface ScriptStartOptions {
+    scriptFile: string;
+    conceit: (typeof CONCEIT_KEYS)[number];
+    style: string;
+    direction?: string;
+    voicePath?: string;
+    music?: false;
+    wait: boolean;
+    json: boolean;
+}
+export type VideoStartPlan = {
+    kind: "usage";
+    line: string;
+} | {
+    kind: "show";
+    opts: StartOptions;
+} | {
+    kind: "script";
+    opts: ScriptStartOptions;
+};
 export declare function startFlow(opts: StartOptions, deps: VideoDeps): Promise<FlowResult>;
+export declare function planVideoStart(flags: Record<string, string | boolean>): VideoStartPlan;
+export declare function startScriptFlow(opts: ScriptStartOptions, deps: VideoDeps): Promise<FlowResult>;
 export declare function waitFlow(runId: string, opts: {
     json: boolean;
     url?: string;
@@ -427,3 +450,4 @@ export declare function describeFetchFailure(err: unknown): string;
 export declare function uploadFlow(runId: string, filePath: string, durationFlag: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parsePositional(args?: string[]): string[];
 export declare function run(flags: Record<string, string | boolean>, occurrences: FlagOccurrence[]): Promise<void>;
+export {};

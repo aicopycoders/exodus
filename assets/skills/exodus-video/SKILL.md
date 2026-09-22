@@ -21,11 +21,26 @@ Your job in this skill is to drive that loop, hand over the pieces with the
 facts about them, and make whatever cut the user asked for. **How to edit is the
 user's call, not this skill's** — see "Cutting the ad".
 
+This file ships on the member's machine. It holds commands, the manifest's
+shape, and recipes for the cut. It does not hold prompt text, house primers,
+judge wording, or model instructions.
+
 ## How a run starts
 
 The ad is a saved workflow in the brand, started script-first with `exodus
 workflow run`. From there the same nodes render, `video status` reads the run,
 `video pull` writes the folder, and `video upload` and `approve` finish it.
+
+A Show is no longer required. `exodus video start` starts from a script, a
+conceit, and a style, and the same parks follow. The full line is under
+"Starting a run". An optional `--direction` note is whole-ad rules, and that
+note cannot contain a colon. "The script file" shows the right form and the
+wrong one.
+
+The Rig box on that workflow is where the run's Conceit and Style come from.
+Conceit is the family plus Wrapper, Narrator Person, and Delivery. Style is the
+look. Narrated Story is the voice-over family and Acted Story is the dialogue
+family (`familyTree.ts`). Those family names stay the code's names.
 
 ## Before anything
 
@@ -69,6 +84,8 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voic
 exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json --wait
                                                           same, with the video model speaking voices you WROTE
 exodus video status <runId>                               where it is, per scene
+exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--no-music] [--wait]
+                                                          start from a script, a conceit and a look
 ```
 
 **From the storyboard on.**
@@ -98,7 +115,15 @@ already printed the same stop block, and `workflow inbox` lists a parked video
 run, but neither shows the per-scene detail, and the checkpoint verbs cannot
 resolve a video park — see "What the CLI can and cannot do".
 
-**Where a run can stop.** Five stops, each with the exact next command printed
+**Where a run can stop.** The two video parks come in order when the run has
+both. The storyboard gate is first. You read the cards there and you set the
+voices there. Approving that gate releases the voices and the clips. That is the
+expensive part. The final watch is next, after the pieces exist, and only when
+the video node sets `finalWatch: true`. That park is for the cut. You pull, you
+cut, and you upload. Approving the upload makes it the ad. A node with
+`finalWatch` off skips the second park and the run finishes.
+
+Five stops, each with the exact next command printed
 under it:
 
 - storyboard gate: needs `approve`. When the stop block prints a `Redo one
@@ -211,11 +236,42 @@ anything:
 
 ## The script file
 
-Plain text. A `CAST:` block naming the speakers, one line per turn, then a
-`CTA:` block. The planner sizes every line at
-2.5 words per second (`WORD_LADDER_WPS`), so a turn near 14 words plans a clip
-near 6 seconds. If a line does get truncated in its clip, the manifest says so
-(`speech-cutoff`).
+Plain text. An optional `DIRECTION:` block may open the file, before `CAST:` or
+the first spoken line. Then a `CAST:` block naming the speakers, one line per
+turn, then a `CTA:` block.
+
+`DIRECTION:` carries whole-ad rules and no spoken words. The header is its own
+line. The lines under it are the rules. The block ends at a blank line, at
+`CAST:`, at `CTA:`, or at the first line that names a speaker. A second
+`DIRECTION:` block is refused. So is a `DIRECTION:` after the first spoken line.
+An empty block is refused too. The error code is `malformed-direction`.
+
+Do not put a colon inside direction prose. The reader splits a line at its first
+colon to find a speaker, so a colon in that prose is read as a name.
+
+Right.
+
+```
+DIRECTION:
+Nobody looks at the camera. The product stays on the table until the last line.
+```
+
+Wrong.
+
+```
+DIRECTION:
+Rule: nobody looks at the camera.
+```
+
+The wrong line is not direction. `Rule` is read as the speaker, and the
+block above it is empty, so the file is refused.
+
+The planner sizes every line at 2.5 words per second (`WORD_LADDER_WPS`), so a
+turn near 14 words plans a clip near 6 seconds. If a line does get truncated in
+its clip, the manifest says so (`speech-cutoff`). That finding means the clip
+cut the words off. Redo the clip. Do not speed the speech or cut it short to
+hide the finding. The product rule is under "What the product actually
+requires".
 
 ```
 CAST:
@@ -228,6 +284,15 @@ THE SOFTGEL: That's screen strain. Your eyes are begging for a break.
 CTA:
 THE SOFTGEL: Tap below and give your eyes ClearBlink.
 ```
+
+The dash in a `CAST:` line is the parser's own separator. The example above
+already shows that dash. A cast line may separate the name from the description
+with an em dash, an en dash, or a hyphen with a space on each side. Keep that
+dash on cast lines. A reader who strips it makes the line fail.
+
+Do not use a long dash in words a character says, or in words shown on screen.
+Synthesised speech reads a long dash oddly, and so does burned-in text. A spoken
+line stays `NAME: what they say`.
 
 **How many speakers you may have depends on the rig.** Three by default. A rig
 that carries saved format rules sets its own number: an ensemble rig seats more,
@@ -261,9 +326,13 @@ unattended.
 By default a workflow run's characters have no voice of their own. A character
 without one gets the run's default voice (the workflow's narrator voice) when the
 run has one; with no default either, the clip keeps the voice the video model
-invents. `exodus video voices` shows which of the three applies and is where it
-gets fixed, and it only works **before** the storyboard is approved — once clips start
-it refuses.
+invents. `exodus video voices` shows which of the three applies, and it is where you
+fix the mapping. Fix it before you approve the storyboard gate. Approving that
+gate locks the mapping, and `exodus video voices` refuses afterwards. On a
+finished clip whose voice was never applied, the later command is `exodus video
+revoice`, and that pass bills again. A clip that already went through the voice
+pass is refused there. Use `retry-clip` for that one. See "Redoing only the
+voice on finished clips".
 
 ```
 exodus video voices <runId>
@@ -337,7 +406,7 @@ nobody knows the speaker names yet. When the storyboard arrives, the voices are
 already set and `exodus video voices <runId>` shows them.
 
 **Choosing how the voices are made.** `--voice-treatment` on `workflow run` says
-HOW a run makes its voices, and it is the only door. Two
+HOW a run makes its voices, and it is the only way. Two
 kinds of answer.
 
 A name on its own picks a way of working that plays a voice you already have,
@@ -410,7 +479,8 @@ person made at a keyboard for one run, and nobody made it for the sub-workflow.
 **Written voices cannot be changed at the review.** They are chosen when the run
 starts. `exodus video voices <runId>` on a described run names the treatment and
 prints each written voice, and says plainly that `--voice-treatment` at launch is
-what changes them. Do not set a voice path in node config — it is not a door.
+what changes them. Do not set a voice path in node config. Node config does
+not set the treatment.
 
 **Where it shows up afterwards.** The launch receipt and `exodus workflow status`
 both print one line naming the treatment and the speakers who got a written
@@ -549,8 +619,9 @@ envelope also carries `overlays[]` (each with a `cueLineId` and a `placement`)
 and `audio` (`roomTone`, `music`, `sfxCues[]`) — the planner's notes on what
 should sit on top. The image and motion prompts (`framePrompt`, `videoPrompt`,
 `referencePrompt`) reach an admin key in full. A caller who cannot use video on
-this brand gets them stripped before the file arrives — they are style-pack IP
-(`redactVideoIp` in `convex/workflows.ts`).
+this brand gets them stripped before the file arrives. They are private Style
+fragment IP (`redactVideoIp` in `convex/workflows.ts`). Style pack is the
+retired name.
 
 **The narration track** (`narration.mp3` + `narration.json`). Present when the
 run recorded continuously: every narrated scene's `voText` joined into one
@@ -577,9 +648,9 @@ speech inside the clip — under the default voice treatment the video model's
 invented voice is then replaced, in place, with the cast member's pinned
 ElevenLabs voice (that is `revoiced: true`). Other treatments leave the render
 owning its own audio, e.g. lip-sync retargeting a VO track onto the video. The
-treatment is frozen on the run when it starts, and there is exactly one door
+treatment is frozen on the run when it starts, and there is exactly one flag
 that sets it: `--voice-treatment` on `workflow run` (see **Choosing how the
-voices are made**). Node config is never a door — nothing on the canvas sets a
+voices are made**). Node config never sets it. Nothing on the canvas sets a
 voice treatment, and a run that was given none renders the default. Read
 `wordsFrom` and `revoiced` per scene rather than assuming.
 
@@ -641,6 +712,11 @@ blocking the run.
   A `speech-cutoff` on the CTA scene is the one to worry about; the ad's last
   words are missing. `status` shows the checker's own wording behind each
   finding; the manifest carries only the verdict.
+- A `pass` verdict is not a review. The checks are often optimistic. Watch the
+  frames and listen to the audio before you call the run good. Two checks fail
+  the wrong way. A cast-count check can reject a silent
+  listener who belongs in the shot. A clip check can flag a clip that is fine.
+  Read the finding, then watch the scene.
 - `clipStatus: "failed"` or `"missing"` with a `keyframe`: `durationSec` is null
   (it comes from the clip), but the scene can still hold its place as a still —
   for the length of its voice track, or the storyboard's planned duration when
@@ -767,7 +843,10 @@ they want; if they have not said and are not around, say which you used and why.
 - **HyperFrames** — HTML/CSS compositions rendered to video. Suits an ad that
   needs captions, title cards, overlays or motion graphics laid over the clips.
   It is a separate skill pack; check that a `hyperframes` skill is installed
-  before offering it.
+  before offering it. The cut is made outside Exodus. `exodus video pull` is the
+  handover. The folder it writes is what the next tool reads. When a HyperFrames
+  skill pack is installed, that pack is the route for an HTML and CSS
+  composition. Do not look for a stitch inside Exodus.
 - **An NLE over MCP** — DaVinci Resolve publishes an MCP server, so a timeline
   can be built in a real editor and the user can carry on by hand afterwards.
   Suits a user who wants to keep editing after you stop. Check what MCP servers
@@ -863,6 +942,11 @@ and the approved narration are therefore not the editor's to change — reorderi
 lines, re-recording narration, or cutting words out of the CTA will ship,
 silently. Cut the pictures to the words, not the words to the pictures. If the
 words are wrong, that is a new run, not an edit.
+
+Never stretch speech, speed it up, slow it down, or cut it short so it fits a
+clip. That is a product rule, and it holds for every tool that makes the cut,
+including the bundled script. If the audio does not fit, redo the clip with
+`exodus video retry-clip`. Do not repair the fit in the editor.
 
 ## Reporting to the user
 
