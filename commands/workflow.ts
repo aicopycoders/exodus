@@ -1213,7 +1213,8 @@ export type VoicePath =
   | "lipsync-retarget"
   | "native-prompt"
   | "omni-audio-ids"
-  | "gemini-direct";
+  | "gemini-direct"
+  | "voice-first";
 
 export type RunVoiceProvenance =
   | { source: "show"; path: VoicePath }

@@ -409,7 +409,7 @@ export interface RunFormatProvenance {
     };
     specVersion: string | null;
 }
-export type VoicePath = "sts-revoice" | "lipsync-retarget" | "native-prompt" | "omni-audio-ids" | "gemini-direct";
+export type VoicePath = "sts-revoice" | "lipsync-retarget" | "native-prompt" | "omni-audio-ids" | "gemini-direct" | "voice-first";
 export type RunVoiceProvenance = {
     source: "show";
     path: VoicePath;

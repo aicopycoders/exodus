@@ -101,7 +101,7 @@ exodus video approve <runId>                              keep going
 exodus video retry-frame <runId> --node <nodeId> --scene <n>  redo one still at the pixel gate
 exodus video status <runId>                               where it is, per scene
 exodus video pull <runId> --out ./ad-<runId>              every piece + manifest.json
-exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "…"]
+exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "…"] [--voice-first]
                                                           redo one clip at the final watch
 exodus video revoice <runId> --all | --scene <n>          redo only the voice; no new video
                                                           … make the cut (your choice of tool)
@@ -602,6 +602,9 @@ scenes[]                             one per scene, in order
                                      on record when the voice pass replaced the
                                      clip with a new file; null when the clip IS
                                      that file, or there is no clip
+  voiceMode                          "voice-first" when the clip was redone voice
+                                     first (its line recorded, then the clip made
+                                     to match it); null otherwise
 provenance                           which saved rulebook this run followed:
                                      {format: {via, nodeId, rigId, rigName,
                                      rulesFrom, specVersion}}. Absent when the
@@ -746,6 +749,7 @@ is no second run, no new storyboard and no re-render of anything else.
 exodus video retry-clip <runId> --scene 3
 exodus video retry-clip <runId> --scene 3 --note "keep both hands in frame on the handshake"
 exodus video retry-clip <runId> --scene 3 --node video-2
+exodus video retry-clip <runId> --scene 3 --voice-first
 ```
 
 `--node` is only needed when a run has clips for that scene on two video steps;
@@ -768,7 +772,17 @@ revoiced and trimmed the same way, with fresh findings and fresh word timings.
 scene's motion prompt only (`withRedoDirection`,
 `scout/src/trigger/workflow-scene-retry.ts`); the spoken line still comes from
 the approved storyboard. Asking for different words in a note will not change
-them. If the words are wrong, that is a new run.
+them. If the script's words are wrong, that is a new run.
+
+**`--voice-first` fixes a clip that said its line wrong** (#2299). It is for a
+clip whose findings include `speech-mismatch`, `speech-repeat`,
+`speech-after-line` or `speech-long-pause`. The scene's line is recorded in each
+speaker's pinned ElevenLabs voice, and MiniMax (`minimax-h3/reference-to-video`)
+makes the clip to match the recording. Only that clip changes; the word check
+and the other checks still run on it. It needs an ElevenLabs key and a voice for
+every speaker in the scene, and it is refused for a scene with no spoken line.
+The clip then reads `clip: redone voice first` in `status`, carries
+`voiceMode: "voice-first"` in the manifest, and is listed in the `pull` summary.
 
 **A redo whose take fails the checks keeps the original clip.** On a finished
 clip the row stays `done` with the ORIGINAL take and only its findings are

@@ -74,6 +74,7 @@ export type ArtifactSubset = {
     speechTrimmed?: boolean;
     tailTrimmed?: boolean;
     rawStorageId?: string;
+    voiceMode?: "voice-first";
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -273,6 +274,7 @@ export interface ManifestScene {
     revoiced: boolean | null;
     speechTrimmed: boolean | null;
     rawStorageId: string | null;
+    voiceMode: "voice-first" | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;
@@ -411,7 +413,11 @@ export interface ClipRedoTarget {
     nodeId?: string;
 }
 export declare function planClipRedo(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
-export declare function retryClipFlow(runId: string, target: ClipRedoTarget, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export interface ClipRedoOptions {
+    note?: string;
+    voiceFirst?: boolean;
+}
+export declare function retryClipFlow(runId: string, target: ClipRedoTarget, { note, voiceFirst }: ClipRedoOptions, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare const VOICE_PATHS_NEVER_HEARD: Set<string>;
 export declare function planClipRevoice(run: VideoRun, items: NodeItem[], target: ClipRedoTarget): ClipRedoPlan;
 export type RevoiceTarget = ClipRedoTarget | {

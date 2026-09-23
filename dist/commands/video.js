@@ -70,7 +70,9 @@ The whole loop, in order:
 
      exodus video retry-clip <runId> --scene <n>
        Redo ONE finished clip while the run waits for the cut. Everything
-       else stays. A --note steers the motion, never the words.
+       else stays. A --note steers the motion, never the words. Add
+       --voice-first when the words came out wrong: the line is recorded in
+       the character's own voice first, then the clip is made to match it.
 
      exodus video revoice <runId> --all
        Redo only the VOICE on clips that kept the video model's own voice
@@ -93,7 +95,7 @@ Usage:
   exodus video storyboard <runId> [--json]
   exodus video approve <runId> [--approve-stale-cut] [--json]
   exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
-  exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--json]
+  exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--voice-first] [--json]
   exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
@@ -113,6 +115,9 @@ Options:
                        (retry-frame, retry-clip, revoice)
   --all                Every finished clip that kept the video model's voice
                        (revoice)
+  --voice-first        Record the scene's line in the character's own voice,
+                       then make the clip to match it (retry-clip). For a clip
+                       whose words came out wrong
   --approve-stale-cut  Deliver the cut you uploaded even though a clip changed
                        after you uploaded it (approve). Without it, approving
                        stops and names the scenes that changed
@@ -151,6 +156,7 @@ Examples:
   exodus video approve run_123
   exodus video retry-frame run_123 --node frames-1 --scene 2
   exodus video retry-clip run_123 --scene 3 --note "keep the handshake in frame"
+  exodus video retry-clip run_123 --scene 3 --voice-first
   exodus video revoice run_123 --all
   exodus video voices run_123
   exodus video voices run_123 --set C1=abc123voiceid --set "HOST 2=def456voiceid"
@@ -171,6 +177,9 @@ const FLAG_PATH = "/api/v2/video/storyboard/flag";
 const APPROVE_PATH = "/api/v2/workflow/approve";
 const SCENE_RETRY_PATH = "/api/v2/workflow/scene/retry";
 const SCENE_REVOICE_PATH = "/api/v2/workflow/scene/revoice";
+const SCENE_VOICE_FIRST_PATH = "/api/v2/workflow/scene/voice-first";
+const VOICE_FIRST_NOT_ON_THIS_SERVER = "This Exodus server cannot redo a clip voice first yet, so nothing was started and nothing " +
+    "was spent. It arrives with the next server update.";
 const REVOICE_NOT_ON_THIS_SERVER = "This Exodus server does not have the voice redo yet, so nothing was started and nothing " +
     "was spent. It arrives with the next server update.";
 const FINAL_PATH = "/api/v2/video/final";
@@ -540,6 +549,7 @@ function clipFromArtifact(sceneIndex, artifact) {
         revoiced: artifact.revoiced === true,
         speechTrimmed: artifact.speechTrimmed === true,
         rawStorageId: artifact.rawStorageId ?? null,
+        voiceMode: artifact.voiceMode ?? null,
     };
 }
 function keyframeDownload(sceneIndex, imageUrl) {
@@ -849,6 +859,7 @@ export function planPull(run, items, opts) {
             revoiced: clip ? clip.revoiced : null,
             speechTrimmed: clip ? clip.speechTrimmed : null,
             rawStorageId: clip ? clip.rawStorageId : null,
+            voiceMode: clip ? clip.voiceMode : null,
             clipStatus: item?.status ?? "missing",
             error: item?.error ?? null,
             flagged: item?.flagged === true,
@@ -922,6 +933,7 @@ export function markPullFailure(manifest, failure) {
             scene.revoiced = null;
             scene.speechTrimmed = null;
             scene.rawStorageId = null;
+            scene.voiceMode = null;
         }
         if (scene.voice === failure.file)
             scene.voice = null;
@@ -1419,8 +1431,14 @@ export async function statusFlow(runId, json, deps) {
         };
     }
     const revoicedByScene = new Set();
+    const voiceFirstByScene = new Set();
     const timedOnOriginalVoice = new Set();
     for (const artifact of outputsOfNodeKind(run, "video")) {
+        if (artifact.type === "video" &&
+            artifact.voiceMode === "voice-first" &&
+            typeof artifact.sceneIndex === "number") {
+            voiceFirstByScene.add(artifact.sceneIndex);
+        }
         if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
             revoicedByScene.add(artifact.sceneIndex);
             if ((artifact.words?.length ?? 0) > 0)
@@ -1489,6 +1507,8 @@ export async function statusFlow(runId, json, deps) {
                 lines.push(`       ${row.clip.error}`);
             if (revoicedByScene.has(sceneIndex))
                 lines.push("       voice: cast voice applied");
+            if (voiceFirstByScene.has(sceneIndex))
+                lines.push("       clip: redone voice first");
             if (timedOnOriginalVoice.has(sceneIndex)) {
                 lines.push("       word timings: measured on the original voice (close, not frame-exact)");
             }
@@ -1789,7 +1809,7 @@ function findClipRow(run, items, target) {
     }
     return { row, uploadedCut };
 }
-export async function retryClipFlow(runId, target, note, json, deps) {
+export async function retryClipFlow(runId, target, { note, voiceFirst = false }, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
@@ -1805,12 +1825,20 @@ export async function retryClipFlow(runId, target, note, json, deps) {
             lines: json ? [JSON.stringify({ ok: false, error: plan.reason })] : [plan.reason],
         };
     }
-    const res = await deps.post(SCENE_RETRY_PATH, {
+    const res = await deps.post(voiceFirst ? SCENE_VOICE_FIRST_PATH : SCENE_RETRY_PATH, {
         runId,
         nodeId: plan.nodeId,
         sceneIndex: plan.sceneIndex,
         ...(note ? { note } : {}),
     });
+    if (voiceFirst && missingRouteLine(res, "exodus video retry-clip --voice-first")) {
+        return {
+            code: 1,
+            lines: json
+                ? [JSON.stringify({ ok: false, status: 404, error: VOICE_FIRST_NOT_ON_THIS_SERVER })]
+                : [VOICE_FIRST_NOT_ON_THIS_SERVER],
+        };
+    }
     if (!res.ok)
         return errorResult(res, json);
     const triggerRunId = res.data.triggerRunId;
@@ -1829,6 +1857,7 @@ export async function retryClipFlow(runId, target, note, json, deps) {
                     reviewUrl: review,
                     warnings: plan.warnings,
                     ...(note ? { note } : {}),
+                    ...(voiceFirst ? { voiceMode: "voice-first" } : {}),
                 }),
             ],
         };
@@ -1836,7 +1865,10 @@ export async function retryClipFlow(runId, target, note, json, deps) {
     return {
         code: 0,
         lines: [
-            `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
+            voiceFirst
+                ? `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}, voice first: the line is ` +
+                    "recorded in the character's own voice, then the clip is made to match it."
+                : `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
             `triggerRunId: ${triggerRunId ?? "-"}`,
             "Every other scene stays as it is, and so do the pictures, the voices and the script.",
             ...(note
@@ -2207,6 +2239,11 @@ export async function pullFlow(runId, dir, json, deps) {
         `Every piece is indexed in ${path.join(dir, "manifest.json")} — scene numbers there are the run's own.`,
         ...musicLines(plan.manifest),
     ];
+    const voiceFirst = plan.manifest.scenes.filter((s) => s.voiceMode === "voice-first");
+    if (voiceFirst.length > 0) {
+        lines.push("", `Redone voice first (the line recorded, then the clip made to match it): ` +
+            `scene${voiceFirst.length === 1 ? "" : "s"} ${voiceFirst.map((s) => s.sceneIndex).join(", ")}`);
+    }
     const flagged = plan.manifest.scenes.filter((s) => s.flagged);
     if (flagged.length > 0) {
         lines.push("", `${flagged.length} clip${flagged.length === 1 ? "" : "s"} came back flagged — usable, but look before you cut:`);
@@ -2583,7 +2620,7 @@ export async function run(flags, occurrences) {
         if (!Number.isInteger(sceneIndex)) {
             usage(`video retry-clip --scene must be a whole scene number, not "${sceneRaw}".`);
         }
-        return printResult(await retryClipFlow(runId, { sceneIndex, nodeId: flagString(flags, "node") }, flagString(flags, "note"), json, defaultDeps));
+        return printResult(await retryClipFlow(runId, { sceneIndex, nodeId: flagString(flags, "node") }, { note: flagString(flags, "note"), voiceFirst: flags["voice-first"] === true }, json, defaultDeps));
     }
     if (sub === "revoice") {
         const sceneRaw = flagString(flags, "scene");
