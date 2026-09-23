@@ -780,7 +780,7 @@ them. If the script's words are wrong, that is a new run.
 
 **`--voice-first` fixes a clip that said its line wrong** (#2299). It is for a
 clip whose findings include `speech-mismatch`, `speech-repeat`,
-`speech-after-line` or `speech-long-pause`. The scene's line is recorded in each
+`speech-after-line`, `speech-extra-words` or `speech-long-pause`. The scene's line is recorded in each
 speaker's pinned ElevenLabs voice, and MiniMax (`minimax-h3/reference-to-video`)
 makes the clip to match the recording. Only that clip changes; the word check
 and the other checks still run on it. It needs an ElevenLabs key and a voice for

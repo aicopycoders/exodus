@@ -410,8 +410,6 @@ export function isShowAd(run) {
     return run.moduleOwned === true;
 }
 export function reviewUrl(dashboardUrl, run) {
-    if (isShowAd(run))
-        return `${dashboardUrl}/video?ad=${run._id}`;
     if (run.workflowId)
         return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
     return `${dashboardUrl}/runs/${run._id}`;

@@ -827,19 +827,16 @@ export function isShowAd(run: Pick<VideoRun, "moduleOwned">): boolean {
 }
 
 /**
- * #1851: the ONE place the CLI composes a link to a run's review page. A Show ad
- * opens on the /video page. A showless workflow run cannot, because /video
- * answers "That ad isn't here" for it (`getAdDetail` rejects it). So it
- * gets its own workflow run page instead, and the canonical /runs/<id> forwarder
- * when all the caller holds is a run id. That last one is the link the server
- * itself mints for a showless run (`dashboardAdUrl`, convex/http.ts), so a
- * server-supplied URL and one composed here agree.
+ * #1851, #2352: the ONE place the CLI composes a link to a run's review page.
+ * It never links the /video page. A paste-a-script run is module-owned but has
+ * no Show, and /video ignores `?ad=` while Shows are switched off, so that link
+ * landed members on an empty page. Every run opens on its own workflow run page,
+ * or on the canonical /runs/<id> forwarder when all the caller holds is a run id.
  */
 export function reviewUrl(
   dashboardUrl: string,
-  run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">,
+  run: Pick<VideoRun, "_id" | "workflowId">,
 ): string {
-  if (isShowAd(run)) return `${dashboardUrl}/video?ad=${run._id}`;
   if (run.workflowId) return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
   return `${dashboardUrl}/runs/${run._id}`;
 }

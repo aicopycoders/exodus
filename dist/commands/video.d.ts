@@ -257,7 +257,7 @@ export declare function resolveStopAtPark(stop: RunStop, runId: string, deps: Pi
 export declare function stageWord(stage: string): string;
 export declare function stepName(kind: string | undefined): string;
 export declare function isShowAd(run: Pick<VideoRun, "moduleOwned">): boolean;
-export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId" | "moduleOwned">): string;
+export declare function reviewUrl(dashboardUrl: string, run: Pick<VideoRun, "_id" | "workflowId">): string;
 export declare function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[];
 export declare function failedStoryboardNode(run: VideoRun): VideoRunNode | undefined;
 export declare function errorEchoesReasons(error: string | undefined, record: PlanFailureRecord | undefined): boolean;
