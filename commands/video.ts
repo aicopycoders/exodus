@@ -2942,7 +2942,12 @@ export async function retryClipFlow(
           "recorded in the character's own voice, then the clip is made to match it."
         : `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
       `triggerRunId: ${triggerRunId ?? "-"}`,
-      "Every other scene stays as it is, and so do the pictures, the voices and the script.",
+      ...(voiceFirst
+        ? [
+            "Every other scene stays as it is, and so do the pictures and the script.",
+            "A speaking character with no voice yet gets one picked and saved for the whole run.",
+          ]
+        : ["Every other scene stays as it is, and so do the pictures, the voices and the script."]),
       ...(note
         ? ["Your note steers how this clip moves. It never changes the words that are spoken."]
         : []),
