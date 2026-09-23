@@ -631,9 +631,12 @@ depends on the scene; see "Which scenes carry their voice where" below.
 terms. `script[]` is the ad's spoken words in order — `{lineId, speakerId, text}`,
 with `speakerId: null` meaning narrator VO. Each scene carries `sceneIndex`,
 `durationSec`, `dialogue[]`, `voText`, `notes`, and `lineIds` (the script lines
-that scene renders). A scene with `kind: "cutaway"` carries `cueLineId` instead:
-it is a picture-only takeover of the frame while the spoken track underneath
-keeps running, so it adds no audio and takes no place in the running order. The
+that scene renders). A scene with `kind: "cutaway"` carries `cueLineId` and a
+`cutawayType` instead. Most cutaways are a picture-only takeover of the frame
+while the spoken track underneath keeps running, so they add no audio and take
+no place in the running order. A `cutawayType: "reaction"` cutaway is the room
+reacting out loud to its cue line: it is its own short beat after that line,
+heard with its own sound while the speaker is silent. The
 envelope also carries `overlays[]` (each with a `cueLineId` and a `placement`)
 and `audio` (`roomTone`, `music`, `sfxCues[]`) — the planner's notes on what
 should sit on top. The image and motion prompts (`framePrompt`, `videoPrompt`,
@@ -898,6 +901,13 @@ Read these out of `storyboard.json` before you build anything, in any tool:
   running order. To find the moment, locate the A-roll scene whose `lineIds`
   contain the cue line, then read the start time of the first word of that line
   out of that scene's `words.json`.
+- **Reactions.** A cutaway with `cutawayType: "reaction"` is the exception. Do
+  not lay it over the speech. Put it into the running order as its own beat
+  right after its cue line ends, play its own sound (the audience laughing),
+  keep it to about 1.5 s, then carry on with the speaker. Nobody talks during
+  it. When more lines follow the cue line in the same scene, cut that scene
+  where the cue line's last word ends in its `words.json` and put the reaction
+  between the two halves.
 - **Overlays and SFX.** `overlays[]` and `audio.sfxCues[]` are cued the same
   way, by `cueLineId`. Nothing renders them for you.
 - **Captions.** Nothing is burned into any clip. Captions belong in post; the
@@ -914,12 +924,20 @@ the pieces:
   holds its last frame for the difference. The narration is never sped up,
   slowed down or cut short, so every scene plays at the speed it was recorded,
   and the word times are handed on as they were measured.
+- **It closes the dead air at the joins.** A clip that plays its own dialogue
+  keeps about 0.15 s after its last word and about 0.1 s before its first (0.25 s
+  when a different speaker answers), read from its `words.json`, so one clip
+  runs into the next like one conversation. It only ever shortens a clip's
+  silence and never cuts into a word. The ad's first lead-in and last tail, a
+  narrated scene, a still and a reaction beat are left as they are.
 - **It ignores the continuous master.** It reads only `scene-NN.voice` files;
   it never opens `narration.mp3` or `manifest.narration`. A tool that lays the
   master down whole and cuts the pictures to it keeps the read intact.
-- Otherwise: A-roll in manifest order as the spine, each cutaway laid over the
-  spine at its cued word (falling back to a proportional estimate when the scene
-  has no word times, and saying which method it used), a narrated scene's voice
+- Otherwise: A-roll in manifest order as the spine, each reaction put in as its
+  own beat of at most 1.5 s right after its cue line with its own sound, each
+  other cutaway laid over the spine at its cued word (falling back to a
+  proportional estimate when the scene has no word times, and saying which
+  method it used), a narrated scene's voice
   replacing whatever the clip recorded, a dialogue scene keeping its performed
   line, a clip-less scene becoming a still, everything normalized to 1080×1920
   at 24 fps and −16 LUFS per segment, a generated room-tone bed under the whole
@@ -931,14 +949,15 @@ the pieces:
   ad with its start and end) and `cut.srt` (the same words grouped into subtitle
   lines), named from the `--out` basename. Those times are on the finished ad's
   timeline, each scene's own word times offset by where that scene starts in the
-  cut and otherwise unaltered. Scenes with no word times leave
+  cut, less any lead-in trimmed at the join, and otherwise unaltered. Scenes with no word times leave
   gaps and are named in the report; when no scene delivered any, neither file is
   written. These sidecars are the script's own output — another tool will not
   produce them.
 
 Before uploading anything, from any tool, check what you made:
 `ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 cut.mp4`
-should be close to the sum of the scene durations you kept. A cut that is a few
+should be close to the sum of the scene durations you kept (the bundled
+script's cut runs somewhat shorter, by the silence it trimmed at the joins). A cut that is a few
 seconds long when five clips went in means a filter dropped inputs; do not
 upload it.
 

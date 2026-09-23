@@ -2,7 +2,9 @@
 // A plain first cut from a folder written by `exodus video pull`: the A-roll
 // scenes in the manifest's order make the spine, each cutaway lays over the
 // spine at the moment its cued line is spoken, a room-tone bed and the music
-// bed go underneath, and one MP4 comes out ready to upload.
+// bed go underneath, and one MP4 comes out ready to upload. A reaction
+// cutaway is the exception: it is its own short beat in the spine right after
+// its cued line ends, heard with its own sound while the speaker is silent.
 //
 //   node first-cut.mjs <pulled-dir> [--out cut.mp4] [--skip 2,5] [--no-music]
 //
@@ -11,9 +13,11 @@
 // recorded: the voice replaces the clip's audio, and the picture is fitted to
 // the voice, trimmed when the clip runs longer and held on its last frame when
 // the voice runs longer. The voice itself is never altered. A dialogue scene
-// keeps the audio it performed. A scene with no clip but a keyframe becomes a
-// still for the length of its voice track, else the storyboard's planned
-// duration. Every segment is loudness-normalized to -16 LUFS before the join.
+// keeps the audio it performed; at each join its silence before the first word
+// and after the last is cut back to a short beat, read from its word times. A
+// scene with no clip but a keyframe becomes a still for the length of its voice
+// track, else the storyboard's planned duration. Every segment is
+// loudness-normalized to -16 LUFS before the join.
 // --skip drops scenes.
 //
 // After the render it writes the whole ad's word times beside the MP4, as
@@ -30,15 +34,39 @@ const FPS = 24;
 const norm = (label) =>
   `[${label}]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,` +
   `pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${FPS},format=yuv420p`;
+/**
+ * Edges the cut chooses (join trims, reaction splits, narration lengths) land
+ * on whole frames, so the picture runs as long as its sound there and the
+ * timeline's times are the cut's times.
+ */
+const floorFrame = (t) => Math.floor(t * FPS + 1e-6) / FPS;
+const ceilFrame = (t) => Math.ceil(t * FPS - 1e-6) / FPS;
 const stereo = "aresample=48000,aformat=channel_layouts=stereo";
-/** Per-segment loudness, the level every clip was normalized to before the join. */
-const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000";
+/**
+ * Per-segment loudness, the level every clip was normalized to before the join.
+ * loudnorm stamps its output about 0.1 s late (its look-ahead), so a later
+ * atrim by time kept that much less sound than picture and every join pulled
+ * the sound further ahead (#2387). Re-stamping by sample count undoes it.
+ */
+const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,asetpts=N/SR/TB";
+/** A fade this short at each edge of a segment's sound stops a hard cut in the room tone clicking. */
+const EDGE_FADE_SEC = 0.015;
 /** Air after the last spoken word of a narrated scene, so the line lands. */
 export const TAIL_AIR_SEC = 0.8;
 /** A continuous low bed under the whole ad, so the joins between clips do not read as dead air. */
 const ROOM_TONE =
   "anoisesrc=color=brown:amplitude=0.0035:r=48000,highpass=f=60,lowpass=f=900,aformat=channel_layouts=stereo";
 const MUSIC_VOLUME = 0.18;
+/** The longest a reaction beat holds the spine (#2357); older pulls carry 4 s reaction clips. */
+export const REACTION_MAX_SEC = 1.5;
+/**
+ * The air a join keeps around its words (#2388): after one clip's last word, and
+ * before the next clip's first, less when the same speaker carries on than when
+ * someone new answers.
+ */
+export const JOIN_TAIL_SEC = 0.15;
+export const JOIN_LEAD_SAME_SPEAKER_SEC = 0.1;
+export const JOIN_LEAD_NEW_SPEAKER_SEC = 0.25;
 
 /** The word rule the planner sized every line with (scout models.ts wordCount). */
 export function wordCount(text) {
@@ -77,11 +105,17 @@ export function scenePlans(storyboard) {
   const plans = new Map();
   for (const scene of storyboard?.scenes ?? []) {
     if (typeof scene?.sceneIndex !== "number") continue;
+    const speakers = (Array.isArray(scene.dialogue) ? scene.dialogue : [])
+      .filter((turn) => hasText(turn?.line) || hasText(turn?.text))
+      .map((turn) => (hasText(turn.speaker) ? turn.speaker.trim() : null));
     plans.set(scene.sceneIndex, {
+      firstSpeaker: speakers[0] ?? null,
+      lastSpeaker: speakers.at(-1) ?? null,
       cutaway: CUTAWAY_KINDS.has(scene.kind),
       narrated: narratedScene(scene, storyboard),
       lineIds: Array.isArray(scene.lineIds) ? scene.lineIds : [],
       cueLineId: typeof scene.cueLineId === "string" ? scene.cueLineId : null,
+      cutawayType: typeof scene.cutawayType === "string" ? scene.cutawayType : null,
       durationSec: typeof scene.durationSec === "number" ? scene.durationSec : null,
     });
   }
@@ -90,12 +124,12 @@ export function scenePlans(storyboard) {
 
 /**
  * Fit a picture to its voice track. The segment always runs as long as the
- * voice plus a beat of air, because the voice is never altered. A clip that
- * runs longer is trimmed; a clip that runs shorter holds its last frame for the
- * difference. A still (no clip) simply runs the voice's length.
+ * voice plus a beat of air, to the next whole frame, because the voice is never
+ * altered. A clip that runs longer is trimmed; a clip that runs shorter holds
+ * its last frame for the difference. A still (no clip) simply runs the voice's length.
  */
 export function fitNarration({ clipSeconds, voiceSeconds }) {
-  const target = voiceSeconds + TAIL_AIR_SEC;
+  const target = ceilFrame(voiceSeconds + TAIL_AIR_SEC);
   if (clipSeconds === null) return { seconds: target, holdSec: 0, trimmedBy: 0 };
   if (target <= clipSeconds) {
     return { seconds: target, holdSec: 0, trimmedBy: clipSeconds - target };
@@ -126,6 +160,108 @@ export function cueOffsetOnSpine(spine, counts, cueLineId) {
   return null;
 }
 
+/**
+ * Where a segment's spoken cue line ends, in seconds into the segment, or null
+ * when the segment does not speak it. A cue line that closes the segment ends
+ * where the segment does.
+ */
+export function cueEndInSegment(seg, counts, cueLineId) {
+  const idx = seg.lineIds.indexOf(cueLineId);
+  if (idx === -1) return null;
+  if (idx === seg.lineIds.length - 1) return seg.seconds;
+  let through = 0;
+  let totalWords = 0;
+  seg.lineIds.forEach((id, i) => {
+    const n = counts.get(id) ?? 0;
+    totalWords += n;
+    if (i <= idx) through += n;
+  });
+  if (seg.words && seg.words.length > 0) {
+    const last = seg.words[Math.min(Math.max(through - 1, 0), seg.words.length - 1)];
+    return Math.min(Math.max(0, last?.e ?? 0), seg.seconds);
+  }
+  return totalWords > 0 ? (through / totalWords) * seg.seconds : seg.seconds;
+}
+
+/**
+ * Cut the dead air out of each join between clips that play their own sound: a
+ * clip's lead-in silence stacked on the previous clip's tail ran past a second
+ * (#2388). Each side comes back to a beat that reads as one conversation, a
+ * longer one when someone new answers. Only ever shortens, never into a word,
+ * and leaves the ad's first lead-in and last tail alone; a clip whose closing
+ * line cues a reaction is not the ad's end, since the beat follows it. Trims
+ * land on whole frames so the picture and its sound stay the same length.
+ */
+function trimJoins(spine, reactionCues) {
+  spine.forEach((seg, k) => {
+    if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) return;
+    const prev = spine[k - 1];
+    const sameSpeaker = Boolean(prev?.lastSpeaker) && prev.lastSpeaker === seg.firstSpeaker;
+    const lead = sameSpeaker ? JOIN_LEAD_SAME_SPEAKER_SEC : JOIN_LEAD_NEW_SPEAKER_SEC;
+    const firstWord = Math.min(...seg.words.map((w) => w.s));
+    const lastWord = Math.max(...seg.words.map((w) => w.e));
+    const inSec = prev ? Math.max(0, floorFrame(firstWord - lead)) : 0;
+    const endsAd = k === spine.length - 1 && !reactionCues.has(seg.lineIds.at(-1));
+    const outSec = endsAd ? seg.seconds : Math.min(seg.seconds, ceilFrame(lastWord + JOIN_TAIL_SEC));
+    if (outSec <= inSec) return;
+    const how = [];
+    if (inSec > 0) how.push(`lead-in trimmed ${inSec.toFixed(2)}s`);
+    if (outSec < seg.seconds) how.push(`tail trimmed ${(seg.seconds - outSec).toFixed(2)}s`);
+    if (how.length === 0) return;
+    seg.inSec = inSec;
+    seg.seconds = outSec - inSec;
+    seg.words = seg.words.map((w) => ({ ...w, s: w.s - inSec, e: w.e - inSec }));
+    seg.note = `${seg.note} (${how.join(", ")})`;
+  });
+}
+
+const holdFor = (seg) =>
+  seg.source === "clip" ? Math.max(0, seg.seconds - Math.max(0, seg.clipSeconds - seg.inSec)) : 0;
+
+/**
+ * Put a reaction beat into the spine right after its cue line ends, splitting
+ * the segment that speaks it when more lines follow in that segment. Returns
+ * the scene that speaks the cue, or null when no segment does.
+ */
+function placeReaction(spine, counts, reaction) {
+  for (let k = 0; k < spine.length; k++) {
+    const seg = spine[k];
+    if (seg.reaction) continue;
+    const cueEnd = cueEndInSegment(seg, counts, reaction.cueLineId);
+    if (cueEnd === null) continue;
+    const cut = Math.min(seg.seconds, ceilFrame(cueEnd));
+    const beat = {
+      sceneIndex: reaction.sceneIndex, source: reaction.source, file: reaction.file,
+      clipSeconds: reaction.source === "clip" ? reaction.seconds : null, inSec: 0,
+      seconds: Math.min(reaction.seconds, REACTION_MAX_SEC), holdSec: 0,
+      audio: reaction.hasAudio ? "clip" : "silence", voice: null, words: null, lineIds: [],
+      reaction: { cueLineId: reaction.cueLineId, cueSceneIndex: seg.sceneIndex },
+    };
+    if (cut >= seg.seconds - 0.05) {
+      spine.splice(k + 1, 0, beat);
+      return seg.sceneIndex;
+    }
+    const idx = seg.lineIds.indexOf(reaction.cueLineId);
+    const head = {
+      ...seg, seconds: cut, lineIds: seg.lineIds.slice(0, idx + 1),
+      words: seg.words ? seg.words.filter((w) => w.s < cut) : null,
+      note: `${seg.note}, until ${reaction.cueLineId} ends at ${cut.toFixed(2)}s`,
+    };
+    const tail = {
+      ...seg, inSec: seg.inSec + cut, seconds: seg.seconds - cut, lineIds: seg.lineIds.slice(idx + 1),
+      words: seg.words
+        ? seg.words.filter((w) => w.s >= cut).map((w) => ({ ...w, s: w.s - cut, e: w.e - cut }))
+        : null,
+      note: `${seg.note}, resumed at ${cut.toFixed(2)}s after reaction ${reaction.sceneIndex}`,
+    };
+    head.holdSec = holdFor(head);
+    tail.holdSec = holdFor(tail);
+    spine.splice(k, 1, head, beat, tail);
+    return seg.sceneIndex;
+  }
+  return null;
+}
+
 export function buildTimeline({ manifest, storyboard, skip, probe, exists, readWords }) {
   const plans = scenePlans(storyboard);
   const counts = lineWordCounts(storyboard);
@@ -133,11 +269,13 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
   const cutaways = [];
   const waiting = [];
   const dropped = [];
-  let startSec = 0;
 
   for (const scene of manifest?.scenes ?? []) {
     const n = scene.sceneIndex;
-    const plan = plans.get(n) ?? { cutaway: false, lineIds: [], cueLineId: null, durationSec: null };
+    const plan = plans.get(n) ?? {
+      cutaway: false, lineIds: [], cueLineId: null, cutawayType: null, durationSec: null,
+      firstSpeaker: null, lastSpeaker: null,
+    };
     if (skip.has(n)) {
       dropped.push({ n, reason: `scene ${n}: skipped by --skip` });
       continue;
@@ -145,15 +283,17 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
     const nothing = `nothing to cut with (clip ${scene.clipStatus}${scene.error ? `: ${scene.error}` : ""})`;
 
     if (plan.cutaway) {
+      const cue = { cueLineId: plan.cueLineId, reaction: plan.cutawayType === "reaction" };
       if (exists(scene.clip)) {
+        const clip = probe(scene.clip);
         waiting.push({
           sceneIndex: n, source: "clip", file: scene.clip,
-          seconds: probe(scene.clip).seconds, cueLineId: plan.cueLineId,
+          seconds: clip.seconds, hasAudio: clip.hasAudio, ...cue,
         });
       } else if (exists(scene.keyframe)) {
         waiting.push({
           sceneIndex: n, source: "still", file: scene.keyframe,
-          seconds: plan.durationSec ?? 4, cueLineId: plan.cueLineId,
+          seconds: plan.durationSec ?? 4, hasAudio: false, ...cue,
         });
       } else {
         dropped.push({ n, reason: `cutaway ${n}: ${nothing}` });
@@ -168,8 +308,8 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
     if (exists(scene.clip)) {
       const clip = probe(scene.clip);
       const base = {
-        sceneIndex: n, source: "clip", file: scene.clip, clipSeconds: clip.seconds,
-        startSec, lineIds: plan.lineIds,
+        sceneIndex: n, source: "clip", file: scene.clip, clipSeconds: clip.seconds, inSec: 0,
+        lineIds: plan.lineIds, firstSpeaker: plan.firstSpeaker, lastSpeaker: plan.lastSpeaker,
       };
       if (voice && (narrated || !clip.hasAudio)) {
         const fit = fitNarration({ clipSeconds: clip.seconds, voiceSeconds: probe(voice).seconds });
@@ -198,7 +338,6 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
           words: null, note: `${flag}, silent clip`,
         });
       }
-      startSec += spine[spine.length - 1].seconds;
       continue;
     }
     if (exists(scene.keyframe)) {
@@ -206,39 +345,59 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
         ? fitNarration({ clipSeconds: null, voiceSeconds: probe(voice).seconds })
         : { seconds: plan.durationSec ?? 4, holdSec: 0 };
       spine.push({
-        sceneIndex: n, source: "still", file: scene.keyframe, clipSeconds: null,
+        sceneIndex: n, source: "still", file: scene.keyframe, clipSeconds: null, inSec: 0,
         seconds: fit.seconds, audio: voice ? "narration" : "silence", voice, holdSec: 0,
-        startSec, lineIds: plan.lineIds,
+        lineIds: plan.lineIds,
         // #1689: on a narrated scene the words are the voice track's, and the
         // voice starts where the segment does, so they need no offset here.
         words: voice ? readWords(scene.words) : null,
         note: `${flag}${voice ? ` + ${voice}` : ", silent"} (${fit.seconds.toFixed(1)}s, clip ${scene.clipStatus})`,
       });
-      startSec += fit.seconds;
       continue;
     }
     dropped.push({ n, reason: `scene ${n}: ${nothing}` });
   }
 
-  for (const c of waiting) {
+  const noCue = (c) =>
+    c.cueLineId ? `${c.cueLineId} is spoken by no scene in the cut` : "the storyboard names no cue line";
+
+  // Joins are closed first so a reaction beat lands right after its cue line
+  // ends in the trimmed clip. Reactions change the spine, so they go in before
+  // any overlay is placed on it.
+  trimJoins(spine, new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId)));
+  for (const c of waiting.filter((w) => w.reaction)) {
+    if (!c.cueLineId || placeReaction(spine, counts, c) === null) {
+      dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${noCue(c)}` });
+    }
+  }
+  let total = 0;
+  for (const seg of spine) {
+    seg.startSec = total;
+    total += seg.seconds;
+  }
+
+  for (const c of waiting.filter((w) => !w.reaction)) {
     const cue = c.cueLineId ? cueOffsetOnSpine(spine, counts, c.cueLineId) : null;
     if (!cue) {
-      const why = c.cueLineId
-        ? `${c.cueLineId} is spoken by no scene in the cut`
-        : "the storyboard names no cue line";
-      dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${why}` });
+      dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${noCue(c)}` });
       continue;
     }
     cutaways.push({ ...c, startSec: cue.startSec, method: cue.method, spineSceneIndex: cue.spineSceneIndex });
   }
   cutaways.sort((a, b) => a.startSec - b.startSec);
+  const beats = spine.filter((seg) => seg.reaction);
   for (let i = 0; i < cutaways.length; i++) {
     const c = cutaways[i];
+    const stops = [];
     const next = cutaways[i + 1];
-    const end = Math.min(startSec, next ? next.startSec : Infinity);
-    if (c.startSec + c.seconds > end) {
-      c.seconds = Math.max(0, end - c.startSec);
-      c.cutShortBy = next && end === next.startSec ? `cutaway ${next.sceneIndex} starts` : "the ad ends";
+    if (next) stops.push({ at: next.startSec, by: `cutaway ${next.sceneIndex} starts` });
+    const beat = beats.find((b) => b.startSec >= c.startSec);
+    if (beat) stops.push({ at: beat.startSec, by: `reaction ${beat.sceneIndex} starts` });
+    stops.push({ at: total, by: "the ad ends" });
+    const stop = stops.reduce((a, b) => (b.at < a.at ? b : a));
+    if (c.startSec + c.seconds > stop.at) {
+      c.seconds = Math.max(0, stop.at - c.startSec);
+      c.cutShortBy = stop.by;
     }
   }
 
@@ -269,16 +428,28 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
         ? addInput("-i", resolve(seg.file))
         : addInput("-loop", "1", "-t", String(seg.seconds), "-i", resolve(seg.file));
     const fit = [];
-    if (seg.source === "clip" && seg.clipSeconds !== null && seg.seconds < seg.clipSeconds - 0.01) {
-      fit.push(`trim=0:${sec(seg.seconds)},setpts=PTS-STARTPTS`);
+    const inSec = seg.inSec ?? 0;
+    if (seg.source === "clip" && seg.clipSeconds !== null) {
+      const shown = seg.seconds - seg.holdSec;
+      if (inSec > 0.001 || shown < seg.clipSeconds - 0.01) {
+        // By frame number: a time printed to the millisecond can round past the
+        // frame it names and drop it.
+        const from = Math.round(inSec * FPS);
+        fit.push(`trim=start_frame=${from}:end_frame=${Math.round((inSec + shown) * FPS)},setpts=PTS-STARTPTS`);
+      }
     }
     if (seg.holdSec > 0.01) fit.push(`tpad=stop_mode=clone:stop_duration=${sec(seg.holdSec)}`);
     filters.push(`${norm(`${i}:v`)}${fit.length ? `,${fit.join(",")}` : ""}[v${i}]`);
+    // A segment split around a reaction beat starts partway into its sound too.
+    const skipIn = inSec > 0.001 ? `atrim=start=${sec(inSec)},asetpts=PTS-STARTPTS,` : "";
+    const fitSound =
+      `${LOUDNORM},apad,atrim=0:${sec(seg.seconds)},afade=t=in:d=${EDGE_FADE_SEC},` +
+      `afade=t=out:st=${sec(seg.seconds - EDGE_FADE_SEC)}:d=${EDGE_FADE_SEC}`;
     if (seg.audio === "narration") {
       const v = addInput("-i", resolve(seg.voice));
-      filters.push(`[${v}:a]${stereo},${LOUDNORM},apad,atrim=0:${sec(seg.seconds)}[a${i}]`);
+      filters.push(`[${v}:a]${stereo},${skipIn}${fitSound}[a${i}]`);
     } else if (seg.audio === "clip") {
-      filters.push(`[${i}:a]${stereo},${LOUDNORM},apad,atrim=0:${sec(seg.seconds)}[a${i}]`);
+      filters.push(`[${i}:a]${stereo},${skipIn}${fitSound}[a${i}]`);
     } else {
       filters.push(`anullsrc=r=48000:cl=stereo,atrim=0:${sec(seg.seconds)}[a${i}]`);
     }
@@ -398,6 +569,16 @@ export function inTheCut(timeline) {
   const rows = [];
   for (const seg of timeline.spine) {
     const label = seg.source === "clip" ? seg.file : `still ${seg.file}`;
+    if (seg.reaction) {
+      const sound = seg.audio === "clip" ? "its own sound" : "silent: the clip has no sound";
+      rows.push({
+        n: seg.sceneIndex,
+        line:
+          `reaction ${seg.sceneIndex}: ${label} for ${seg.seconds.toFixed(1)}s after ` +
+          `${seg.reaction.cueLineId} in scene ${seg.reaction.cueSceneIndex}, ${sound}`,
+      });
+      continue;
+    }
     rows.push({ n: seg.sceneIndex, line: `scene ${seg.sceneIndex}: ${label}${seg.note}` });
   }
   for (const c of timeline.cutaways) {
@@ -420,7 +601,7 @@ export function inTheCut(timeline) {
 export function noWordTimes(timeline) {
   const rows = timeline.spine
     .filter((seg) => !seg.words || seg.words.length === 0)
-    .map((seg) => `scene ${seg.sceneIndex} (no words.json)`);
+    .map((seg) => `scene ${seg.sceneIndex} (${seg.reaction ? "reaction" : "no words.json"})`);
   for (const c of timeline.cutaways) rows.push(`scene ${c.sceneIndex} (cutaway)`);
   return rows;
 }
@@ -478,11 +659,14 @@ function main() {
   };
   const probe = (file) => {
     const raw = execFileSync("ffprobe", [
-      "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", here(file),
+      "-v", "error", "-show_entries", "stream=codec_type,duration:stream_disposition=attached_pic:format=duration", "-of", "json", here(file),
     ]).toString();
     const info = JSON.parse(raw);
+    // A clip's container runs a few ms past its picture on the audio's padding;
+    // the picture is what the cut shows, so its length is the clip's length.
+    const picture = Number((info.streams ?? []).find((s) => s.codec_type === "video" && !s.disposition?.attached_pic)?.duration);
     return {
-      seconds: Number(info.format?.duration ?? 0),
+      seconds: picture > 0 ? picture : Number(info.format?.duration ?? 0),
       hasAudio: (info.streams ?? []).some((s) => s.codec_type === "audio"),
     };
   };
