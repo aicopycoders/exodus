@@ -320,6 +320,10 @@ export function renderQcTakeHistory(takes: ClipQcTake[] | undefined): string[] {
   return lines;
 }
 
+function redoLine(lastRedo: { label: string; reason?: string }): string {
+  return lastRedo.reason ? `${lastRedo.label}: ${lastRedo.reason}` : lastRedo.label;
+}
+
 function printDisplacedHistory(
   lines: string[],
   lastRedo: { displacedHistory?: { title: string; lines: string[] } },
@@ -417,6 +421,16 @@ export interface VideoRunNode {
    *  see". */
   hasRejectedDraft?: boolean;
   outputs?: ArtifactSubset[];
+  /** #2266: scenes of this step with nothing delivered, read by the server off
+   *  the same ledger and outputs its warning is built from. `pictureRefused`
+   *  marks a scene whose picture the video service refused, which a clip redo
+   *  alone cannot fix. Absent when none are missing, and on older backends. */
+  missingScenes?: MissingScene[];
+}
+
+export interface MissingScene {
+  sceneIndex: number;
+  pictureRefused: boolean;
 }
 
 /** The park vocabulary of BUILDER checkpoints. A video gate is none of them, so
@@ -503,6 +517,8 @@ export interface NodeItem {
     take: number;
     outcome: string;
     label: string;
+    /** #2309: why a redo that errored failed. Absent on older backends. */
+    reason?: string;
     displacedHistory?: { title: string; lines: string[] };
   };
   /** Optional resolved media from listNodeItems (ledger clips + cast identity stills). */
@@ -625,7 +641,9 @@ export type RunStop =
   // #1908: `showAd` is optional so a run snapshot taken before this shipped
   // still parses, and reads as the reduced block rather than crashing.
   | { at: "storyboard-gate"; nodeId?: string; framesNodeId?: string; showAd?: true }
-  | { at: "final-watch" }
+  // #2266: `missingScenes` is absent when every scene has a clip. `framesNodeId`
+  // is the step whose stills a refused picture is redrawn on.
+  | { at: "final-watch"; missingScenes?: MissingScene[]; framesNodeId?: string }
   | { at: "paused"; nodeId?: string; reason?: string }
   // #1687: a "repair" park rides the FAILED arm rather than a new one of its
   // own. A run parked for repair has a dead step in it — `wait` must exit
@@ -656,7 +674,7 @@ export type RunStop =
  */
 export type ResolvedStop =
   | Exclude<RunStop, { at: "final-watch" }>
-  | { at: "final-watch"; cutAttached: boolean | null };
+  | (Extract<RunStop, { at: "final-watch" }> & { cutAttached: boolean | null });
 
 const GATE_NODE_KINDS = new Set(["scene-frames", "storyboard"]);
 
@@ -711,7 +729,17 @@ export function classifyRun(run: VideoRun): RunStop {
         ...(isShowAd(run) ? { showAd: true } : {}),
       };
     }
-    if (parkedAtFinalWatch(run)) return { at: "final-watch" };
+    if (parkedAtFinalWatch(run)) {
+      const missingScenes = run.nodes
+        .filter((n) => n.kind === "video")
+        .flatMap((n) => n.missingScenes ?? []);
+      const framesNodeId = run.nodes.find((n) => n.kind === "scene-frames")?.nodeId;
+      return {
+        at: "final-watch",
+        ...(missingScenes.length > 0 ? { missingScenes } : {}),
+        ...(missingScenes.length > 0 && framesNodeId ? { framesNodeId } : {}),
+      };
+    }
     return { at: "paused", nodeId: run.pausedNodeId, reason: run.pauseReason };
   }
   const active = run.nodes.find((n) => n.status === "running");
@@ -735,7 +763,7 @@ export function resolveStop(
   cutAttached: boolean | null,
 ): ResolvedStop {
   if (stop.at !== "final-watch") return stop;
-  return { at: "final-watch", cutAttached };
+  return { ...stop, cutAttached };
 }
 
 /**
@@ -816,6 +844,49 @@ export function reviewUrl(
   return `${dashboardUrl}/runs/${run._id}`;
 }
 
+/** "scene 3" / "scenes 3 and 5" / "scenes 1, 3 and 5". */
+function scenesPhrase(scenes: number[]): string {
+  if (scenes.length === 1) return `scene ${scenes[0]}`;
+  return `scenes ${scenes.slice(0, -1).join(", ")} and ${scenes[scenes.length - 1]}`;
+}
+
+/**
+ * #2266: the final-watch park while scenes have no clip. A scene whose picture
+ * the video service refused gets the frame redraw first, because a clip redo
+ * alone resends the picture that was refused.
+ */
+function missingSceneLines(
+  missing: MissingScene[],
+  framesNodeId: string | undefined,
+  runId: string,
+  runUrl: string,
+): string[] {
+  const scenes = missing.map((m) => m.sceneIndex);
+  const lines = [
+    `Parked: ${scenesPhrase(scenes)} ${scenes.length === 1 ? "has" : "have"} no clip yet, so the ad isn't complete.`,
+  ];
+  for (const { sceneIndex, pictureRefused } of missing) {
+    if (!pictureRefused) {
+      lines.push(`Redo clip ${sceneIndex}:     exodus video retry-clip ${runId} --scene ${sceneIndex}`);
+      continue;
+    }
+    lines.push(
+      `Scene ${sceneIndex}'s picture was refused by the video service as too close to an existing character, so redraw it before redoing the clip.`,
+    );
+    lines.push(
+      framesNodeId
+        ? `Redraw frame ${sceneIndex}:  exodus video retry-frame ${runId} --node ${framesNodeId} --scene ${sceneIndex} --note "<what to change>"`
+        : `Redraw frame ${sceneIndex}:  on the run page, ${runUrl}`,
+    );
+    lines.push(`Then redo clip ${sceneIndex}: exodus video retry-clip ${runId} --scene ${sceneIndex}`);
+  }
+  lines.push(
+    "The ad can't be approved until every scene has a clip.",
+    `Watch it here:   ${runUrl}`,
+  );
+  return lines;
+}
+
 export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[] {
   if (stop.at === "storyboard-gate") {
     const lines = [
@@ -834,6 +905,11 @@ export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): st
     return lines;
   }
   if (stop.at === "final-watch") {
+    // #2266: a scene with no clip outranks every cut state below. "Every piece
+    // is made" would be false, and the server refuses the approval anyway.
+    if (stop.missingScenes?.length) {
+      return missingSceneLines(stop.missingScenes, stop.framesNodeId, runId, runUrl);
+    }
     // #1704: the ledger read failed, so every command below would be a guess —
     // "upload a cut" to someone who already has one, or "approve" to someone
     // who has nothing to approve. Say what IS known, and name the one command
@@ -2319,7 +2395,7 @@ export async function statusFlow(
       // member got a new take. The outcome goes first, above the findings that
       // explain it, and names the column it belongs to.
       if (row.clip?.lastRedo) {
-        lines.push(`       clip: ${row.clip.lastRedo.label}`);
+        lines.push(`       clip: ${redoLine(row.clip.lastRedo)}`);
         printDisplacedHistory(lines, row.clip.lastRedo);
       }
       // #1716: the take history hangs UNDER the redo outcome, so the two read
@@ -2333,7 +2409,7 @@ export async function statusFlow(
         }
       }
       if (row.voiceover?.lastRedo) {
-        lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+        lines.push(`       voice: ${redoLine(row.voiceover.lastRedo)}`);
         printDisplacedHistory(lines, row.voiceover.lastRedo);
       }
       if (row.frame?.lastRedo) lines.push(`       picture: ${row.frame.lastRedo.label}`);

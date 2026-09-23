@@ -115,6 +115,11 @@ export interface VideoRunNode {
     planFailure?: PlanFailureRecord;
     hasRejectedDraft?: boolean;
     outputs?: ArtifactSubset[];
+    missingScenes?: MissingScene[];
+}
+export interface MissingScene {
+    sceneIndex: number;
+    pictureRefused: boolean;
 }
 export type BuilderPauseReason = "taste" | "repair" | "slots" | "call" | "checkpoint";
 export interface PullCastLockMember {
@@ -162,6 +167,7 @@ export interface NodeItem {
         take: number;
         outcome: string;
         label: string;
+        reason?: string;
         displacedHistory?: {
             title: string;
             lines: string[];
@@ -221,6 +227,8 @@ export type RunStop = {
     showAd?: true;
 } | {
     at: "final-watch";
+    missingScenes?: MissingScene[];
+    framesNodeId?: string;
 } | {
     at: "paused";
     nodeId?: string;
@@ -237,10 +245,11 @@ export type RunStop = {
 };
 export type ResolvedStop = Exclude<RunStop, {
     at: "final-watch";
-}> | {
+}> | (Extract<RunStop, {
     at: "final-watch";
+}> & {
     cutAttached: boolean | null;
-};
+});
 export declare function classifyRun(run: VideoRun): RunStop;
 export declare function hasAttachedCut(items: NodeItem[]): boolean;
 export declare function resolveStop(stop: RunStop, cutAttached: boolean | null): ResolvedStop;

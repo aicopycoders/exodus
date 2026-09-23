@@ -223,6 +223,9 @@ export function renderQcTakeHistory(takes) {
     });
     return lines;
 }
+function redoLine(lastRedo) {
+    return lastRedo.reason ? `${lastRedo.label}: ${lastRedo.reason}` : lastRedo.label;
+}
 function printDisplacedHistory(lines, lastRedo) {
     const history = lastRedo.displacedHistory;
     if (!history)
@@ -346,8 +349,17 @@ export function classifyRun(run) {
                 ...(isShowAd(run) ? { showAd: true } : {}),
             };
         }
-        if (parkedAtFinalWatch(run))
-            return { at: "final-watch" };
+        if (parkedAtFinalWatch(run)) {
+            const missingScenes = run.nodes
+                .filter((n) => n.kind === "video")
+                .flatMap((n) => n.missingScenes ?? []);
+            const framesNodeId = run.nodes.find((n) => n.kind === "scene-frames")?.nodeId;
+            return {
+                at: "final-watch",
+                ...(missingScenes.length > 0 ? { missingScenes } : {}),
+                ...(missingScenes.length > 0 && framesNodeId ? { framesNodeId } : {}),
+            };
+        }
         return { at: "paused", nodeId: run.pausedNodeId, reason: run.pauseReason };
     }
     const active = run.nodes.find((n) => n.status === "running");
@@ -359,7 +371,7 @@ export function hasAttachedCut(items) {
 export function resolveStop(stop, cutAttached) {
     if (stop.at !== "final-watch")
         return stop;
-    return { at: "final-watch", cutAttached };
+    return { ...stop, cutAttached };
 }
 export async function resolveStopAtPark(stop, runId, deps) {
     if (stop.at !== "final-watch")
@@ -404,6 +416,30 @@ export function reviewUrl(dashboardUrl, run) {
         return `${dashboardUrl}/workflows/${run.workflowId}/runs/${run._id}`;
     return `${dashboardUrl}/runs/${run._id}`;
 }
+function scenesPhrase(scenes) {
+    if (scenes.length === 1)
+        return `scene ${scenes[0]}`;
+    return `scenes ${scenes.slice(0, -1).join(", ")} and ${scenes[scenes.length - 1]}`;
+}
+function missingSceneLines(missing, framesNodeId, runId, runUrl) {
+    const scenes = missing.map((m) => m.sceneIndex);
+    const lines = [
+        `Parked: ${scenesPhrase(scenes)} ${scenes.length === 1 ? "has" : "have"} no clip yet, so the ad isn't complete.`,
+    ];
+    for (const { sceneIndex, pictureRefused } of missing) {
+        if (!pictureRefused) {
+            lines.push(`Redo clip ${sceneIndex}:     exodus video retry-clip ${runId} --scene ${sceneIndex}`);
+            continue;
+        }
+        lines.push(`Scene ${sceneIndex}'s picture was refused by the video service as too close to an existing character, so redraw it before redoing the clip.`);
+        lines.push(framesNodeId
+            ? `Redraw frame ${sceneIndex}:  exodus video retry-frame ${runId} --node ${framesNodeId} --scene ${sceneIndex} --note "<what to change>"`
+            : `Redraw frame ${sceneIndex}:  on the run page, ${runUrl}`);
+        lines.push(`Then redo clip ${sceneIndex}: exodus video retry-clip ${runId} --scene ${sceneIndex}`);
+    }
+    lines.push("The ad can't be approved until every scene has a clip.", `Watch it here:   ${runUrl}`);
+    return lines;
+}
 export function stopLines(stop, runId, runUrl) {
     if (stop.at === "storyboard-gate") {
         const lines = [
@@ -420,6 +456,9 @@ export function stopLines(stop, runId, runUrl) {
         return lines;
     }
     if (stop.at === "final-watch") {
+        if (stop.missingScenes?.length) {
+            return missingSceneLines(stop.missingScenes, stop.framesNodeId, runId, runUrl);
+        }
         if (stop.cutAttached === null) {
             return [
                 "Parked: every piece is made.",
@@ -1479,7 +1518,7 @@ export async function statusFlow(runId, json, deps) {
             const row = byScene.get(sceneIndex);
             lines.push(`${String(sceneIndex).padEnd(5)}  ${itemWord(row.clip).padEnd(8)}  ${itemWord(row.voiceover).padEnd(8)}  ${itemWord(row.frame)}`);
             if (row.clip?.lastRedo) {
-                lines.push(`       clip: ${row.clip.lastRedo.label}`);
+                lines.push(`       clip: ${redoLine(row.clip.lastRedo)}`);
                 printDisplacedHistory(lines, row.clip.lastRedo);
             }
             if (row.clip?.lastRedo || row.clip?.flagged) {
@@ -1488,7 +1527,7 @@ export async function statusFlow(runId, json, deps) {
                 }
             }
             if (row.voiceover?.lastRedo) {
-                lines.push(`       voice: ${row.voiceover.lastRedo.label}`);
+                lines.push(`       voice: ${redoLine(row.voiceover.lastRedo)}`);
                 printDisplacedHistory(lines, row.voiceover.lastRedo);
             }
             if (row.frame?.lastRedo)

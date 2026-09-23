@@ -138,7 +138,11 @@ under it:
   lines under `guidance`). It is also
   the one park where a finished clip can be redone, with `retry-clip`. A run
   only reaches this park if its video node sets `finalWatch: true` — otherwise
-  it skips straight to finished.
+  it skips straight to finished. If a scene has no clip, the stop block names
+  it instead (`stop.missingScenes` in `--json`) and approval is refused until
+  it has one. A scene whose picture the video service refused needs
+  `retry-frame --note` before `retry-clip`; the clip redo alone resends the
+  refused picture.
 - paused: a builder checkpoint neither video verb resolves —
   `exodus workflow checkpoint <runId>` is the verb for that one.
 - failed: `status` shows how far it got, and a `--wait` that was running exits
