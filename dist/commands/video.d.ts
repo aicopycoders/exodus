@@ -2,6 +2,8 @@ import { type ApiResponse } from "../lib/client.js";
 import type { FlagOccurrence } from "../lib/args.js";
 import { type RunProvenance, type WorkflowRun } from "./workflow.js";
 declare const CONCEIT_KEYS: readonly ["podcast", "ugc", "stage", "street", "personification"];
+declare const VOICE_MODES: readonly ["native", "voice-first"];
+type VoiceMode = (typeof VOICE_MODES)[number];
 export declare const helpText: string;
 export declare const VOICES_PATH = "/api/v2/video/voices";
 export interface ClipWord {
@@ -139,6 +141,8 @@ export interface VideoRun {
     pauseAhead?: WorkflowRun["pauseAhead"];
     castLock?: PullCastLock | null;
     provenance?: RunProvenance;
+    musicBed?: boolean;
+    videoChoice?: RunVideoChoice;
     workflowId?: string;
     moduleOwned?: boolean;
 }
@@ -290,6 +294,14 @@ export interface ManifestCastRef {
     voiceLabel: string | null;
     voiceDescription: string | null;
 }
+export type MusicBedState = "on" | "off" | "unknown";
+export interface RunVideoChoice {
+    videoModel: string;
+    videoModelLabel: string;
+    voiceMode: string;
+    voiceModeLabel: string;
+}
+export declare const MUSIC_HEARD_CODE = "music-heard";
 export interface VideoManifest {
     runId: string;
     pulledAt: string;
@@ -297,6 +309,8 @@ export interface VideoManifest {
     storyboard: string | null;
     reference: string | null;
     music: string | null;
+    musicBed: MusicBedState;
+    musicHeardScenes: number[];
     cast: ManifestCastRef[];
     narration: {
         file: string;
@@ -305,8 +319,13 @@ export interface VideoManifest {
     scenes: ManifestScene[];
     failed: PullFailure[];
     provenance?: RunProvenance;
+    videoChoice?: {
+        videoModel: string;
+        voiceMode: string;
+    };
 }
 export declare const CAST_LEDGER_BASE: number;
+export declare function musicBedState(run: VideoRun): MusicBedState;
 export interface PullPlan {
     downloads: PullDownload[];
     texts: PullTextFile[];
@@ -335,7 +354,9 @@ export interface ScriptStartOptions {
     style: string;
     direction?: string;
     voicePath?: string;
-    music?: false;
+    videoModel?: string;
+    voiceMode?: VoiceMode;
+    music?: boolean;
     wait: boolean;
     json: boolean;
 }
@@ -350,7 +371,15 @@ export type VideoStartPlan = {
     opts: ScriptStartOptions;
 };
 export declare function startFlow(opts: StartOptions, deps: VideoDeps): Promise<FlowResult>;
-export declare function planVideoStart(flags: Record<string, string | boolean>): VideoStartPlan;
+export type MusicChoice = {
+    ok: true;
+    music: boolean | undefined;
+} | {
+    ok: false;
+    line: string;
+};
+export declare function planMusicChoice(occurrences: FlagOccurrence[]): MusicChoice;
+export declare function planVideoStart(flags: Record<string, string | boolean>, occurrences: FlagOccurrence[]): VideoStartPlan;
 export declare function startScriptFlow(opts: ScriptStartOptions, deps: VideoDeps): Promise<FlowResult>;
 export declare function waitFlow(runId: string, opts: {
     json: boolean;

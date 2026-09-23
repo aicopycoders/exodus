@@ -15,6 +15,8 @@ import {
 import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 
 const CONCEIT_KEYS = ["podcast", "ugc", "stage", "street", "personification"] as const;
+const VOICE_MODES = ["native", "voice-first"] as const;
+type VoiceMode = (typeof VOICE_MODES)[number];
 const STYLE_SLUGS = [
   "pixar-3d",
   "claymation-stop-motion",
@@ -32,7 +34,8 @@ export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
 The dashboard makes the PIECES of an ad: the storyboard, one picture per scene,
-one voice track per scene, one video clip per scene, plus the music bed. It does
+one voice track per scene, one video clip per scene, and a music bed if you
+asked for one with --music. It does
 not make the finished ad. You pull the pieces to a folder, cut them together
 with whatever editing tools you like, and upload the cut back.
 
@@ -104,7 +107,7 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--no-music] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--wait] [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -135,7 +138,13 @@ Options:
   --style <slug>       Look: ${joinedOr(STYLE_SLUGS)} (start)
   --direction "<note>" Note for the whole ad (start)
   --voice-path <path>  How the voices are made (start)
-  --no-music           Leave the music bed off (start)
+  --video-model <id>   Which video model films this ad, instead of the kind of
+                       ad's own default (start, with --conceit)
+  --voice <mode>       native: the video model speaks the lines. voice-first:
+                       the lines are recorded first (start, with --conceit)
+  --music              Put a music bed under the ad (start). An ad has no music
+                       unless you ask for it here
+  --no-music           Leave the music bed off (start), which it already is
   --wait               Wait until the storyboard needs a yes (start)
   --json               Machine-readable output
   --help, -h           Print this help
@@ -432,6 +441,16 @@ export interface VideoRun {
    * on every backend older than #1869.
    */
   provenance?: RunProvenance;
+  /**
+   * #2247: whether this run has a music bed, as the run itself reports it.
+   * Absent on every backend older than #2247 and on runs started before it —
+   * and an absence is "nobody recorded it", never "off". A run that predates
+   * the field had a bed whenever its Show said so, which is not knowable here.
+   */
+  musicBed?: boolean;
+  /** #2282: the video model and voice mode a paste-a-script run used. Absent on
+   *  every other run and on backends older than #2282. */
+  videoChoice?: RunVideoChoice;
   /** The saved workflow this run executed (`projectRun`, convex/workflows.ts). */
   workflowId?: string;
   /** #1851: set only when the run's workflow row is module-owned, which is what
@@ -1003,6 +1022,19 @@ export interface ManifestCastRef {
   voiceDescription: string | null;
 }
 
+export type MusicBedState = "on" | "off" | "unknown";
+
+export interface RunVideoChoice {
+  videoModel: string;
+  videoModelLabel: string;
+  voiceMode: string;
+  voiceModeLabel: string;
+}
+
+/** #2247/#819: the per-clip warning a run raises when the video model baked
+ *  music into a scene. Matched by code, never by its wording. */
+export const MUSIC_HEARD_CODE = "music-heard";
+
 export interface VideoManifest {
   runId: string;
   pulledAt: string;
@@ -1010,6 +1042,20 @@ export interface VideoManifest {
   storyboard: string | null;
   reference: string | null;
   music: string | null;
+  /**
+   * #2247: what the run says about its bed, which is a different question from
+   * the `music` filename above — a run can say "on" and still have no bed file
+   * yet, or lose the file to a failed download. "unknown" is a run made before
+   * the run carried the answer; it is not "off".
+   */
+  musicBed: MusicBedState;
+  /**
+   * #2247: the scenes whose clip came back with music baked into it by the
+   * video model, from the run's own per-clip measurement (#819). Same scene
+   * numbers as `scenes[].sceneIndex`, so a run with no bed can be checked scene
+   * by scene rather than only by the absence of a bed file.
+   */
+  musicHeardScenes: number[];
   cast: ManifestCastRef[];
   /** Continuous master take, or null when the run has only per-scene VO. */
   narration: { file: string; timing: string } | null;
@@ -1020,9 +1066,17 @@ export interface VideoManifest {
    * run carried one, so a manifest from a run that followed none is unchanged.
    */
   provenance?: RunProvenance;
+  /** #2282: which video model and voice mode made the clips. Written only when
+   *  the run recorded them. */
+  videoChoice?: { videoModel: string; voiceMode: string };
 }
 
 export const CAST_LEDGER_BASE = HELPER_LEDGER_BASE + 10000;
+
+export function musicBedState(run: VideoRun): MusicBedState {
+  if (run.musicBed === undefined) return "unknown";
+  return run.musicBed ? "on" : "off";
+}
 
 function isPullSceneIndex(sceneIndex: number): boolean {
   return sceneIndex >= 0 && sceneIndex < HELPER_LEDGER_BASE;
@@ -1494,6 +1548,10 @@ export function planPull(
       storyboard,
       reference: reference?.file ?? null,
       music: music?.file ?? null,
+      musicBed: musicBedState(run),
+      musicHeardScenes: scenes
+        .filter((scene) => scene.findings.some((f) => f.code === MUSIC_HEARD_CODE))
+        .map((scene) => scene.sceneIndex),
       cast,
       narration: narrationDownload
         ? { file: narrationDownload.file, timing: "narration.json" }
@@ -1502,6 +1560,14 @@ export function planPull(
       failed: [],
       ...(run.provenance?.format || run.provenance?.voice
         ? { provenance: run.provenance }
+        : {}),
+      ...(run.videoChoice
+        ? {
+            videoChoice: {
+              videoModel: run.videoChoice.videoModel,
+              voiceMode: run.videoChoice.voiceMode,
+            },
+          }
         : {}),
     },
   };
@@ -1623,6 +1689,7 @@ export interface StartOptions {
   showId: string;
   scriptFile: string;
   voicePath?: string;
+  /** #2247: see `planMusicChoice`. Undefined is "nobody said". */
   music?: boolean;
   wait: boolean;
   json: boolean;
@@ -1634,7 +1701,10 @@ export interface ScriptStartOptions {
   style: string;
   direction?: string;
   voicePath?: string;
-  music?: false;
+  videoModel?: string;
+  voiceMode?: VoiceMode;
+  /** #2247: see `planMusicChoice`. Undefined is "nobody said". */
+  music?: boolean;
   wait: boolean;
   json: boolean;
 }
@@ -1664,7 +1734,8 @@ export async function startFlow(opts: StartOptions, deps: VideoDeps): Promise<Fl
     showId: opts.showId,
     script,
     ...(opts.voicePath ? { voicePath: opts.voicePath } : {}),
-    ...(opts.music === false ? { music: false } : {}),
+    // A Show's own setting is the default here, so both answers have to travel.
+    ...(opts.music === undefined ? {} : { music: opts.music }),
   });
   if (!res.ok) return errorResult(res, opts.json);
   const started = res.data as { runId?: string; url?: string };
@@ -1700,11 +1771,81 @@ function nonBlank(value: string | undefined): string | undefined {
   return value;
 }
 
+function isVoiceMode(value: string): value is VoiceMode {
+  return VOICE_MODES.some((mode) => mode === value);
+}
+
 function isConceit(value: string): value is (typeof CONCEIT_KEYS)[number] {
   return CONCEIT_KEYS.some((key) => key === value);
 }
 
-export function planVideoStart(flags: Record<string, string | boolean>): VideoStartPlan {
+export type MusicChoice = { ok: true; music: boolean | undefined } | { ok: false; line: string };
+
+/**
+ * #2247: the music answer as one tri-state. `--music` is on, `--no-music` is
+ * off, `--music=true|false` and `--music true|false` write the same two answers
+ * out, and undefined is "nobody said" — which each door reads as its own
+ * default: a Show keeps the Show's setting, a paste-a-script run gets no bed.
+ *
+ * Read from `occurrences`, not `flags`: #2258 found that `parseArgs` files
+ * `--music=false` under the whole key `music=false`, so a reader of `flags`
+ * alone sees no music answer at all and quietly starts the run with a bed.
+ * Last one typed wins, the rule `flags` already follows.
+ */
+export function planMusicChoice(occurrences: FlagOccurrence[]): MusicChoice {
+  let music: boolean | undefined;
+  for (const { flag, value } of occurrences) {
+    if (flag === "no-music") {
+      music = false;
+      continue;
+    }
+    if (flag !== "music") continue;
+    // `parseArgs` records the next word here even when that word is itself a
+    // flag, so `--music --wait` is a bare `--music`, not `--music "--wait"`.
+    if (value === undefined || value.startsWith("--")) {
+      music = true;
+      continue;
+    }
+    const word = value.trim().toLowerCase();
+    // Two literal comparisons, not a map lookup: an object map would answer
+    // `--music=constructor` from the prototype chain and let it through.
+    const literal = word === "true" ? true : word === "false" ? false : undefined;
+    if (literal === undefined) {
+      return {
+        ok: false,
+        line: `video start --music takes true or false, or no value at all (got "${value}").`,
+      };
+    }
+    music = literal;
+  }
+  return { ok: true, music };
+}
+
+type ValueFlag = { ok: true; value: string | undefined } | { ok: false; line: string };
+
+/**
+ * #2282: a flag that must carry a value, read from `occurrences` so that
+ * `--video-model=veo3` counts (parseArgs files it under the whole key) and a
+ * bare `--video-model` or `--video-model --wait` is refused. Dropping either
+ * would start a paid run on the recipe's default. Last one typed wins.
+ */
+function planValueFlag(occurrences: FlagOccurrence[], name: string): ValueFlag {
+  let value: string | undefined;
+  for (const occurrence of occurrences) {
+    if (occurrence.flag !== name) continue;
+    const given = occurrence.value;
+    if (given === undefined || given.startsWith("--") || given.trim().length === 0) {
+      return { ok: false, line: `video start --${name} needs a value.` };
+    }
+    value = given.trim();
+  }
+  return { ok: true, value };
+}
+
+export function planVideoStart(
+  flags: Record<string, string | boolean>,
+  occurrences: FlagOccurrence[],
+): VideoStartPlan {
   const showId = nonBlank(flagString(flags, "show"));
   const scriptFile = nonBlank(flagString(flags, "script"));
   const conceit = nonBlank(flagString(flags, "conceit"));
@@ -1722,6 +1863,26 @@ export function planVideoStart(flags: Record<string, string | boolean>): VideoSt
       line: "video start needs --script <file>, a text file of what the ad says.",
     };
   }
+  const musicChoice = planMusicChoice(occurrences);
+  if (!musicChoice.ok) return { kind: "usage", line: musicChoice.line };
+  const videoModelFlag = planValueFlag(occurrences, "video-model");
+  if (!videoModelFlag.ok) return { kind: "usage", line: videoModelFlag.line };
+  const voiceFlag = planValueFlag(occurrences, "voice");
+  if (!voiceFlag.ok) return { kind: "usage", line: voiceFlag.line };
+  const videoModel = videoModelFlag.value;
+  const voiceMode = voiceFlag.value;
+  if (showId && (videoModel || voiceMode)) {
+    return {
+      kind: "usage",
+      line: "--video-model and --voice work with --conceit, not --show. A Show films on its own model.",
+    };
+  }
+  if (voiceMode && !isVoiceMode(voiceMode)) {
+    return {
+      kind: "usage",
+      line: `video start --voice must be native or voice-first (got "${voiceMode}").`,
+    };
+  }
   if (showId) {
     return {
       kind: "show",
@@ -1729,7 +1890,7 @@ export function planVideoStart(flags: Record<string, string | boolean>): VideoSt
         showId,
         scriptFile,
         voicePath: flagString(flags, "voice-path"),
-        music: flags["music"] === false ? false : undefined,
+        music: musicChoice.music,
         wait: flags["wait"] === true,
         json: flags["json"] === true,
       },
@@ -1765,7 +1926,9 @@ export function planVideoStart(flags: Record<string, string | boolean>): VideoSt
   };
   if (direction) opts.direction = direction;
   if (voicePath) opts.voicePath = voicePath;
-  if (flags["music"] === false) opts.music = false;
+  if (videoModel) opts.videoModel = videoModel;
+  if (voiceMode && isVoiceMode(voiceMode)) opts.voiceMode = voiceMode;
+  if (musicChoice.music !== undefined) opts.music = musicChoice.music;
   return { kind: "script", opts };
 }
 
@@ -1791,7 +1954,23 @@ function isResolvedCard(value: unknown): value is ResolvedCard {
   return true;
 }
 
-function scriptStartedLines(runId: string, url: string, card: ResolvedCard | null): string[] {
+interface StartedVideoChoice {
+  videoModel: string;
+  voiceMode: string;
+}
+
+function startedVideoChoice(value: unknown): StartedVideoChoice | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.videoModel !== "string" || typeof value.voiceMode !== "string") return null;
+  return { videoModel: value.videoModel, voiceMode: value.voiceMode };
+}
+
+function scriptStartedLines(
+  runId: string,
+  url: string,
+  card: ResolvedCard | null,
+  video: StartedVideoChoice | null,
+): string[] {
   return [
     `Started ad run ${runId}`,
     ...(card
@@ -1802,11 +1981,16 @@ function scriptStartedLines(runId: string, url: string, card: ResolvedCard | nul
           `Style: ${card.style.label}`,
         ]
       : ["The server did not include a resolved card."]),
+    ...(video ? [`Video model: ${video.videoModel}`, `Voice: ${video.voiceMode}`] : []),
     `Watch it: ${url}`,
   ];
 }
 
-function waitJsonWithCard(waited: FlowResult, card: ResolvedCard | null): FlowResult {
+function waitJsonWithCard(
+  waited: FlowResult,
+  card: ResolvedCard | null,
+  video: StartedVideoChoice | null,
+): FlowResult {
   const first = waited.lines[0];
   if (typeof first !== "string") return waited;
   let parsed: unknown;
@@ -1816,7 +2000,10 @@ function waitJsonWithCard(waited: FlowResult, card: ResolvedCard | null): FlowRe
     return waited;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return waited;
-  return { code: waited.code, lines: [JSON.stringify({ ...parsed, card })] };
+  return {
+    code: waited.code,
+    lines: [JSON.stringify({ ...parsed, card, ...(video ? { videoChoice: video } : {}) })],
+  };
 }
 
 export async function startScriptFlow(
@@ -1844,24 +2031,34 @@ export async function startScriptFlow(
     style: opts.style,
     ...(opts.direction ? { direction: opts.direction } : {}),
     ...(opts.voicePath ? { voicePath: opts.voicePath } : {}),
-    ...(opts.music === false ? { music: false } : {}),
+    ...(opts.videoModel ? { videoModel: opts.videoModel } : {}),
+    ...(opts.voiceMode ? { voiceMode: opts.voiceMode } : {}),
+    // #2247: a paste-a-script run has no bed unless it is asked for, so "off"
+    // and "nobody said" are the same request. Only "on" has anything to send.
+    ...(opts.music === true ? { music: true } : {}),
   });
   if (!res.ok) return errorResult(res, opts.json);
-  const started = res.data as { runId?: string; url?: string; card?: unknown };
+  const started = res.data as {
+    runId?: string;
+    url?: string;
+    card?: unknown;
+    videoChoice?: unknown;
+  };
   if (!started.runId) {
     return { code: 1, lines: ["The server started the ad but did not say which run it is."] };
   }
   const runId = started.runId;
   const url = typeof started.url === "string" ? started.url : "";
   const card = isResolvedCard(started.card) ? started.card : null;
+  const video = startedVideoChoice(started.videoChoice);
 
   if (!opts.wait) {
     return {
       code: 0,
       lines: opts.json
-        ? [JSON.stringify({ runId, url, card })]
+        ? [JSON.stringify({ runId, url, card, ...(video ? { videoChoice: video } : {}) })]
         : [
-            ...scriptStartedLines(runId, url, card),
+            ...scriptStartedLines(runId, url, card, video),
             "",
             "Wait for the storyboard here instead: exodus video start … --wait",
             `Or check in whenever:                exodus video status ${runId}`,
@@ -1870,10 +2067,10 @@ export async function startScriptFlow(
   }
 
   const waited = await waitFlow(runId, { json: opts.json, url }, deps);
-  if (opts.json) return waitJsonWithCard(waited, card);
+  if (opts.json) return waitJsonWithCard(waited, card, video);
   return {
     code: waited.code,
-    lines: [...scriptStartedLines(runId, url, card), "", ...waited.lines],
+    lines: [...scriptStartedLines(runId, url, card, video), "", ...waited.lines],
   };
 }
 
@@ -2016,6 +2213,10 @@ export async function statusFlow(
           hasFinal,
           warnings,
           guidance,
+          // #2247: whether this run has a bed. Absent when the server said
+          // nothing, under the same rule as the two fields below — an absence
+          // is "this backend does not say", never "off".
+          ...(run.musicBed === undefined ? {} : { musicBed: run.musicBed }),
           // Both fields stay ABSENT when the server sent none. An empty record
           // would read as "nothing happened", and an explicit
           // `hasRejectedDraft: false` would tell an unentitled caller there is
@@ -3098,6 +3299,16 @@ export function voiceSheetLines(sheet: CastVoiceSheet): string[] {
   return lines;
 }
 
+/** #2247: the bed, then the scenes the video model put music into by itself.
+ *  The second is why "music: off" can still need a listen. */
+function musicLines(manifest: VideoManifest): string[] {
+  const lines = [`music: ${manifest.musicBed}`];
+  if (manifest.musicHeardScenes.length > 0) {
+    lines.push(`music heard in scene ${manifest.musicHeardScenes.join(", ")}`);
+  }
+  return lines;
+}
+
 export async function pullFlow(
   runId: string,
   dir: string,
@@ -3157,6 +3368,7 @@ export async function pullFlow(
   const lines = [
     `Pulled ${wrote} files into ${dir}`,
     `Every piece is indexed in ${path.join(dir, "manifest.json")} — scene numbers there are the run's own.`,
+    ...musicLines(plan.manifest),
   ];
   const flagged = plan.manifest.scenes.filter((s) => s.flagged);
   if (flagged.length > 0) {
@@ -3462,6 +3674,8 @@ const VALUE_FLAGS = new Set([
   "style",
   "direction",
   "voice-path",
+  "video-model",
+  "voice",
   "note",
   "out",
   "file",
@@ -3520,7 +3734,7 @@ export async function run(
   if (sub === "shows") return printResult(await showsFlow(json, defaultDeps));
 
   if (sub === "start") {
-    const plan = planVideoStart(flags);
+    const plan = planVideoStart(flags, occurrences);
     if (plan.kind === "usage") usage(plan.line);
     if (plan.kind === "show") return printResult(await startFlow(plan.opts, defaultDeps));
     return printResult(await startScriptFlow(plan.opts, defaultDeps));

@@ -8,6 +8,7 @@ import { hasBinary } from "../lib/preflight.js";
 import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
 import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
 const CONCEIT_KEYS = ["podcast", "ugc", "stage", "street", "personification"];
+const VOICE_MODES = ["native", "voice-first"];
 const STYLE_SLUGS = [
     "pixar-3d",
     "claymation-stop-motion",
@@ -24,7 +25,8 @@ export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
 The dashboard makes the PIECES of an ad: the storyboard, one picture per scene,
-one voice track per scene, one video clip per scene, plus the music bed. It does
+one voice track per scene, one video clip per scene, and a music bed if you
+asked for one with --music. It does
 not make the finished ad. You pull the pieces to a folder, cut them together
 with whatever editing tools you like, and upload the cut back.
 
@@ -96,7 +98,7 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--no-music] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--wait] [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -127,7 +129,13 @@ Options:
   --style <slug>       Look: ${joinedOr(STYLE_SLUGS)} (start)
   --direction "<note>" Note for the whole ad (start)
   --voice-path <path>  How the voices are made (start)
-  --no-music           Leave the music bed off (start)
+  --video-model <id>   Which video model films this ad, instead of the kind of
+                       ad's own default (start, with --conceit)
+  --voice <mode>       native: the video model speaks the lines. voice-first:
+                       the lines are recorded first (start, with --conceit)
+  --music              Put a music bed under the ad (start). An ad has no music
+                       unless you ask for it here
+  --no-music           Leave the music bed off (start), which it already is
   --wait               Wait until the storyboard needs a yes (start)
   --json               Machine-readable output
   --help, -h           Print this help
@@ -484,7 +492,13 @@ export function planFailureLines(node, runId) {
     }
     return lines;
 }
+export const MUSIC_HEARD_CODE = "music-heard";
 export const CAST_LEDGER_BASE = HELPER_LEDGER_BASE + 10000;
+export function musicBedState(run) {
+    if (run.musicBed === undefined)
+        return "unknown";
+    return run.musicBed ? "on" : "off";
+}
 function isPullSceneIndex(sceneIndex) {
     return sceneIndex >= 0 && sceneIndex < HELPER_LEDGER_BASE;
 }
@@ -862,6 +876,10 @@ export function planPull(run, items, opts) {
             storyboard,
             reference: reference?.file ?? null,
             music: music?.file ?? null,
+            musicBed: musicBedState(run),
+            musicHeardScenes: scenes
+                .filter((scene) => scene.findings.some((f) => f.code === MUSIC_HEARD_CODE))
+                .map((scene) => scene.sceneIndex),
             cast,
             narration: narrationDownload
                 ? { file: narrationDownload.file, timing: "narration.json" }
@@ -870,6 +888,14 @@ export function planPull(run, items, opts) {
             failed: [],
             ...(run.provenance?.format || run.provenance?.voice
                 ? { provenance: run.provenance }
+                : {}),
+            ...(run.videoChoice
+                ? {
+                    videoChoice: {
+                        videoModel: run.videoChoice.videoModel,
+                        voiceMode: run.videoChoice.voiceMode,
+                    },
+                }
                 : {}),
         },
     };
@@ -1001,7 +1027,7 @@ export async function startFlow(opts, deps) {
         showId: opts.showId,
         script,
         ...(opts.voicePath ? { voicePath: opts.voicePath } : {}),
-        ...(opts.music === false ? { music: false } : {}),
+        ...(opts.music === undefined ? {} : { music: opts.music }),
     });
     if (!res.ok)
         return errorResult(res, opts.json);
@@ -1035,10 +1061,51 @@ function nonBlank(value) {
         return undefined;
     return value;
 }
+function isVoiceMode(value) {
+    return VOICE_MODES.some((mode) => mode === value);
+}
 function isConceit(value) {
     return CONCEIT_KEYS.some((key) => key === value);
 }
-export function planVideoStart(flags) {
+export function planMusicChoice(occurrences) {
+    let music;
+    for (const { flag, value } of occurrences) {
+        if (flag === "no-music") {
+            music = false;
+            continue;
+        }
+        if (flag !== "music")
+            continue;
+        if (value === undefined || value.startsWith("--")) {
+            music = true;
+            continue;
+        }
+        const word = value.trim().toLowerCase();
+        const literal = word === "true" ? true : word === "false" ? false : undefined;
+        if (literal === undefined) {
+            return {
+                ok: false,
+                line: `video start --music takes true or false, or no value at all (got "${value}").`,
+            };
+        }
+        music = literal;
+    }
+    return { ok: true, music };
+}
+function planValueFlag(occurrences, name) {
+    let value;
+    for (const occurrence of occurrences) {
+        if (occurrence.flag !== name)
+            continue;
+        const given = occurrence.value;
+        if (given === undefined || given.startsWith("--") || given.trim().length === 0) {
+            return { ok: false, line: `video start --${name} needs a value.` };
+        }
+        value = given.trim();
+    }
+    return { ok: true, value };
+}
+export function planVideoStart(flags, occurrences) {
     const showId = nonBlank(flagString(flags, "show"));
     const scriptFile = nonBlank(flagString(flags, "script"));
     const conceit = nonBlank(flagString(flags, "conceit"));
@@ -1055,6 +1122,29 @@ export function planVideoStart(flags) {
             line: "video start needs --script <file>, a text file of what the ad says.",
         };
     }
+    const musicChoice = planMusicChoice(occurrences);
+    if (!musicChoice.ok)
+        return { kind: "usage", line: musicChoice.line };
+    const videoModelFlag = planValueFlag(occurrences, "video-model");
+    if (!videoModelFlag.ok)
+        return { kind: "usage", line: videoModelFlag.line };
+    const voiceFlag = planValueFlag(occurrences, "voice");
+    if (!voiceFlag.ok)
+        return { kind: "usage", line: voiceFlag.line };
+    const videoModel = videoModelFlag.value;
+    const voiceMode = voiceFlag.value;
+    if (showId && (videoModel || voiceMode)) {
+        return {
+            kind: "usage",
+            line: "--video-model and --voice work with --conceit, not --show. A Show films on its own model.",
+        };
+    }
+    if (voiceMode && !isVoiceMode(voiceMode)) {
+        return {
+            kind: "usage",
+            line: `video start --voice must be native or voice-first (got "${voiceMode}").`,
+        };
+    }
     if (showId) {
         return {
             kind: "show",
@@ -1062,7 +1152,7 @@ export function planVideoStart(flags) {
                 showId,
                 scriptFile,
                 voicePath: flagString(flags, "voice-path"),
-                music: flags["music"] === false ? false : undefined,
+                music: musicChoice.music,
                 wait: flags["wait"] === true,
                 json: flags["json"] === true,
             },
@@ -1099,8 +1189,12 @@ export function planVideoStart(flags) {
         opts.direction = direction;
     if (voicePath)
         opts.voicePath = voicePath;
-    if (flags["music"] === false)
-        opts.music = false;
+    if (videoModel)
+        opts.videoModel = videoModel;
+    if (voiceMode && isVoiceMode(voiceMode))
+        opts.voiceMode = voiceMode;
+    if (musicChoice.music !== undefined)
+        opts.music = musicChoice.music;
     return { kind: "script", opts };
 }
 function isRecord(value) {
@@ -1123,7 +1217,14 @@ function isResolvedCard(value) {
         return false;
     return true;
 }
-function scriptStartedLines(runId, url, card) {
+function startedVideoChoice(value) {
+    if (!isRecord(value))
+        return null;
+    if (typeof value.videoModel !== "string" || typeof value.voiceMode !== "string")
+        return null;
+    return { videoModel: value.videoModel, voiceMode: value.voiceMode };
+}
+function scriptStartedLines(runId, url, card, video) {
     return [
         `Started ad run ${runId}`,
         ...(card
@@ -1134,10 +1235,11 @@ function scriptStartedLines(runId, url, card) {
                 `Style: ${card.style.label}`,
             ]
             : ["The server did not include a resolved card."]),
+        ...(video ? [`Video model: ${video.videoModel}`, `Voice: ${video.voiceMode}`] : []),
         `Watch it: ${url}`,
     ];
 }
-function waitJsonWithCard(waited, card) {
+function waitJsonWithCard(waited, card, video) {
     const first = waited.lines[0];
     if (typeof first !== "string")
         return waited;
@@ -1150,7 +1252,10 @@ function waitJsonWithCard(waited, card) {
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
         return waited;
-    return { code: waited.code, lines: [JSON.stringify({ ...parsed, card })] };
+    return {
+        code: waited.code,
+        lines: [JSON.stringify({ ...parsed, card, ...(video ? { videoChoice: video } : {}) })],
+    };
 }
 export async function startScriptFlow(opts, deps) {
     let script;
@@ -1174,7 +1279,9 @@ export async function startScriptFlow(opts, deps) {
         style: opts.style,
         ...(opts.direction ? { direction: opts.direction } : {}),
         ...(opts.voicePath ? { voicePath: opts.voicePath } : {}),
-        ...(opts.music === false ? { music: false } : {}),
+        ...(opts.videoModel ? { videoModel: opts.videoModel } : {}),
+        ...(opts.voiceMode ? { voiceMode: opts.voiceMode } : {}),
+        ...(opts.music === true ? { music: true } : {}),
     });
     if (!res.ok)
         return errorResult(res, opts.json);
@@ -1185,13 +1292,14 @@ export async function startScriptFlow(opts, deps) {
     const runId = started.runId;
     const url = typeof started.url === "string" ? started.url : "";
     const card = isResolvedCard(started.card) ? started.card : null;
+    const video = startedVideoChoice(started.videoChoice);
     if (!opts.wait) {
         return {
             code: 0,
             lines: opts.json
-                ? [JSON.stringify({ runId, url, card })]
+                ? [JSON.stringify({ runId, url, card, ...(video ? { videoChoice: video } : {}) })]
                 : [
-                    ...scriptStartedLines(runId, url, card),
+                    ...scriptStartedLines(runId, url, card, video),
                     "",
                     "Wait for the storyboard here instead: exodus video start … --wait",
                     `Or check in whenever:                exodus video status ${runId}`,
@@ -1200,10 +1308,10 @@ export async function startScriptFlow(opts, deps) {
     }
     const waited = await waitFlow(runId, { json: opts.json, url }, deps);
     if (opts.json)
-        return waitJsonWithCard(waited, card);
+        return waitJsonWithCard(waited, card, video);
     return {
         code: waited.code,
-        lines: [...scriptStartedLines(runId, url, card), "", ...waited.lines],
+        lines: [...scriptStartedLines(runId, url, card, video), "", ...waited.lines],
     };
 }
 const POLL_INTERVAL_MS = 5000;
@@ -1300,6 +1408,7 @@ export async function statusFlow(runId, json, deps) {
                     hasFinal,
                     warnings,
                     guidance,
+                    ...(run.musicBed === undefined ? {} : { musicBed: run.musicBed }),
                     ...(failedStoryboard?.planFailure ? { planFailure: failedStoryboard.planFailure } : {}),
                     ...(failedStoryboard?.planFailure
                         ? { storyboardNodeId: failedStoryboard.nodeId }
@@ -2046,6 +2155,13 @@ export function voiceSheetLines(sheet) {
         : (sheet.whyNot ?? "Voices can no longer be changed on this run."));
     return lines;
 }
+function musicLines(manifest) {
+    const lines = [`music: ${manifest.musicBed}`];
+    if (manifest.musicHeardScenes.length > 0) {
+        lines.push(`music heard in scene ${manifest.musicHeardScenes.join(", ")}`);
+    }
+    return lines;
+}
 export async function pullFlow(runId, dir, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
@@ -2089,6 +2205,7 @@ export async function pullFlow(runId, dir, json, deps) {
     const lines = [
         `Pulled ${wrote} files into ${dir}`,
         `Every piece is indexed in ${path.join(dir, "manifest.json")} — scene numbers there are the run's own.`,
+        ...musicLines(plan.manifest),
     ];
     const flagged = plan.manifest.scenes.filter((s) => s.flagged);
     if (flagged.length > 0) {
@@ -2349,6 +2466,8 @@ const VALUE_FLAGS = new Set([
     "style",
     "direction",
     "voice-path",
+    "video-model",
+    "voice",
     "note",
     "out",
     "file",
@@ -2401,7 +2520,7 @@ export async function run(flags, occurrences) {
     if (sub === "shows")
         return printResult(await showsFlow(json, defaultDeps));
     if (sub === "start") {
-        const plan = planVideoStart(flags);
+        const plan = planVideoStart(flags, occurrences);
         if (plan.kind === "usage")
             usage(plan.line);
         if (plan.kind === "show")

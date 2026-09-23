@@ -84,8 +84,11 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voic
 exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json --wait
                                                           same, with the video model speaking voices you WROTE
 exodus video status <runId>                               where it is, per scene
-exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--no-music] [--wait]
-                                                          start from a script, a conceit and a look
+exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--video-model <id>] [--voice native] [--music] [--wait]
+                                                          start from a script, a conceit and a look.
+                                                          No music bed unless you pass --music.
+                                                          Each conceit has its own video model and voice;
+                                                          --video-model / --voice override them for one run
 ```
 
 **From the storyboard on.**
@@ -558,6 +561,15 @@ manifest.json            the index below
 runId, pulledAt, dashboardUrl        the run and the page that opens it:
                                      /workflows/<workflowId>/runs/<runId>
 storyboard, reference, music         filenames, or null when not delivered
+musicBed                             on | off | unknown — whether the RUN has a
+                                     music bed, which is not the same question
+                                     as the `music` filename above. "unknown" is
+                                     a run made before the run carried the
+                                     answer; it is not "off"
+musicHeardScenes[]                   scene numbers whose clip came back with
+                                     music the video model baked in. A run with
+                                     the bed off can still list scenes here, and
+                                     those are the ones to listen to
 narration                            { file, timing }, or null on a per-scene run
 cast[]                               one per identity still
   characterId, name                  from the run's cast lock; null for an
