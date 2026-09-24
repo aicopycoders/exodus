@@ -4,7 +4,8 @@
 // spine at the moment its cued line is spoken, a room-tone bed and the music
 // bed go underneath, and one MP4 comes out ready to upload. A reaction
 // cutaway is the exception: it is its own short beat in the spine right after
-// its cued line ends, heard with its own sound while the speaker is silent.
+// its cued line ends, heard with its own sound while the speaker is silent,
+// and its sound fades out quietly under the next line rather than stopping.
 //
 //   node first-cut.mjs <pulled-dir> [--out cut.mp4] [--skip 2,5] [--no-music]
 //
@@ -59,6 +60,13 @@ const ROOM_TONE =
 const MUSIC_VOLUME = 0.18;
 /** The longest a reaction beat holds the spine (#2357); older pulls carry 4 s reaction clips. */
 export const REACTION_MAX_SEC = 1.5;
+/**
+ * A reaction's laugh carries into the next line instead of stopping dead at
+ * the join (#2406): it starts well under the speaker, at this share of its own
+ * level (about -9 dB), and fades to silence over this long.
+ */
+export const REACTION_TAIL_SEC = 0.75;
+export const REACTION_TAIL_GAIN = 0.35;
 /**
  * The air a join keeps around its words (#2388): after one clip's last word, and
  * before the next clip's first, less when the same speaker carries on than when
@@ -262,6 +270,19 @@ function placeReaction(spine, counts, reaction) {
   return null;
 }
 
+/**
+ * The sound a reaction beat carries under the next segment (#2406): the clip's
+ * own sound past the beat when it has some (older 4 s pulls), else its last
+ * stretch replayed, so a clip exactly as long as its beat still fades out.
+ */
+function reactionTail(seg, next) {
+  const clipLen = seg.clipSeconds ?? seg.seconds;
+  const beatEnd = seg.inSec + seg.seconds;
+  const fromSec = Math.max(0, Math.min(beatEnd, clipLen - REACTION_TAIL_SEC));
+  const seconds = Math.min(REACTION_TAIL_SEC, next.seconds, clipLen - fromSec);
+  return { atSec: next.startSec, fromSec, seconds, gain: REACTION_TAIL_GAIN };
+}
+
 export function buildTimeline({ manifest, storyboard, skip, probe, exists, readWords }) {
   const plans = scenePlans(storyboard);
   const counts = lineWordCounts(storyboard);
@@ -375,6 +396,11 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
     seg.startSec = total;
     total += seg.seconds;
   }
+  spine.forEach((seg, k) => {
+    const next = spine[k + 1];
+    if (!seg.reaction || seg.audio !== "clip" || !next) return;
+    seg.reaction.tail = reactionTail(seg, next);
+  });
 
   for (const c of waiting.filter((w) => !w.reaction)) {
     const cue = c.cueLineId ? cueOffsetOnSpine(spine, counts, c.cueLineId) : null;
@@ -421,6 +447,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
   };
   const filters = [];
   const pairs = [];
+  const tails = [];
 
   for (const seg of timeline.spine) {
     const i =
@@ -442,12 +469,26 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
     filters.push(`${norm(`${i}:v`)}${fit.length ? `,${fit.join(",")}` : ""}[v${i}]`);
     // A segment split around a reaction beat starts partway into its sound too.
     const skipIn = inSec > 0.001 ? `atrim=start=${sec(inSec)},asetpts=PTS-STARTPTS,` : "";
-    const fitSound =
-      `${LOUDNORM},apad,atrim=0:${sec(seg.seconds)},afade=t=in:d=${EDGE_FADE_SEC},` +
+    const fitLength =
+      `apad,atrim=0:${sec(seg.seconds)},afade=t=in:d=${EDGE_FADE_SEC},` +
       `afade=t=out:st=${sec(seg.seconds - EDGE_FADE_SEC)}:d=${EDGE_FADE_SEC}`;
+    const fitSound = `${LOUDNORM},${fitLength}`;
     if (seg.audio === "narration") {
       const v = addInput("-i", resolve(seg.voice));
       filters.push(`[${v}:a]${stereo},${skipIn}${fitSound}[a${i}]`);
+    } else if (seg.audio === "clip" && seg.reaction?.tail) {
+      // The tail is cut from the same loudness-normalized sound as the beat,
+      // ducked, faded out, and laid in at the join; the next line's own sound
+      // plays at full level over it (#2406).
+      const t = seg.reaction.tail;
+      filters.push(`[${i}:a]${stereo},${skipIn}${LOUDNORM},asplit=2[as${i}][at${i}]`);
+      filters.push(`[as${i}]${fitLength}[a${i}]`);
+      filters.push(
+        `[at${i}]atrim=start=${sec(t.fromSec - inSec)}:duration=${sec(t.seconds)},asetpts=PTS-STARTPTS,` +
+          `volume=${t.gain},afade=t=in:d=${EDGE_FADE_SEC},afade=t=out:st=0:d=${sec(t.seconds)},` +
+          `adelay=delays=${Math.round(t.atSec * 1000)}:all=1[tail${i}]`,
+      );
+      tails.push(`[tail${i}]`);
     } else if (seg.audio === "clip") {
       filters.push(`[${i}:a]${stereo},${skipIn}${fitSound}[a${i}]`);
     } else {
@@ -479,7 +520,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
   });
 
   filters.push(`${ROOM_TONE}[room]`);
-  const beds = ["[room]"];
+  const beds = ["[room]", ...tails];
   if (music) {
     const m = addInput("-stream_loop", "-1", "-i", music);
     filters.push(`[${m}:a]${stereo},volume=${MUSIC_VOLUME}[bed]`);
@@ -571,11 +612,15 @@ export function inTheCut(timeline) {
     const label = seg.source === "clip" ? seg.file : `still ${seg.file}`;
     if (seg.reaction) {
       const sound = seg.audio === "clip" ? "its own sound" : "silent: the clip has no sound";
+      const tail = seg.reaction.tail;
+      const fades = tail
+        ? `, fading out under the next line at ${tail.atSec.toFixed(2)}s over ${tail.seconds.toFixed(2)}s`
+        : "";
       rows.push({
         n: seg.sceneIndex,
         line:
           `reaction ${seg.sceneIndex}: ${label} for ${seg.seconds.toFixed(1)}s after ` +
-          `${seg.reaction.cueLineId} in scene ${seg.reaction.cueSceneIndex}, ${sound}`,
+          `${seg.reaction.cueLineId} in scene ${seg.reaction.cueSceneIndex}, ${sound}${fades}`,
       });
       continue;
     }
