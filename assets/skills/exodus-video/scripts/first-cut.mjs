@@ -75,6 +75,8 @@ export const REACTION_TAIL_GAIN = 0.35;
 export const JOIN_TAIL_SEC = 0.15;
 export const JOIN_LEAD_SAME_SPEAKER_SEC = 0.1;
 export const JOIN_LEAD_NEW_SPEAKER_SEC = 0.25;
+/** The gap a cut keeps from an extra heard sound it leaves out (#2541). */
+const EXTRA_CLEARANCE_SEC = 0.05;
 
 /** The word rule the planner sized every line with (scout models.ts wordCount). */
 export function wordCount(text) {
@@ -88,6 +90,27 @@ export function lineWordCounts(storyboard) {
     if (typeof line?.lineId === "string") counts.set(line.lineId, wordCount(line.text));
   }
   return counts;
+}
+
+const wordToken = (word) => String(word ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/**
+ * #2541: the indexes of the heard words that deliver the first and last
+ * scripted word, matching the script in order at its earliest delivery, or null
+ * when the whole script is not heard that way.
+ */
+export function scriptedSpan(words, lineTexts) {
+  const script = lineTexts.flatMap((text) => (text ?? "").split(/\s+/)).map(wordToken).filter(Boolean);
+  if (script.length === 0) return null;
+  let first = -1;
+  let j = 0;
+  for (const token of script) {
+    while (j < words.length && wordToken(words[j].w) !== token) j++;
+    if (j === words.length) return null;
+    if (first < 0) first = j;
+    j++;
+  }
+  return { first, last: j - 1 };
 }
 
 const CUTAWAY_KINDS = new Set(["cutaway", "insert"]);
@@ -199,26 +222,48 @@ export function cueEndInSegment(seg, counts, cueLineId) {
  * and leaves the ad's first lead-in and last tail alone; a clip whose closing
  * line cues a reaction is not the ad's end, since the beat follows it. Trims
  * land on whole frames so the picture and its sound stay the same length.
+ *
+ * The beat is measured from the clip's scripted words when the script is heard
+ * in order, and a cut stops short of a sound made up before or after the line
+ * ("Hmm", "Um"), even at the ad's own edges (#2541). Sounds inside the line stay.
  */
-function trimJoins(spine, reactionCues) {
+function trimJoins(spine, reactionCues, lineTexts) {
   spine.forEach((seg, k) => {
     if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) return;
     const prev = spine[k - 1];
     const sameSpeaker = Boolean(prev?.lastSpeaker) && prev.lastSpeaker === seg.firstSpeaker;
     const lead = sameSpeaker ? JOIN_LEAD_SAME_SPEAKER_SEC : JOIN_LEAD_NEW_SPEAKER_SEC;
-    const firstWord = Math.min(...seg.words.map((w) => w.s));
-    const lastWord = Math.max(...seg.words.map((w) => w.e));
-    const inSec = prev ? Math.max(0, floorFrame(firstWord - lead)) : 0;
+    const span = scriptedSpan(seg.words, seg.lineIds.map((id) => lineTexts.get(id)));
+    const line = span ? seg.words.slice(span.first, span.last + 1) : seg.words;
+    const before = span ? seg.words.slice(0, span.first) : [];
+    const after = span ? seg.words.slice(span.last + 1) : [];
+    const firstWord = Math.min(...line.map((w) => w.s));
+    const lastWord = Math.max(...line.map((w) => w.e));
+    let inSec = prev ? Math.max(0, floorFrame(firstWord - lead)) : 0;
+    if (before.length > 0) {
+      const clear = ceilFrame(Math.max(...before.map((w) => w.e)) + EXTRA_CLEARANCE_SEC);
+      inSec = Math.max(inSec, Math.min(clear, floorFrame(firstWord)));
+    }
     const endsAd = k === spine.length - 1 && !reactionCues.has(seg.lineIds.at(-1));
-    const outSec = endsAd ? seg.seconds : Math.min(seg.seconds, ceilFrame(lastWord + JOIN_TAIL_SEC));
+    let outSec = endsAd
+      ? after.length > 0 ? ceilFrame(lastWord + TAIL_AIR_SEC) : seg.seconds
+      : ceilFrame(lastWord + JOIN_TAIL_SEC);
+    if (after.length > 0) {
+      const clear = floorFrame(Math.min(...after.map((w) => w.s)) - EXTRA_CLEARANCE_SEC);
+      outSec = Math.min(outSec, Math.max(clear, ceilFrame(lastWord)));
+    }
+    outSec = Math.min(seg.seconds, outSec);
     if (outSec <= inSec) return;
     const how = [];
     if (inSec > 0) how.push(`lead-in trimmed ${inSec.toFixed(2)}s`);
     if (outSec < seg.seconds) how.push(`tail trimmed ${(seg.seconds - outSec).toFixed(2)}s`);
     if (how.length === 0) return;
+    const kept = seg.words.filter((w) => w.s < outSec && w.e > inSec);
+    if (before.some((w) => !kept.includes(w))) how.push("extra sound before the line trimmed");
+    if (after.some((w) => !kept.includes(w))) how.push("extra sound after the line trimmed");
     seg.inSec = inSec;
     seg.seconds = outSec - inSec;
-    seg.words = seg.words.map((w) => ({ ...w, s: w.s - inSec, e: w.e - inSec }));
+    seg.words = kept.map((w) => ({ ...w, s: w.s - inSec, e: w.e - inSec }));
     seg.note = `${seg.note} (${how.join(", ")})`;
   });
 }
@@ -385,7 +430,8 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
   // Joins are closed first so a reaction beat lands right after its cue line
   // ends in the trimmed clip. Reactions change the spine, so they go in before
   // any overlay is placed on it.
-  trimJoins(spine, new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId)));
+  const lineTexts = new Map((storyboard?.script ?? []).map((line) => [line?.lineId, line?.text]));
+  trimJoins(spine, new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId)), lineTexts);
   for (const c of waiting.filter((w) => w.reaction)) {
     if (!c.cueLineId || placeReaction(spine, counts, c) === null) {
       dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${noCue(c)}` });
