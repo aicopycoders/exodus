@@ -15,7 +15,9 @@
 // the voice, trimmed when the clip runs longer and held on its last frame when
 // the voice runs longer. The voice itself is never altered. A dialogue scene
 // keeps the audio it performed; at each join its silence before the first word
-// and after the last is cut back to a short beat, read from its word times. A
+// and after the last is cut back to a short beat, read from its word times.
+// Inside it, a silence over 0.9 s between two sentences is cut down to 0.8 s,
+// picture and sound together, unless the script writes that pause in. A
 // scene with no clip but a keyframe becomes a still for the length of its voice
 // track, else the storyboard's planned duration. Every segment is
 // loudness-normalized to -16 LUFS before the join.
@@ -101,17 +103,120 @@ const wordToken = (word) => String(word ?? "").toLowerCase().replace(/[^\p{L}\p{
  */
 export function scriptedSpan(words, lineTexts) {
   const script = lineTexts.flatMap((text) => (text ?? "").split(/\s+/)).map(wordToken).filter(Boolean);
-  if (script.length === 0) return null;
-  let first = -1;
+  const at = heardAt(words, script);
+  return at && at.length > 0 ? { first: at[0], last: at.at(-1) } : null;
+}
+
+/** The heard word that delivers each script token, in order at its earliest delivery, or null. */
+function heardAt(words, tokens) {
+  const at = [];
   let j = 0;
-  for (const token of script) {
+  for (const token of tokens) {
     while (j < words.length && wordToken(words[j].w) !== token) j++;
     if (j === words.length) return null;
-    if (first < 0) first = j;
-    j++;
+    at.push(j++);
   }
-  return { first, last: j - 1 };
+  return at;
 }
+
+/** #2544: a silence between two sentences longer than this is cut down to the kept length. */
+export const SENTENCE_GAP_MAX_SEC = 0.9;
+export const SENTENCE_GAP_KEEP_SEC = 0.8;
+/** A pause the script writes in: an ellipsis, a dash, or a hyphen standing between words. */
+const WRITTEN_PAUSE = /…|\.{3}|[—–-]/;
+const SENTENCE_END = /[.?!]/;
+/** The directions that ask for a pause (scout clip-qc.ts PAUSE_DIRECTION, NO_PAUSE_DIRECTION, lineWrittenPause). */
+const PAUSE_DIRECTION =
+  /\bpaus(e|es|ed|ing)\b|\bsilence\b|\(beat\)|\b(a|one|brief|short|quick|small|little|long)\s+beat\b|\bbeat\s*(,|before|after|then)/i;
+const NO_PAUSE_DIRECTION =
+  /\b(no|not|without|never|don'?t|avoid\w*)\b[^.;]*\b(beats?|paus\w*|silence)\b|\bpause-?(free|less)\b/i;
+
+export function asksPause(line) {
+  const direction = `${line?.stageDirection ?? ""} ${line?.performanceDirection ?? ""}`;
+  return PAUSE_DIRECTION.test(direction) && !NO_PAUSE_DIRECTION.test(direction);
+}
+
+/**
+ * #2544: the silences inside one clip to cut, as [{ s, e, after, gap }] in the
+ * clip's own time. A heard silence over SENTENCE_GAP_MAX_SEC between two
+ * scripted words at a sentence break (a new line, or . ? ! between them) keeps
+ * half of SENTENCE_GAP_KEEP_SEC after the earlier word and half before the
+ * later one; the rest goes. Kept: a pause the script writes in (a mark between
+ * the words, or a direction on either line asking for one), the laugh beat
+ * after a line a reaction is cued to, and any gap with another heard sound in
+ * it. Nothing is cut when the script is not heard in order.
+ *
+ * lines: [{ text, asksPause, cuesBeat }] in the order the clip speaks them.
+ */
+export function sentenceGapCuts(words, lines) {
+  const tokens = [];
+  let between = "";
+  lines.forEach((line, li) => {
+    for (const piece of (line.text ?? "").split(/\s+/)) {
+      const token = wordToken(piece);
+      if (!token) {
+        between += ` ${piece}`;
+        continue;
+      }
+      const [, lead, trail] = piece.match(/^([^\p{L}\p{N}]*).*?([^\p{L}\p{N}]*)$/u);
+      tokens.push({ token, li, before: between + lead });
+      between = trail;
+    }
+    between += " ";
+  });
+  const at = heardAt(words ?? [], tokens.map((t) => t.token));
+  if (!at) return [];
+  const cuts = [];
+  for (let t = 0; t + 1 < tokens.length; t++) {
+    const [a, b] = [tokens[t], tokens[t + 1]];
+    if (at[t + 1] !== at[t] + 1) continue;
+    const newLine = a.li !== b.li;
+    if (!newLine && !SENTENCE_END.test(b.before)) continue;
+    if (WRITTEN_PAUSE.test(b.before) || lines[a.li].asksPause || lines[b.li].asksPause) continue;
+    if (newLine && lines[a.li].cuesBeat) continue;
+    const [earlier, later] = [words[at[t]], words[at[t + 1]]];
+    const gap = later.s - earlier.e;
+    if (gap <= SENTENCE_GAP_MAX_SEC + 1e-6) continue;
+    // Frame edges only ever widen what is kept, so the silence left stays
+    // between the kept length and the longest allowed.
+    const s = ceilFrame(earlier.e + SENTENCE_GAP_KEEP_SEC / 2);
+    const e = floorFrame(later.s - SENTENCE_GAP_KEEP_SEC / 2);
+    if (e > s) cuts.push({ s, e, after: earlier.w, gap });
+  }
+  return cuts;
+}
+
+/**
+ * Take each own-sound clip's long sentence gaps out of its timeline: its words
+ * move onto the cut timeline and it runs shorter, so every later step (join
+ * trims, reaction splits, cue times, captions) works in cut time. The renderer
+ * removes seg.cuts from the picture and the sound before anything else.
+ */
+function tightenSentenceGaps(spine, reactionCues, scriptLines) {
+  for (const seg of spine) {
+    if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) continue;
+    const lines = seg.lineIds.map((id) => ({
+      text: scriptLines.get(id)?.text,
+      asksPause: asksPause(scriptLines.get(id)),
+      cuesBeat: reactionCues.has(id),
+    }));
+    const cuts = sentenceGapCuts(seg.words, lines);
+    if (cuts.length === 0) continue;
+    const removedBefore = (t) => cuts.reduce((sum, c) => sum + (c.e <= t ? c.e - c.s : 0), 0);
+    const removed = removedBefore(Infinity);
+    seg.cuts = cuts.map(({ s, e }) => ({ s, e }));
+    seg.words = seg.words.map((w) => ({ ...w, s: w.s - removedBefore(w.s), e: w.e - removedBefore(w.s) }));
+    seg.seconds -= removed;
+    seg.clipSeconds -= removed;
+    seg.note = withHow(
+      seg.note,
+      cuts.map((c) => `pause after "${c.after}" tightened ${c.gap.toFixed(2)}s -> ${(c.gap - (c.e - c.s)).toFixed(2)}s`),
+    );
+  }
+}
+
+const withHow = (note, how) =>
+  note.endsWith(")") ? `${note.slice(0, -1)}, ${how.join(", ")})` : `${note} (${how.join(", ")})`;
 
 const CUTAWAY_KINDS = new Set(["cutaway", "insert"]);
 
@@ -227,13 +332,13 @@ export function cueEndInSegment(seg, counts, cueLineId) {
  * in order, and a cut stops short of a sound made up before or after the line
  * ("Hmm", "Um"), even at the ad's own edges (#2541). Sounds inside the line stay.
  */
-function trimJoins(spine, reactionCues, lineTexts) {
+function trimJoins(spine, reactionCues, scriptLines) {
   spine.forEach((seg, k) => {
     if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) return;
     const prev = spine[k - 1];
     const sameSpeaker = Boolean(prev?.lastSpeaker) && prev.lastSpeaker === seg.firstSpeaker;
     const lead = sameSpeaker ? JOIN_LEAD_SAME_SPEAKER_SEC : JOIN_LEAD_NEW_SPEAKER_SEC;
-    const span = scriptedSpan(seg.words, seg.lineIds.map((id) => lineTexts.get(id)));
+    const span = scriptedSpan(seg.words, seg.lineIds.map((id) => scriptLines.get(id)?.text));
     const line = span ? seg.words.slice(span.first, span.last + 1) : seg.words;
     const before = span ? seg.words.slice(0, span.first) : [];
     const after = span ? seg.words.slice(span.last + 1) : [];
@@ -264,7 +369,7 @@ function trimJoins(spine, reactionCues, lineTexts) {
     seg.inSec = inSec;
     seg.seconds = outSec - inSec;
     seg.words = kept.map((w) => ({ ...w, s: w.s - inSec, e: w.e - inSec }));
-    seg.note = `${seg.note} (${how.join(", ")})`;
+    seg.note = withHow(seg.note, how);
   });
 }
 
@@ -427,11 +532,13 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
   const noCue = (c) =>
     c.cueLineId ? `${c.cueLineId} is spoken by no scene in the cut` : "the storyboard names no cue line";
 
-  // Joins are closed first so a reaction beat lands right after its cue line
-  // ends in the trimmed clip. Reactions change the spine, so they go in before
-  // any overlay is placed on it.
-  const lineTexts = new Map((storyboard?.script ?? []).map((line) => [line?.lineId, line?.text]));
-  trimJoins(spine, new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId)), lineTexts);
+  // Sentence gaps and then joins are closed first so a reaction beat lands
+  // right after its cue line ends in the trimmed clip. Reactions change the
+  // spine, so they go in before any overlay is placed on it.
+  const scriptLines = new Map((storyboard?.script ?? []).map((line) => [line?.lineId, line]));
+  const reactionCues = new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId));
+  tightenSentenceGaps(spine, reactionCues, scriptLines);
+  trimJoins(spine, reactionCues, scriptLines);
   for (const c of waiting.filter((w) => w.reaction)) {
     if (!c.cueLineId || placeReaction(spine, counts, c) === null) {
       dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${noCue(c)}` });
@@ -502,6 +609,25 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
         : addInput("-loop", "1", "-t", String(seg.seconds), "-i", resolve(seg.file));
     const fit = [];
     const inSec = seg.inSec ?? 0;
+    // #2544: sentence gaps come out first, the picture by frame number and the
+    // sound by the same times, so everything after works on the cut timeline.
+    const cuts = seg.cuts ?? [];
+    let heard = `[${i}:a]${stereo},`;
+    if (cuts.length > 0) {
+      const frames = cuts.map((c) => `between(n\\,${Math.round(c.s * FPS)}\\,${Math.round(c.e * FPS) - 1})`);
+      fit.push(`select=not(${frames.join("+")}),setpts=N/FRAME_RATE/TB`);
+      const kept = [0, ...cuts.flatMap((c) => [c.s, c.e])];
+      const pieces = cuts.length + 1;
+      filters.push(`[${i}:a]${stereo},asplit=${pieces}${Array.from({ length: pieces }, (_, p) => `[ap${i}_${p}]`).join("")}`);
+      for (let p = 0; p < pieces; p++) {
+        const end = p < cuts.length ? `:end=${kept[2 * p + 1].toFixed(6)}` : "";
+        filters.push(`[ap${i}_${p}]atrim=start=${kept[2 * p].toFixed(6)}${end},asetpts=PTS-STARTPTS[aq${i}_${p}]`);
+      }
+      filters.push(
+        `${Array.from({ length: pieces }, (_, p) => `[aq${i}_${p}]`).join("")}concat=n=${pieces}:v=0:a=1[ac${i}]`,
+      );
+      heard = `[ac${i}]`;
+    }
     if (seg.source === "clip" && seg.clipSeconds !== null) {
       const shown = seg.seconds - seg.holdSec;
       if (inSec > 0.001 || shown < seg.clipSeconds - 0.01) {
@@ -527,7 +653,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
       // ducked, faded out, and laid in at the join; the next line's own sound
       // plays at full level over it (#2406).
       const t = seg.reaction.tail;
-      filters.push(`[${i}:a]${stereo},${skipIn}${LOUDNORM},asplit=2[as${i}][at${i}]`);
+      filters.push(`${heard}${skipIn}${LOUDNORM},asplit=2[as${i}][at${i}]`);
       filters.push(`[as${i}]${fitLength}[a${i}]`);
       filters.push(
         `[at${i}]atrim=start=${sec(t.fromSec - inSec)}:duration=${sec(t.seconds)},asetpts=PTS-STARTPTS,` +
@@ -536,7 +662,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
       );
       tails.push(`[tail${i}]`);
     } else if (seg.audio === "clip") {
-      filters.push(`[${i}:a]${stereo},${skipIn}${fitSound}[a${i}]`);
+      filters.push(`${heard}${skipIn}${fitSound}[a${i}]`);
     } else {
       filters.push(`anullsrc=r=48000:cl=stereo,atrim=0:${sec(seg.seconds)}[a${i}]`);
     }
