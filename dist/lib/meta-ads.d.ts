@@ -22,6 +22,7 @@ export interface AdWindowStats {
     spend?: number | null;
     spendDisplay?: string | null;
     impressions?: number | null;
+    reach?: number | null;
     clicks?: number | null;
     currency?: string | null;
 }

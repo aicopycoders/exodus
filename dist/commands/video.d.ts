@@ -30,6 +30,7 @@ export interface ClipQcTake {
         code: string;
         wording: string;
     }[];
+    heardText?: string;
 }
 export interface ClipQc {
     verdict: "pass" | "fail";
@@ -75,6 +76,7 @@ export type ArtifactSubset = {
     tailTrimmed?: boolean;
     rawStorageId?: string;
     voiceMode?: "voice-first";
+    voiceFirstBlockedBy?: string[];
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -284,6 +286,7 @@ export interface ManifestScene {
     speechTrimmed: boolean | null;
     rawStorageId: string | null;
     voiceMode: "voice-first" | null;
+    voiceFirstBlockedBy: string[] | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;

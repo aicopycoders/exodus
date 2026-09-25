@@ -21,6 +21,9 @@ function joinedOr(items) {
         return items[0] ?? "";
     return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
+function cantSayNames(names) {
+    return `the recorded voice can't say ${joinedOr(names.map((n) => `"${n}"`))}`;
+}
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -194,7 +197,7 @@ export function qcWithoutJudgeWording(qc) {
         return qc;
     return {
         ...qc,
-        takes: qc.takes.map(({ judgeWording: _w, ...rest }) => rest),
+        takes: qc.takes.map(({ judgeWording: _w, heardText: _h, ...rest }) => rest),
     };
 }
 export const NO_TAKE_HISTORY_LINE = "no history recorded for this clip";
@@ -587,6 +590,7 @@ function clipFromArtifact(sceneIndex, artifact) {
         speechTrimmed: artifact.speechTrimmed === true,
         rawStorageId: artifact.rawStorageId ?? null,
         voiceMode: artifact.voiceMode ?? null,
+        voiceFirstBlockedBy: artifact.voiceFirstBlockedBy ?? null,
     };
 }
 function keyframeDownload(sceneIndex, imageUrl) {
@@ -897,6 +901,7 @@ export function planPull(run, items, opts) {
             speechTrimmed: clip ? clip.speechTrimmed : null,
             rawStorageId: clip ? clip.rawStorageId : null,
             voiceMode: clip ? clip.voiceMode : null,
+            voiceFirstBlockedBy: clip ? clip.voiceFirstBlockedBy : null,
             clipStatus: item?.status ?? "missing",
             error: item?.error ?? null,
             flagged: item?.flagged === true,
@@ -971,6 +976,7 @@ export function markPullFailure(manifest, failure) {
             scene.speechTrimmed = null;
             scene.rawStorageId = null;
             scene.voiceMode = null;
+            scene.voiceFirstBlockedBy = null;
         }
         if (scene.voice === failure.file)
             scene.voice = null;
@@ -1469,12 +1475,18 @@ export async function statusFlow(runId, json, deps) {
     }
     const revoicedByScene = new Set();
     const voiceFirstByScene = new Set();
+    const voiceFirstBlockedByScene = new Map();
     const timedOnOriginalVoice = new Set();
     for (const artifact of outputsOfNodeKind(run, "video")) {
         if (artifact.type === "video" &&
             artifact.voiceMode === "voice-first" &&
             typeof artifact.sceneIndex === "number") {
             voiceFirstByScene.add(artifact.sceneIndex);
+        }
+        if (artifact.type === "video" &&
+            artifact.voiceFirstBlockedBy?.length &&
+            typeof artifact.sceneIndex === "number") {
+            voiceFirstBlockedByScene.set(artifact.sceneIndex, artifact.voiceFirstBlockedBy);
         }
         if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
             revoicedByScene.add(artifact.sceneIndex);
@@ -1546,6 +1558,10 @@ export async function statusFlow(runId, json, deps) {
                 lines.push("       voice: cast voice applied");
             if (voiceFirstByScene.has(sceneIndex))
                 lines.push("       clip: redone voice first");
+            const blockedBy = voiceFirstBlockedByScene.get(sceneIndex);
+            if (blockedBy) {
+                lines.push(`       clip: redone the usual way — ${cantSayNames(blockedBy)}`);
+            }
             if (timedOnOriginalVoice.has(sceneIndex)) {
                 lines.push("       word timings: measured on the original voice (close, not frame-exact)");
             }
@@ -1904,7 +1920,9 @@ export async function retryClipFlow(runId, target, { note, voiceFirst = false },
         lines: [
             voiceFirst
                 ? `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}, voice first: the line is ` +
-                    "recorded in the character's own voice, then the clip is made to match it."
+                    "recorded in the character's own voice, then the clip is made to match it. " +
+                    "If the line has a made-up name the recorded voice can't say, the clip may be made " +
+                    `the usual way instead, and exodus video status ${runId} will say so.`
                 : `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
             `triggerRunId: ${triggerRunId ?? "-"}`,
             ...(voiceFirst
@@ -2285,6 +2303,13 @@ export async function pullFlow(runId, dir, json, deps) {
     if (voiceFirst.length > 0) {
         lines.push("", `Redone voice first (the line recorded, then the clip made to match it): ` +
             `scene${voiceFirst.length === 1 ? "" : "s"} ${voiceFirst.map((s) => s.sceneIndex).join(", ")}`);
+    }
+    const redoneUsualWay = plan.manifest.scenes.filter((s) => s.voiceFirstBlockedBy?.length);
+    if (redoneUsualWay.length > 0) {
+        lines.push("", "Asked for voice first, but redone the usual way:");
+        for (const scene of redoneUsualWay) {
+            lines.push(`  scene ${scene.sceneIndex}: ${cantSayNames(scene.voiceFirstBlockedBy ?? [])}`);
+        }
     }
     const flagged = plan.manifest.scenes.filter((s) => s.flagged);
     if (flagged.length > 0) {
