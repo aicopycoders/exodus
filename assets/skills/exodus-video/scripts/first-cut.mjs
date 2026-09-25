@@ -18,6 +18,8 @@
 // and after the last is cut back to a short beat, read from its word times.
 // Inside it, a silence over 0.9 s between two sentences is cut down to 0.8 s,
 // picture and sound together, unless the script writes that pause in. A
+// sound in such a break that holds no heard word (a burp, a click) is cut
+// out, read from the clip's loudness, and the same rule then applies. A
 // scene with no clip but a keyframe becomes a still for the length of its voice
 // track, else the storyboard's planned duration. Every segment is
 // loudness-normalized to -16 LUFS before the join.
@@ -125,6 +127,14 @@ export const SENTENCE_GAP_KEEP_SEC = 0.8;
 /** A pause the script writes in: an ellipsis, a dash, or a hyphen standing between words. */
 const WRITTEN_PAUSE = /…|\.{3}|[—–-]/;
 const SENTENCE_END = /[.?!]/;
+/**
+ * #2554: loudness windows, and the levels that read as a sound and as quiet;
+ * SETTLED_WINDOWS quiet windows in a row (200 ms) end a sound (scout trim.ts).
+ */
+const LEVEL_WINDOW_SEC = 0.02;
+const SOUND_DB = -35;
+const QUIET_DB = -50;
+const SETTLED_WINDOWS = 10;
 /** The directions that ask for a pause (scout clip-qc.ts PAUSE_DIRECTION, NO_PAUSE_DIRECTION, lineWrittenPause). */
 const PAUSE_DIRECTION =
   /\bpaus(e|es|ed|ing)\b|\bsilence\b|\(beat\)|\b(a|one|brief|short|quick|small|little|long)\s+beat\b|\bbeat\s*(,|before|after|then)/i;
@@ -146,9 +156,14 @@ export function asksPause(line) {
  * after a line a reaction is cued to, and any gap with another heard sound in
  * it. Nothing is cut when the script is not heard in order.
  *
+ * #2554: given the clip's loudness ({ windowSec, db } from 0), a sound in a
+ * break that holds no heard word is cut too, whatever the break's length, and
+ * the silence left follows the same rule. Every span of one break carries that
+ * break's gap, the silence it keeps, and whether a sound went.
+ *
  * lines: [{ text, asksPause, cuesBeat }] in the order the clip speaks them.
  */
-export function sentenceGapCuts(words, lines) {
+export function sentenceGapCuts(words, lines, levels = null) {
   const tokens = [];
   let between = "";
   lines.forEach((line, li) => {
@@ -176,14 +191,89 @@ export function sentenceGapCuts(words, lines) {
     if (newLine && lines[a.li].cuesBeat) continue;
     const [earlier, later] = [words[at[t]], words[at[t + 1]]];
     const gap = later.s - earlier.e;
-    if (gap <= SENTENCE_GAP_MAX_SEC + 1e-6) continue;
-    // Frame edges only ever widen what is kept, so the silence left stays
-    // between the kept length and the longest allowed.
-    const s = ceilFrame(earlier.e + SENTENCE_GAP_KEEP_SEC / 2);
-    const e = floorFrame(later.s - SENTENCE_GAP_KEEP_SEC / 2);
-    if (e > s) cuts.push({ s, e, after: earlier.w, gap });
+    const heard = levels && soundBetween(levels, earlier.e, later.s);
+    // A sound's frame edges widen the cut, so none of it is left in.
+    const sound = heard && { s: Math.max(floorFrame(heard.s), ceilFrame(earlier.e)), e: ceilFrame(heard.e) };
+    const removed = sound ? sound.e - sound.s : 0;
+    const spans = sound ? [sound] : [];
+    if (gap - removed > SENTENCE_GAP_MAX_SEC + 1e-6) {
+      // Placed on the gap with the sound already out, then moved back past it.
+      // Frame edges only ever widen what is kept, so the silence left stays
+      // between the kept length and the longest allowed.
+      const back = (t) => (sound && t > sound.s ? t + removed : t);
+      const s = back(ceilFrame(earlier.e + SENTENCE_GAP_KEEP_SEC / 2));
+      const e = back(floorFrame(later.s - removed - SENTENCE_GAP_KEEP_SEC / 2));
+      if (e > s) spans.push({ s, e });
+    }
+    const merged = [];
+    for (const span of spans.sort((x, y) => x.s - y.s)) {
+      const prev = merged.at(-1);
+      if (prev && span.s <= prev.e + 1e-6) prev.e = Math.max(prev.e, span.e);
+      else merged.push({ ...span });
+    }
+    const kept = gap - merged.reduce((sum, c) => sum + c.e - c.s, 0);
+    for (const { s, e } of merged) cuts.push({ s, e, after: earlier.w, gap, kept, sound: Boolean(sound) });
   }
   return cuts;
+}
+
+/**
+ * #2554: a sound between two words that holds no heard word, from where the
+ * earlier word fades under QUIET_DB to where SETTLED_WINDOWS of quiet resume
+ * before the later word, or null when there is none or it runs into the later
+ * word. Mirrors scout trim.ts soundBetween.
+ */
+function soundBetween(levels, fromSec, toSec) {
+  const { db, windowSec } = levels;
+  const windowAt = (sec) => Math.floor(sec / windowSec + 1e-9);
+  const last = Math.min(windowAt(toSec), db.length);
+  let quiet = windowAt(fromSec);
+  while (quiet < last && db[quiet] >= QUIET_DB) quiet++;
+  let resumed = -1;
+  for (let i = quiet; i < last; i = resumed + SETTLED_WINDOWS) {
+    while (i < last && db[i] < SOUND_DB) i++;
+    if (i >= last) break;
+    const settled = settledQuiet(db, i);
+    if (settled < 0 || settled + SETTLED_WINDOWS > last) break;
+    resumed = settled;
+  }
+  return resumed < 0 ? null : { s: quiet * windowSec, e: resumed * windowSec };
+}
+
+/** Scanning forward from `from`, the first window of the first run of SETTLED_WINDOWS quiet windows, or -1. */
+function settledQuiet(db, from) {
+  let run = 0;
+  for (let i = from; i < db.length; i++) {
+    run = db[i] < QUIET_DB ? run + 1 : 0;
+    if (run === SETTLED_WINDOWS) return i - (SETTLED_WINDOWS - 1);
+  }
+  return -1;
+}
+
+/** Per-20 ms RMS loudness (dBFS) of mono s16 PCM, digital silence reading -120 (scout ffmpeg-clip.ts audioLevelsFromPcm). */
+export function levelsFromPcm(pcm, sampleRate) {
+  const perWindow = Math.round(sampleRate * LEVEL_WINDOW_SEC);
+  const db = [];
+  for (let from = 0; from < pcm.length; from += perWindow) {
+    const to = Math.min(pcm.length, from + perWindow);
+    let sumSq = 0;
+    for (let i = from; i < to; i++) sumSq += pcm[i] * pcm[i];
+    const rms = Math.sqrt(sumSq / (to - from)) / 32768;
+    db.push(rms > 0 ? Math.max(-120, 20 * Math.log10(rms)) : -120);
+  }
+  return { windowSec: LEVEL_WINDOW_SEC, db };
+}
+
+/** A clip's loudness windows, or null when its audio cannot be decoded. */
+function clipLevels(file) {
+  const res = spawnSync(
+    "ffmpeg",
+    ["-v", "error", "-i", file, "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+    { maxBuffer: 1 << 28 },
+  );
+  if (res.status !== 0 || !res.stdout?.length) return null;
+  const bytes = new Uint8Array(res.stdout.subarray(0, res.stdout.length & ~1));
+  return levelsFromPcm(new Int16Array(bytes.buffer), 16000);
 }
 
 /**
@@ -192,7 +282,7 @@ export function sentenceGapCuts(words, lines) {
  * trims, reaction splits, cue times, captions) works in cut time. The renderer
  * removes seg.cuts from the picture and the sound before anything else.
  */
-function tightenSentenceGaps(spine, reactionCues, scriptLines) {
+function tightenSentenceGaps(spine, reactionCues, scriptLines, readLevels) {
   for (const seg of spine) {
     if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) continue;
     const lines = seg.lineIds.map((id) => ({
@@ -200,7 +290,7 @@ function tightenSentenceGaps(spine, reactionCues, scriptLines) {
       asksPause: asksPause(scriptLines.get(id)),
       cuesBeat: reactionCues.has(id),
     }));
-    const cuts = sentenceGapCuts(seg.words, lines);
+    const cuts = sentenceGapCuts(seg.words, lines, readLevels(seg.file));
     if (cuts.length === 0) continue;
     const removedBefore = (t) => cuts.reduce((sum, c) => sum + (c.e <= t ? c.e - c.s : 0), 0);
     const removed = removedBefore(Infinity);
@@ -210,7 +300,15 @@ function tightenSentenceGaps(spine, reactionCues, scriptLines) {
     seg.clipSeconds -= removed;
     seg.note = withHow(
       seg.note,
-      cuts.map((c) => `pause after "${c.after}" tightened ${c.gap.toFixed(2)}s -> ${(c.gap - (c.e - c.s)).toFixed(2)}s`),
+      [
+        ...new Set(
+          cuts.map((c) =>
+            c.sound
+              ? `sound after "${c.after}" cut, pause ${c.gap.toFixed(2)}s -> ${c.kept.toFixed(2)}s`
+              : `pause after "${c.after}" tightened ${c.gap.toFixed(2)}s -> ${c.kept.toFixed(2)}s`,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -433,7 +531,7 @@ function reactionTail(seg, next) {
   return { atSec: next.startSec, fromSec, seconds, gain: REACTION_TAIL_GAIN };
 }
 
-export function buildTimeline({ manifest, storyboard, skip, probe, exists, readWords }) {
+export function buildTimeline({ manifest, storyboard, skip, probe, exists, readWords, readLevels = () => null }) {
   const plans = scenePlans(storyboard);
   const counts = lineWordCounts(storyboard);
   const spine = [];
@@ -537,7 +635,7 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
   // spine, so they go in before any overlay is placed on it.
   const scriptLines = new Map((storyboard?.script ?? []).map((line) => [line?.lineId, line]));
   const reactionCues = new Set(waiting.filter((w) => w.reaction).map((w) => w.cueLineId));
-  tightenSentenceGaps(spine, reactionCues, scriptLines);
+  tightenSentenceGaps(spine, reactionCues, scriptLines, readLevels);
   trimJoins(spine, reactionCues, scriptLines);
   for (const c of waiting.filter((w) => w.reaction)) {
     if (!c.cueLineId || placeReaction(spine, counts, c) === null) {
@@ -902,6 +1000,7 @@ function main() {
       const rows = readJson(file);
       return Array.isArray(rows) && rows.length > 0 ? rows : null;
     },
+    readLevels: (file) => clipLevels(here(file)),
   });
   if (timeline.spine.length === 0) {
     fail(1, `No scene has a clip or a keyframe. Check: exodus video status ${manifest.runId}`);
