@@ -30,6 +30,7 @@ export interface ClipQcTake {
         code: string;
         wording: string;
     }[];
+    heardText?: string;
 }
 export interface ClipQc {
     verdict: "pass" | "fail";
@@ -75,6 +76,7 @@ export type ArtifactSubset = {
     tailTrimmed?: boolean;
     rawStorageId?: string;
     voiceMode?: "voice-first";
+    voiceFirstBlockedBy?: string[];
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -116,6 +118,7 @@ export interface VideoRunNode {
     hasRejectedDraft?: boolean;
     outputs?: ArtifactSubset[];
     missingScenes?: MissingScene[];
+    autoRedoScenes?: number[];
 }
 export interface MissingScene {
     sceneIndex: number;
@@ -149,6 +152,11 @@ export interface VideoRun {
     provenance?: RunProvenance;
     musicBed?: boolean;
     videoChoice?: RunVideoChoice;
+    storyboardAutoApproval?: {
+        outcome: "approved" | "held";
+        at: number;
+        reason?: string;
+    };
     workflowId?: string;
     moduleOwned?: boolean;
 }
@@ -220,11 +228,13 @@ export declare function videoApiError(res: ApiResponse<unknown>): string;
 export type RunStop = {
     at: "running";
     stage: string;
+    autoRedoScenes?: number[];
 } | {
     at: "storyboard-gate";
     nodeId?: string;
     framesNodeId?: string;
     showAd?: true;
+    heldReason?: string;
 } | {
     at: "final-watch";
     missingScenes?: MissingScene[];
@@ -252,6 +262,7 @@ export type ResolvedStop = Exclude<RunStop, {
 });
 export declare function classifyRun(run: VideoRun): RunStop;
 export declare function hasAttachedCut(items: NodeItem[]): boolean;
+export declare function scenesBeingRedone(run: VideoRun, items: NodeItem[]): number[];
 export declare function resolveStop(stop: RunStop, cutAttached: boolean | null): ResolvedStop;
 export declare function resolveStopAtPark(stop: RunStop, runId: string, deps: Pick<VideoDeps, "get">): Promise<ResolvedStop>;
 export declare function stageWord(stage: string): string;
@@ -284,6 +295,7 @@ export interface ManifestScene {
     speechTrimmed: boolean | null;
     rawStorageId: string | null;
     voiceMode: "voice-first" | null;
+    voiceFirstBlockedBy: string[] | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;
@@ -322,6 +334,7 @@ export interface VideoManifest {
     music: string | null;
     musicBed: MusicBedState;
     musicHeardScenes: number[];
+    pendingRedo: number[];
     cast: ManifestCastRef[];
     narration: {
         file: string;
@@ -368,6 +381,7 @@ export interface ScriptStartOptions {
     videoModel?: string;
     voiceMode?: VoiceMode;
     music?: boolean;
+    reviewStoryboard?: true;
     wait: boolean;
     json: boolean;
 }

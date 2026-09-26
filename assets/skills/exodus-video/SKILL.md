@@ -32,7 +32,8 @@ workflow run`. From there the same nodes render, `video status` reads the run,
 `video pull` writes the folder, and `video upload` and `approve` finish it.
 
 A Show is no longer required. `exodus video start` starts from a script, a
-conceit, and a style, and the same parks follow. The full line is under
+conceit, and a style. The same parks follow, except that the app approves the
+storyboard itself when its checks pass (see "What costs money"). The full line is under
 "Starting a run". An optional `--direction` note is whole-ad rules, and that
 note cannot contain a colon. "The script file" shows the right form and the
 wrong one.
@@ -84,9 +85,14 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voic
 exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json --wait
                                                           same, with the video model speaking voices you WROTE
 exodus video status <runId>                               where it is, per scene
-exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--video-model <id>] [--voice native] [--music] [--wait]
+exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--video-model <id>] [--voice native] [--music] [--review-storyboard] [--wait]
                                                           start from a script, a conceit and a look.
                                                           No music bed unless you pass --music.
+                                                          The app approves its own storyboard when its
+                                                          checks pass and goes straight on to the clips,
+                                                          which is the part that costs. It stops at the
+                                                          gate only when a check finds a problem, and says
+                                                          why. --review-storyboard always stops there.
                                                           Each conceit has its own video model and voice;
                                                           --video-model / --voice override them for one run
 ```
@@ -169,18 +175,31 @@ minutes with "Still running after 60 minutes" and exit 0; that is not done, so
 check `status` before treating it as finished. Do not poll `status` in a tight
 loop; a full run is several minutes.
 
-**What costs money.** Starting the run writes the storyboard and then draws the
-reference, cast and scene pictures, and only then pauses. Each picture is a few
-cents and each scene draws a few to choose from: about 25 cents on a small test,
-and it can approach a dollar on a longer ad. Approving releases the expensive
-part: the voices and the clips. So a run that has not paused yet is already
-spending a little, and a run still drawing pictures is healthy. `exodus workflow
-status` and `exodus video status` both print "This run will pause for your
-approval once the frames are ready" on a run that is headed for the gate. Do not
-cancel it because the pause has not arrived. `workflow list`, `workflow describe`, `video status`,
-`storyboard` and `pull` are free reads; run them as often as you like. Never
-start a second run to "retry" without the user asking; tell them what failed
-instead.
+**What costs money.** Every run writes the storyboard first and then draws the
+reference, cast and scene pictures. Each picture is a few cents and each scene
+draws a few to choose from: about 25 cents on a small test, and it can approach
+a dollar on a longer ad. The expensive part comes after the storyboard: the
+voices and the clips. What happens at that point depends on how the run
+started.
+
+- A paste-a-script run (`exodus video start --conceit …`) checks its own
+  storyboard once the pictures are drawn. When every check passes, the app
+  approves the storyboard itself and goes straight on to the voices and the
+  clips, with no stop. It stops for the user only when a check finds a problem,
+  and the stop block says why in plain words. Started with
+  `--review-storyboard`, it always stops at the storyboard instead. `status`
+  prints "the app checks the storyboard and approves it itself if the checks
+  pass" on a run headed that way.
+- A Show run (`video start --show`) and a saved workflow run (`workflow run`)
+  still pause at the storyboard for approval. Approving is what releases the
+  voices and the clips. `status` prints "This run will pause for your approval
+  once the frames are ready" on a run headed for that pause.
+
+Either way, a run still drawing pictures is healthy and already spending a
+little. Do not cancel it because nothing has happened yet. `workflow list`,
+`workflow describe`, `video status`, `storyboard` and `pull` are free reads; run
+them as often as you like. Never start a second run to "retry" without the user
+asking; tell them what failed instead.
 
 **`--auto-approve` does not cover either video gate.** It releases Checkpoint
 boxes only (`convex/workflows.ts:7266` keys on `pauseReason === "checkpoint"`),
@@ -574,6 +593,11 @@ musicHeardScenes[]                   scene numbers whose clip came back with
                                      music the video model baked in. A run with
                                      the bed off can still list scenes here, and
                                      those are the ones to listen to
+pendingRedo[]                        scene numbers the app is redoing right
+                                     now. Their clip and words are left out,
+                                     because the file on the run is the take
+                                     being replaced: run `exodus video wait`,
+                                     then pull again
 narration                            { file, timing }, or null on a per-scene run
 cast[]                               one per identity still
   characterId, name                  from the run's cast lock; null for an

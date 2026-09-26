@@ -268,7 +268,7 @@ function windowBlock(label, stats) {
         `  spend:        ${spendCell(stats)}`,
         `  ctr:          ${ctrCell(stats)}`,
         `  cpc:          ${cpcCell(stats)}`,
-        `  impressions:  ${count(stats.impressions)} · clicks ${count(stats.clicks)}`,
+        `  impressions:  ${count(stats.impressions)} · reach ${count(stats.reach)} · clicks ${count(stats.clicks)}`,
     ];
 }
 function copyBlock(label, text) {

@@ -460,6 +460,7 @@ export interface WorkflowRun {
     pauseAhead?: {
         nodeId: string;
         after: "frames" | "storyboard";
+        selfApproves?: true;
     };
 }
 export declare function pauseAheadLine(ahead: NonNullable<WorkflowRun["pauseAhead"]>): string;

@@ -21,6 +21,9 @@ function joinedOr(items) {
         return items[0] ?? "";
     return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
+function cantSayNames(names) {
+    return `the recorded voice can't say ${joinedOr(names.map((n) => `"${n}"`))}`;
+}
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -100,7 +103,7 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--wait] [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -141,7 +144,11 @@ Options:
   --music              Put a music bed under the ad (start). An ad has no music
                        unless you ask for it here
   --no-music           Leave the music bed off (start), which it already is
-  --wait               Wait until the storyboard needs a yes (start)
+  --review-storyboard  Stop at the storyboard so you can approve it yourself
+                       (start, with --conceit). By default the app approves its
+                       own storyboard when its checks pass
+  --wait               Wait until the run needs you (start): at the
+                       storyboard, or once every piece is made
   --json               Machine-readable output
   --help, -h           Print this help
 
@@ -194,7 +201,7 @@ export function qcWithoutJudgeWording(qc) {
         return qc;
     return {
         ...qc,
-        takes: qc.takes.map(({ judgeWording: _w, ...rest }) => rest),
+        takes: qc.takes.map(({ judgeWording: _w, heardText: _h, ...rest }) => rest),
     };
 }
 export const NO_TAKE_HISTORY_LINE = "no history recorded for this clip";
@@ -321,6 +328,14 @@ function parkedAtFinalWatch(run) {
     return (!parkedByBuilderCheckpoint(run) &&
         run.nodes.some((n) => n.kind === "video" && n.status === "done"));
 }
+function heldReason(run) {
+    const verdict = run.storyboardAutoApproval;
+    if (verdict?.outcome !== "held")
+        return undefined;
+    const reason = verdict.reason?.trim() ||
+        "The app didn't approve this storyboard by itself because its checks found a problem.";
+    return `${reason} (checked ${new Date(verdict.at).toISOString()})`;
+}
 export function classifyRun(run) {
     if (run.status === "failed")
         return { at: "failed", error: run.error };
@@ -340,6 +355,7 @@ export function classifyRun(run) {
         }
         const pausedNode = run.nodes.find((n) => n.nodeId === run.pausedNodeId);
         if (pausedNode && parkedAtStoryboardGate(run, pausedNode)) {
+            const held = heldReason(run);
             return {
                 at: "storyboard-gate",
                 nodeId: pausedNode.nodeId,
@@ -347,9 +363,15 @@ export function classifyRun(run) {
                     ? { framesNodeId: pausedNode.nodeId }
                     : {}),
                 ...(isShowAd(run) ? { showAd: true } : {}),
+                ...(held ? { heldReason: held } : {}),
             };
         }
         if (parkedAtFinalWatch(run)) {
+            const autoRedoScenes = run.nodes
+                .filter((n) => n.kind === "video")
+                .flatMap((n) => n.autoRedoScenes ?? []);
+            if (autoRedoScenes.length > 0)
+                return { at: "running", stage: "video", autoRedoScenes };
             const missingScenes = run.nodes
                 .filter((n) => n.kind === "video")
                 .flatMap((n) => n.missingScenes ?? []);
@@ -367,6 +389,18 @@ export function classifyRun(run) {
 }
 export function hasAttachedCut(items) {
     return items.some((i) => i.itemKind === "final" && i.status === "done");
+}
+export function scenesBeingRedone(run, items) {
+    const scenes = new Set(run.nodes.filter((n) => n.kind === "video").flatMap((n) => n.autoRedoScenes ?? []));
+    for (const i of items) {
+        if (i.itemKind === "clip" &&
+            i.status === "running" &&
+            (i.attempt ?? 1) > 1 &&
+            i.staleClaim !== true) {
+            scenes.add(i.sceneIndex);
+        }
+    }
+    return [...scenes].sort((a, b) => a - b);
 }
 export function resolveStop(stop, cutAttached) {
     if (stop.at !== "final-watch")
@@ -441,6 +475,7 @@ function missingSceneLines(missing, framesNodeId, runId, runUrl) {
 export function stopLines(stop, runId, runUrl) {
     if (stop.at === "storyboard-gate") {
         const lines = [
+            ...(stop.heldReason ? [stop.heldReason] : []),
             "Parked: the storyboard is waiting for your yes.",
             `Read it:    exodus video storyboard ${runId}`,
             `Approve it: exodus video approve ${runId}`,
@@ -512,7 +547,14 @@ export function stopLines(stop, runId, runUrl) {
             `Open it: ${runUrl}`,
         ];
     }
+    if (stop.autoRedoScenes?.length)
+        return [autoRedoLine(stop.autoRedoScenes)];
     return [`Working: ${stageWord(stop.stage)}.`];
+}
+function autoRedoLine(scenes) {
+    const one = scenes.length === 1;
+    return (`Working: the app is redoing ${scenesPhrase(scenes)} on ${one ? "its" : "their"} own because ` +
+        `${one ? "it" : "they"} repeated words. The ad isn't ready to watch until ${one ? "it lands" : "they land"}.`);
 }
 export function failedStoryboardNode(run) {
     return run.nodes.find((n) => n.kind === "storyboard" && n.status === "failed");
@@ -587,6 +629,7 @@ function clipFromArtifact(sceneIndex, artifact) {
         speechTrimmed: artifact.speechTrimmed === true,
         rawStorageId: artifact.rawStorageId ?? null,
         voiceMode: artifact.voiceMode ?? null,
+        voiceFirstBlockedBy: artifact.voiceFirstBlockedBy ?? null,
     };
 }
 function keyframeDownload(sceneIndex, imageUrl) {
@@ -848,6 +891,9 @@ export function planPull(run, items, opts) {
             continue;
         keyframeByScene.set(sceneIndex, keyframeDownload(sceneIndex, artifact.imageUrl));
     }
+    const pendingRedo = scenesBeingRedone(run, items);
+    for (const sceneIndex of pendingRedo)
+        clipByScene.delete(sceneIndex);
     const sceneIndexes = [
         ...new Set([
             ...clipByScene.keys(),
@@ -897,6 +943,7 @@ export function planPull(run, items, opts) {
             speechTrimmed: clip ? clip.speechTrimmed : null,
             rawStorageId: clip ? clip.rawStorageId : null,
             voiceMode: clip ? clip.voiceMode : null,
+            voiceFirstBlockedBy: clip ? clip.voiceFirstBlockedBy : null,
             clipStatus: item?.status ?? "missing",
             error: item?.error ?? null,
             flagged: item?.flagged === true,
@@ -928,6 +975,7 @@ export function planPull(run, items, opts) {
             musicHeardScenes: scenes
                 .filter((scene) => scene.findings.some((f) => f.code === MUSIC_HEARD_CODE))
                 .map((scene) => scene.sceneIndex),
+            pendingRedo,
             cast,
             narration: narrationDownload
                 ? { file: narrationDownload.file, timing: "narration.json" }
@@ -971,6 +1019,7 @@ export function markPullFailure(manifest, failure) {
             scene.speechTrimmed = null;
             scene.rawStorageId = null;
             scene.voiceMode = null;
+            scene.voiceFirstBlockedBy = null;
         }
         if (scene.voice === failure.file)
             scene.voice = null;
@@ -1182,6 +1231,13 @@ export function planVideoStart(flags, occurrences) {
         return { kind: "usage", line: voiceFlag.line };
     const videoModel = videoModelFlag.value;
     const voiceMode = voiceFlag.value;
+    const reviewStoryboard = occurrences.some((o) => o.flag === "review-storyboard");
+    if (showId && reviewStoryboard) {
+        return {
+            kind: "usage",
+            line: "--review-storyboard works with --conceit, not --show. A Show's ad always stops at the storyboard for you.",
+        };
+    }
     if (showId && (videoModel || voiceMode)) {
         return {
             kind: "usage",
@@ -1244,6 +1300,8 @@ export function planVideoStart(flags, occurrences) {
         opts.voiceMode = voiceMode;
     if (musicChoice.music !== undefined)
         opts.music = musicChoice.music;
+    if (reviewStoryboard)
+        opts.reviewStoryboard = true;
     return { kind: "script", opts };
 }
 function isRecord(value) {
@@ -1331,6 +1389,7 @@ export async function startScriptFlow(opts, deps) {
         ...(opts.videoModel ? { videoModel: opts.videoModel } : {}),
         ...(opts.voiceMode ? { voiceMode: opts.voiceMode } : {}),
         ...(opts.music === true ? { music: true } : {}),
+        ...(opts.reviewStoryboard ? { reviewStoryboard: true } : {}),
     });
     if (!res.ok)
         return errorResult(res, opts.json);
@@ -1350,7 +1409,12 @@ export async function startScriptFlow(opts, deps) {
                 : [
                     ...scriptStartedLines(runId, url, card, video),
                     "",
-                    "Wait for the storyboard here instead: exodus video start … --wait",
+                    ...(opts.reviewStoryboard
+                        ? ["Wait for the storyboard here instead: exodus video start … --wait"]
+                        : [
+                            "The app approves the storyboard itself if its checks pass. It only stops for you if they find a problem.",
+                            "Wait here until it needs you:        exodus video start … --wait",
+                        ]),
                     `Or check in whenever:                exodus video status ${runId}`,
                 ],
         };
@@ -1369,7 +1433,8 @@ export async function waitFlow(runId, opts, deps) {
     const interval = opts.intervalMs ?? POLL_INTERVAL_MS;
     const maxPolls = opts.maxPolls ?? MAX_POLLS;
     const lines = [];
-    let lastStage = null;
+    let lastProgress = null;
+    let redoSeen = false;
     for (let poll = 0; poll < maxPolls; poll++) {
         if (poll > 0)
             await deps.sleep(interval);
@@ -1381,14 +1446,35 @@ export async function waitFlow(runId, opts, deps) {
         const run = asVideoRun(res.data);
         const stop = classifyRun(run);
         if (stop.at === "running") {
-            if (stop.stage !== lastStage) {
-                lastStage = stop.stage;
+            const progress = stop.autoRedoScenes?.length
+                ? autoRedoLine(stop.autoRedoScenes)
+                : `Working: ${stageWord(stop.stage)}…`;
+            if (progress !== lastProgress) {
+                lastProgress = progress;
                 if (!opts.json)
-                    lines.push(`Working: ${stageWord(stop.stage)}…`);
+                    lines.push(progress);
             }
             continue;
         }
-        const resolved = await resolveStopAtPark(stop, runId, deps);
+        let items = null;
+        if (stop.at === "final-watch") {
+            const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+            items = itemsRes.ok ? (itemsRes.data.items ?? []) : null;
+            if (items === null && redoSeen)
+                continue;
+            const redoing = items ? scenesBeingRedone(run, items) : [];
+            redoSeen = redoing.length > 0;
+            if (redoSeen) {
+                const progress = `Working: redoing scene${redoing.length === 1 ? "" : "s"} ${redoing.join(", ")}…`;
+                if (progress !== lastProgress) {
+                    lastProgress = progress;
+                    if (!opts.json)
+                        lines.push(progress);
+                }
+                continue;
+            }
+        }
+        const resolved = resolveStop(stop, items ? hasAttachedCut(items) : null);
         if (opts.json) {
             return {
                 code: stop.at === "failed" ? 1 : 0,
@@ -1469,12 +1555,18 @@ export async function statusFlow(runId, json, deps) {
     }
     const revoicedByScene = new Set();
     const voiceFirstByScene = new Set();
+    const voiceFirstBlockedByScene = new Map();
     const timedOnOriginalVoice = new Set();
     for (const artifact of outputsOfNodeKind(run, "video")) {
         if (artifact.type === "video" &&
             artifact.voiceMode === "voice-first" &&
             typeof artifact.sceneIndex === "number") {
             voiceFirstByScene.add(artifact.sceneIndex);
+        }
+        if (artifact.type === "video" &&
+            artifact.voiceFirstBlockedBy?.length &&
+            typeof artifact.sceneIndex === "number") {
+            voiceFirstBlockedByScene.set(artifact.sceneIndex, artifact.voiceFirstBlockedBy);
         }
         if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
             revoicedByScene.add(artifact.sceneIndex);
@@ -1546,6 +1638,10 @@ export async function statusFlow(runId, json, deps) {
                 lines.push("       voice: cast voice applied");
             if (voiceFirstByScene.has(sceneIndex))
                 lines.push("       clip: redone voice first");
+            const blockedBy = voiceFirstBlockedByScene.get(sceneIndex);
+            if (blockedBy) {
+                lines.push(`       clip: redone the usual way — ${cantSayNames(blockedBy)}`);
+            }
             if (timedOnOriginalVoice.has(sceneIndex)) {
                 lines.push("       word timings: measured on the original voice (close, not frame-exact)");
             }
@@ -1789,7 +1885,10 @@ export function planClipRedo(run, items, target) {
     const { row, uploadedCut } = found;
     const redoable = row.status === "failed" ||
         row.staleClaim === true ||
-        (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
+        (row.status === "done" &&
+            (row.flagged === true ||
+                stop.at === "final-watch" ||
+                (stop.at === "running" && stop.autoRedoScenes !== undefined)));
     if (!redoable) {
         if (row.status === "done") {
             return {
@@ -1904,7 +2003,9 @@ export async function retryClipFlow(runId, target, { note, voiceFirst = false },
         lines: [
             voiceFirst
                 ? `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}, voice first: the line is ` +
-                    "recorded in the character's own voice, then the clip is made to match it."
+                    "recorded in the character's own voice, then the clip is made to match it. " +
+                    "If the line has a made-up name the recorded voice can't say, the clip may be made " +
+                    `the usual way instead, and exodus video status ${runId} will say so.`
                 : `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
             `triggerRunId: ${triggerRunId ?? "-"}`,
             ...(voiceFirst
@@ -2281,10 +2382,20 @@ export async function pullFlow(runId, dir, json, deps) {
         `Every piece is indexed in ${path.join(dir, "manifest.json")} — scene numbers there are the run's own.`,
         ...musicLines(plan.manifest),
     ];
+    for (const sceneIndex of plan.manifest.pendingRedo) {
+        lines.push("", `Scene ${sceneIndex} is being redone right now; its file will change. Run \`exodus video wait ${runId}\`, then pull again.`);
+    }
     const voiceFirst = plan.manifest.scenes.filter((s) => s.voiceMode === "voice-first");
     if (voiceFirst.length > 0) {
         lines.push("", `Redone voice first (the line recorded, then the clip made to match it): ` +
             `scene${voiceFirst.length === 1 ? "" : "s"} ${voiceFirst.map((s) => s.sceneIndex).join(", ")}`);
+    }
+    const redoneUsualWay = plan.manifest.scenes.filter((s) => s.voiceFirstBlockedBy?.length);
+    if (redoneUsualWay.length > 0) {
+        lines.push("", "Asked for voice first, but redone the usual way:");
+        for (const scene of redoneUsualWay) {
+            lines.push(`  scene ${scene.sceneIndex}: ${cantSayNames(scene.voiceFirstBlockedBy ?? [])}`);
+        }
     }
     const flagged = plan.manifest.scenes.filter((s) => s.flagged);
     if (flagged.length > 0) {

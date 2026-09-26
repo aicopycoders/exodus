@@ -30,6 +30,10 @@ function joinedOr(items: readonly string[]): string {
   return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
 
+function cantSayNames(names: readonly string[]): string {
+  return `the recorded voice can't say ${joinedOr(names.map((n) => `"${n}"`))}`;
+}
+
 export const helpText = `
 exodus video — make a video ad from a saved workflow, pull every piece, upload your cut
 
@@ -109,7 +113,7 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--wait] [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -150,7 +154,11 @@ Options:
   --music              Put a music bed under the ad (start). An ad has no music
                        unless you ask for it here
   --no-music           Leave the music bed off (start), which it already is
-  --wait               Wait until the storyboard needs a yes (start)
+  --review-storyboard  Stop at the storyboard so you can approve it yourself
+                       (start, with --conceit). By default the app approves its
+                       own storyboard when its checks pass
+  --wait               Wait until the run needs you (start): at the
+                       storyboard, or once every piece is made
   --json               Machine-readable output
   --help, -h           Print this help
 
@@ -233,6 +241,9 @@ export interface ClipQcTake {
   /** The checker's own words. Admin-only, exactly like ClipFinding.judgeDetail
    *  (#1784), and never written into a pull manifest. */
   judgeWording?: { code: string; wording: string }[];
+  /** #2520: what the transcript heard on a take whose words failed. Admin-only
+   *  like `judgeWording`, and never written into a pull manifest. */
+  heardText?: string;
 }
 
 export interface ClipQc {
@@ -266,7 +277,8 @@ function withoutJudgeFields({ judgeDetail: _d, judgeSeverity: _s, ...rest }: Cli
   return rest;
 }
 
-/** #1716: a clip's QC stamp with the checker's words out of its take history.
+/** #1716: a clip's QC stamp with the checker's words (and, #2520, what the
+ *  transcript heard) out of its take history.
  *  Applied to the pull manifest under the SAME rule as `withoutJudgeFields` —
  *  unconditionally, because the checker's words are never written into a pulled
  *  file whoever is pulling. */
@@ -274,7 +286,7 @@ export function qcWithoutJudgeWording(qc: ClipQc): ClipQc {
   if (!qc.takes) return qc;
   return {
     ...qc,
-    takes: qc.takes.map(({ judgeWording: _w, ...rest }) => rest),
+    takes: qc.takes.map(({ judgeWording: _w, heardText: _h, ...rest }) => rest),
   };
 }
 
@@ -359,6 +371,8 @@ export type ArtifactSubset =
       rawStorageId?: string;
       /** #2299: the clip was redone voice first. */
       voiceMode?: "voice-first";
+      /** #2534: voice first was asked, but these made-up names kept the redo the usual way. */
+      voiceFirstBlockedBy?: string[];
     }
   | {
       type: "audio";
@@ -426,6 +440,9 @@ export interface VideoRunNode {
    *  marks a scene whose picture the video service refused, which a clip redo
    *  alone cannot fix. Absent when none are missing, and on older backends. */
   missingScenes?: MissingScene[];
+  /** #2616: scenes the app's automatic word redo is still redoing. Absent when
+   *  none are, and on older backends. */
+  autoRedoScenes?: number[];
 }
 
 export interface MissingScene {
@@ -478,6 +495,10 @@ export interface VideoRun {
   /** #2282: the video model and voice mode a paste-a-script run used. Absent on
    *  every other run and on backends older than #2282. */
   videoChoice?: RunVideoChoice;
+  /** #2587: the app's one-time verdict on approving a paste-a-script run's
+   *  storyboard itself. Absent on a run the member chose to review by hand, on
+   *  every other kind of run, and on backends older than #2587. */
+  storyboardAutoApproval?: { outcome: "approved" | "held"; at: number; reason?: string };
   /** The saved workflow this run executed (`projectRun`, convex/workflows.ts). */
   workflowId?: string;
   /** #1851: set only when the run's workflow row is module-owned, which is what
@@ -637,10 +658,20 @@ function errorResult(res: ApiResponse<unknown>, json: boolean): FlowResult {
 }
 
 export type RunStop =
-  | { at: "running"; stage: string }
+  // #2616: `autoRedoScenes` is a final watch the app's automatic word redo has
+  // not finished with, so it is not ready to watch yet.
+  | { at: "running"; stage: string; autoRedoScenes?: number[] }
   // #1908: `showAd` is optional so a run snapshot taken before this shipped
   // still parses, and reads as the reduced block rather than crashing.
-  | { at: "storyboard-gate"; nodeId?: string; framesNodeId?: string; showAd?: true }
+  | {
+      at: "storyboard-gate";
+      nodeId?: string;
+      framesNodeId?: string;
+      showAd?: true;
+      /** #2587: why the app would not approve its own storyboard, as the
+       *  server wrote it for the member. */
+      heldReason?: string;
+    }
   // #2266: `missingScenes` is absent when every scene has a clip. `framesNodeId`
   // is the step whose stills a refused picture is redrawn on.
   | { at: "final-watch"; missingScenes?: MissingScene[]; framesNodeId?: string }
@@ -697,6 +728,16 @@ function parkedAtFinalWatch(run: VideoRun): boolean {
   );
 }
 
+function heldReason(run: VideoRun): string | undefined {
+  const verdict = run.storyboardAutoApproval;
+  if (verdict?.outcome !== "held") return undefined;
+  const reason =
+    verdict.reason?.trim() ||
+    "The app didn't approve this storyboard by itself because its checks found a problem.";
+  // Judged once: a picture redone after this time is not counted in it.
+  return `${reason} (checked ${new Date(verdict.at).toISOString()})`;
+}
+
 export function classifyRun(run: VideoRun): RunStop {
   if (run.status === "failed") return { at: "failed", error: run.error };
   if (run.isTerminal) return { at: "finished", status: run.status };
@@ -720,6 +761,7 @@ export function classifyRun(run: VideoRun): RunStop {
     }
     const pausedNode = run.nodes.find((n) => n.nodeId === run.pausedNodeId);
     if (pausedNode && parkedAtStoryboardGate(run, pausedNode)) {
+      const held = heldReason(run);
       return {
         at: "storyboard-gate",
         nodeId: pausedNode.nodeId,
@@ -727,9 +769,14 @@ export function classifyRun(run: VideoRun): RunStop {
           ? { framesNodeId: pausedNode.nodeId }
           : {}),
         ...(isShowAd(run) ? { showAd: true } : {}),
+        ...(held ? { heldReason: held } : {}),
       };
     }
     if (parkedAtFinalWatch(run)) {
+      const autoRedoScenes = run.nodes
+        .filter((n) => n.kind === "video")
+        .flatMap((n) => n.autoRedoScenes ?? []);
+      if (autoRedoScenes.length > 0) return { at: "running", stage: "video", autoRedoScenes };
       const missingScenes = run.nodes
         .filter((n) => n.kind === "video")
         .flatMap((n) => n.missingScenes ?? []);
@@ -754,6 +801,30 @@ export function classifyRun(run: VideoRun): RunStop {
  */
 export function hasAttachedCut(items: NodeItem[]): boolean {
   return items.some((i) => i.itemKind === "final" && i.status === "done");
+}
+
+/**
+ * #2608: the scenes whose clip is about to be replaced: the app's automatic
+ * word redo (the run's `autoRedoScenes`, #2616) and a running redo someone
+ * asked for. A redo claim moves `attempt` past 1; a first render left "running"
+ * by a lost ledger write is not a redo (#1893). A dead worker's row is not a
+ * redo in flight (#1870), or it would hold `wait` open for good.
+ */
+export function scenesBeingRedone(run: VideoRun, items: NodeItem[]): number[] {
+  const scenes = new Set(
+    run.nodes.filter((n) => n.kind === "video").flatMap((n) => n.autoRedoScenes ?? []),
+  );
+  for (const i of items) {
+    if (
+      i.itemKind === "clip" &&
+      i.status === "running" &&
+      (i.attempt ?? 1) > 1 &&
+      i.staleClaim !== true
+    ) {
+      scenes.add(i.sceneIndex);
+    }
+  }
+  return [...scenes].sort((a, b) => a - b);
 }
 
 /** #1704: fill in the one fact `classifyRun` cannot see. `cutAttached` comes
@@ -887,6 +958,7 @@ function missingSceneLines(
 export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): string[] {
   if (stop.at === "storyboard-gate") {
     const lines = [
+      ...(stop.heldReason ? [stop.heldReason] : []),
       "Parked: the storyboard is waiting for your yes.",
       `Read it:    exodus video storyboard ${runId}`,
       `Approve it: exodus video approve ${runId}`,
@@ -976,7 +1048,16 @@ export function stopLines(stop: ResolvedStop, runId: string, runUrl: string): st
       `Open it: ${runUrl}`,
     ];
   }
+  if (stop.autoRedoScenes?.length) return [autoRedoLine(stop.autoRedoScenes)];
   return [`Working: ${stageWord(stop.stage)}.`];
+}
+
+function autoRedoLine(scenes: number[]): string {
+  const one = scenes.length === 1;
+  return (
+    `Working: the app is redoing ${scenesPhrase(scenes)} on ${one ? "its" : "their"} own because ` +
+    `${one ? "it" : "they"} repeated words. The ad isn't ready to watch until ${one ? "it lands" : "they land"}.`
+  );
 }
 
 /**
@@ -1077,6 +1158,9 @@ export interface ManifestScene {
   /** #2299: "voice-first" when the clip was redone voice first (its line
    *  recorded, then the picture made to match). Null otherwise or without a clip. */
   voiceMode: "voice-first" | null;
+  /** #2534: the made-up names that kept a requested voice-first redo the usual
+   *  way. Null otherwise or without a clip. */
+  voiceFirstBlockedBy: string[] | null;
   /** The clip ledger row's status (pending/running/done/failed), or "missing"
    *  when the run never wrote one. */
   clipStatus: string;
@@ -1145,6 +1229,11 @@ export interface VideoManifest {
    * by scene rather than only by the absence of a bed file.
    */
   musicHeardScenes: number[];
+  /**
+   * #2608: scenes a redo is making again right now. Their clip and its words
+   * are left out, because the file the run holds is the take being replaced.
+   */
+  pendingRedo: number[];
   cast: ManifestCastRef[];
   /** Continuous master take, or null when the run has only per-scene VO. */
   narration: { file: string; timing: string } | null;
@@ -1216,6 +1305,7 @@ type SceneClipPull = {
   speechTrimmed: boolean;
   rawStorageId: string | null;
   voiceMode: "voice-first" | null;
+  voiceFirstBlockedBy: string[] | null;
 };
 
 function clipFromArtifact(
@@ -1237,6 +1327,7 @@ function clipFromArtifact(
     speechTrimmed: artifact.speechTrimmed === true,
     rawStorageId: artifact.rawStorageId ?? null,
     voiceMode: artifact.voiceMode ?? null,
+    voiceFirstBlockedBy: artifact.voiceFirstBlockedBy ?? null,
   };
 }
 
@@ -1547,6 +1638,9 @@ export function planPull(
     keyframeByScene.set(sceneIndex, keyframeDownload(sceneIndex, artifact.imageUrl));
   }
 
+  const pendingRedo = scenesBeingRedone(run, items);
+  for (const sceneIndex of pendingRedo) clipByScene.delete(sceneIndex);
+
   const sceneIndexes = [
     ...new Set([
       ...clipByScene.keys(),
@@ -1606,6 +1700,7 @@ export function planPull(
       speechTrimmed: clip ? clip.speechTrimmed : null,
       rawStorageId: clip ? clip.rawStorageId : null,
       voiceMode: clip ? clip.voiceMode : null,
+      voiceFirstBlockedBy: clip ? clip.voiceFirstBlockedBy : null,
       clipStatus: item?.status ?? "missing",
       error: item?.error ?? null,
       flagged: item?.flagged === true,
@@ -1644,6 +1739,7 @@ export function planPull(
       musicHeardScenes: scenes
         .filter((scene) => scene.findings.some((f) => f.code === MUSIC_HEARD_CODE))
         .map((scene) => scene.sceneIndex),
+      pendingRedo,
       cast,
       narration: narrationDownload
         ? { file: narrationDownload.file, timing: "narration.json" }
@@ -1687,6 +1783,7 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
       scene.speechTrimmed = null;
       scene.rawStorageId = null;
       scene.voiceMode = null;
+      scene.voiceFirstBlockedBy = null;
     }
     if (scene.voice === failure.file) scene.voice = null;
     if (scene.keyframe === failure.file) scene.keyframe = null;
@@ -1798,6 +1895,9 @@ export interface ScriptStartOptions {
   voiceMode?: VoiceMode;
   /** #2247: see `planMusicChoice`. Undefined is "nobody said". */
   music?: boolean;
+  /** #2587: stop at the storyboard for the member. Absent, the app approves
+   *  its own storyboard when its checks pass. */
+  reviewStoryboard?: true;
   wait: boolean;
   json: boolean;
 }
@@ -1964,6 +2064,13 @@ export function planVideoStart(
   if (!voiceFlag.ok) return { kind: "usage", line: voiceFlag.line };
   const videoModel = videoModelFlag.value;
   const voiceMode = voiceFlag.value;
+  const reviewStoryboard = occurrences.some((o) => o.flag === "review-storyboard");
+  if (showId && reviewStoryboard) {
+    return {
+      kind: "usage",
+      line: "--review-storyboard works with --conceit, not --show. A Show's ad always stops at the storyboard for you.",
+    };
+  }
   if (showId && (videoModel || voiceMode)) {
     return {
       kind: "usage",
@@ -2022,6 +2129,7 @@ export function planVideoStart(
   if (videoModel) opts.videoModel = videoModel;
   if (voiceMode && isVoiceMode(voiceMode)) opts.voiceMode = voiceMode;
   if (musicChoice.music !== undefined) opts.music = musicChoice.music;
+  if (reviewStoryboard) opts.reviewStoryboard = true;
   return { kind: "script", opts };
 }
 
@@ -2129,6 +2237,7 @@ export async function startScriptFlow(
     // #2247: a paste-a-script run has no bed unless it is asked for, so "off"
     // and "nobody said" are the same request. Only "on" has anything to send.
     ...(opts.music === true ? { music: true } : {}),
+    ...(opts.reviewStoryboard ? { reviewStoryboard: true } : {}),
   });
   if (!res.ok) return errorResult(res, opts.json);
   const started = res.data as {
@@ -2153,7 +2262,12 @@ export async function startScriptFlow(
         : [
             ...scriptStartedLines(runId, url, card, video),
             "",
-            "Wait for the storyboard here instead: exodus video start … --wait",
+            ...(opts.reviewStoryboard
+              ? ["Wait for the storyboard here instead: exodus video start … --wait"]
+              : [
+                  "The app approves the storyboard itself if its checks pass. It only stops for you if they find a problem.",
+                  "Wait here until it needs you:        exodus video start … --wait",
+                ]),
             `Or check in whenever:                exodus video status ${runId}`,
           ],
     };
@@ -2178,7 +2292,8 @@ export async function waitFlow(
   const interval = opts.intervalMs ?? POLL_INTERVAL_MS;
   const maxPolls = opts.maxPolls ?? MAX_POLLS;
   const lines: string[] = [];
-  let lastStage: string | null = null;
+  let lastProgress: string | null = null;
+  let redoSeen = false;
 
   for (let poll = 0; poll < maxPolls; poll++) {
     if (poll > 0) await deps.sleep(interval);
@@ -2190,15 +2305,35 @@ export async function waitFlow(
     const run = asVideoRun(res.data);
     const stop = classifyRun(run);
     if (stop.at === "running") {
-      if (stop.stage !== lastStage) {
-        lastStage = stop.stage;
-        if (!opts.json) lines.push(`Working: ${stageWord(stop.stage)}…`);
+      const progress = stop.autoRedoScenes?.length
+        ? autoRedoLine(stop.autoRedoScenes)
+        : `Working: ${stageWord(stop.stage)}…`;
+      if (progress !== lastProgress) {
+        lastProgress = progress;
+        if (!opts.json) lines.push(progress);
       }
       continue;
     }
-    // #1704: after the loop, so an hour-long wait costs ONE extra read, not one
-    // per poll.
-    const resolved = await resolveStopAtPark(stop, runId, deps);
+    let items: NodeItem[] | null = null;
+    if (stop.at === "final-watch") {
+      const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+      items = itemsRes.ok ? ((itemsRes.data as { items?: NodeItem[] }).items ?? []) : null;
+      // #2608: a redo someone asked for leaves the run parked at the final
+      // watch, so only the scene rows show its clip is still being made. A
+      // failed read mid-redo proves nothing finished, so it keeps waiting too.
+      if (items === null && redoSeen) continue;
+      const redoing = items ? scenesBeingRedone(run, items) : [];
+      redoSeen = redoing.length > 0;
+      if (redoSeen) {
+        const progress = `Working: redoing scene${redoing.length === 1 ? "" : "s"} ${redoing.join(", ")}…`;
+        if (progress !== lastProgress) {
+          lastProgress = progress;
+          if (!opts.json) lines.push(progress);
+        }
+        continue;
+      }
+    }
+    const resolved = resolveStop(stop, items ? hasAttachedCut(items) : null);
     if (opts.json) {
       return {
         code: stop.at === "failed" ? 1 : 0,
@@ -2328,6 +2463,7 @@ export async function statusFlow(
 
   const revoicedByScene = new Set<number>();
   const voiceFirstByScene = new Set<number>();
+  const voiceFirstBlockedByScene = new Map<number, string[]>();
   // #1848: a revoiced clip that also carries word times — those times were
   // measured on the take the cast voice replaced, and nothing re-measures them.
   const timedOnOriginalVoice = new Set<number>();
@@ -2338,6 +2474,13 @@ export async function statusFlow(
       typeof artifact.sceneIndex === "number"
     ) {
       voiceFirstByScene.add(artifact.sceneIndex);
+    }
+    if (
+      artifact.type === "video" &&
+      artifact.voiceFirstBlockedBy?.length &&
+      typeof artifact.sceneIndex === "number"
+    ) {
+      voiceFirstBlockedByScene.set(artifact.sceneIndex, artifact.voiceFirstBlockedBy);
     }
     if (artifact.type === "video" && artifact.revoiced === true && typeof artifact.sceneIndex === "number") {
       revoicedByScene.add(artifact.sceneIndex);
@@ -2424,6 +2567,10 @@ export async function statusFlow(
       // #1708: the cast voice applied, and what the picture check found.
       if (revoicedByScene.has(sceneIndex)) lines.push("       voice: cast voice applied");
       if (voiceFirstByScene.has(sceneIndex)) lines.push("       clip: redone voice first");
+      const blockedBy = voiceFirstBlockedByScene.get(sceneIndex);
+      if (blockedBy) {
+        lines.push(`       clip: redone the usual way — ${cantSayNames(blockedBy)}`);
+      }
       if (timedOnOriginalVoice.has(sceneIndex)) {
         lines.push("       word timings: measured on the original voice (close, not frame-exact)");
       }
@@ -2788,7 +2935,11 @@ export function planClipRedo(
   const redoable =
     row.status === "failed" ||
     row.staleClaim === true ||
-    (row.status === "done" && (row.flagged === true || stop.at === "final-watch"));
+    (row.status === "done" &&
+      (row.flagged === true ||
+        stop.at === "final-watch" ||
+        // #2616: still parked at the final watch while the automatic redo lands.
+        (stop.at === "running" && stop.autoRedoScenes !== undefined)));
   if (!redoable) {
     if (row.status === "done") {
       return {
@@ -2936,7 +3087,9 @@ export async function retryClipFlow(
     lines: [
       voiceFirst
         ? `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}, voice first: the line is ` +
-          "recorded in the character's own voice, then the clip is made to match it."
+          "recorded in the character's own voice, then the clip is made to match it. " +
+          "If the line has a made-up name the recorded voice can't say, the clip may be made " +
+          `the usual way instead, and exodus video status ${runId} will say so.`
         : `Redoing scene ${plan.sceneIndex}'s clip on ${plan.nodeId}.`,
       `triggerRunId: ${triggerRunId ?? "-"}`,
       ...(voiceFirst
@@ -3496,6 +3649,12 @@ export async function pullFlow(
     `Every piece is indexed in ${path.join(dir, "manifest.json")} — scene numbers there are the run's own.`,
     ...musicLines(plan.manifest),
   ];
+  for (const sceneIndex of plan.manifest.pendingRedo) {
+    lines.push(
+      "",
+      `Scene ${sceneIndex} is being redone right now; its file will change. Run \`exodus video wait ${runId}\`, then pull again.`,
+    );
+  }
   const voiceFirst = plan.manifest.scenes.filter((s) => s.voiceMode === "voice-first");
   if (voiceFirst.length > 0) {
     lines.push(
@@ -3503,6 +3662,13 @@ export async function pullFlow(
       `Redone voice first (the line recorded, then the clip made to match it): ` +
         `scene${voiceFirst.length === 1 ? "" : "s"} ${voiceFirst.map((s) => s.sceneIndex).join(", ")}`,
     );
+  }
+  const redoneUsualWay = plan.manifest.scenes.filter((s) => s.voiceFirstBlockedBy?.length);
+  if (redoneUsualWay.length > 0) {
+    lines.push("", "Asked for voice first, but redone the usual way:");
+    for (const scene of redoneUsualWay) {
+      lines.push(`  scene ${scene.sceneIndex}: ${cantSayNames(scene.voiceFirstBlockedBy ?? [])}`);
+    }
   }
   const flagged = plan.manifest.scenes.filter((s) => s.flagged);
   if (flagged.length > 0) {

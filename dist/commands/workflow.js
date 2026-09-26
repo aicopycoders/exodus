@@ -378,6 +378,9 @@ export function formatRulesLine(provenance) {
     return `Format rules: ${rigName}${version}${where}.${borrowed}`;
 }
 export function pauseAheadLine(ahead) {
+    if (ahead.after === "frames" && ahead.selfApproves) {
+        return "When the frames are ready, the app checks the storyboard and approves it itself if the checks pass, then goes on to the voices and clips. It only stops for your approval if a check finds a problem. The reference, cast and scene pictures are made first (a few cents each).";
+    }
     return ahead.after === "frames"
         ? "This run will pause for your approval once the frames are ready. The reference, cast and scene pictures are made first (a few cents each). Nothing bigger is spent until you approve."
         : "This run will pause for your approval once the storyboard is written. Nothing is spent on pictures, voices or clips until you approve.";
@@ -2088,6 +2091,7 @@ function videoParkStop(raw) {
 async function waitForRun(runId, opts, deps) {
     const seen = new Map();
     let pausedNotified = false;
+    let autoRedoNotified;
     const landOnPark = opts.landOnPark;
     const isLandingPark = (raw) => (landOnPark !== undefined && raw["pauseReason"] === landOnPark.pauseReason) ||
         videoParkStop(raw) !== undefined;
@@ -2105,7 +2109,15 @@ async function waitForRun(runId, opts, deps) {
                 return;
             const parked = isParkedSnapshot(raw);
             const isLanding = isLandingPark(raw);
-            if (parked && !pausedNotified && !isLanding) {
+            const autoRedo = parked ? classifyRun(asVideoRun(raw)) : undefined;
+            if (autoRedo?.at === "running" && autoRedo.autoRedoScenes) {
+                const line = `  ${stopLines(autoRedo, runId, "")[0]}`;
+                if (line !== autoRedoNotified) {
+                    autoRedoNotified = line;
+                    opts.onProgressLine(line);
+                }
+            }
+            else if (parked && !pausedNotified && !isLanding) {
                 pausedNotified = true;
                 const dashboardUrl = deps.dashboardUrl ?? getDashboardUrl();
                 const pauseReason = raw["pauseReason"];
@@ -2113,7 +2125,9 @@ async function waitForRun(runId, opts, deps) {
                     opts.onProgressLine(line);
                 }
             }
-            const parkedNodeId = gateParkedNodeId(raw["status"], raw["pauseReason"], raw["pausedNodeId"]);
+            const parkedNodeId = autoRedo?.at === "running"
+                ? undefined
+                : gateParkedNodeId(raw["status"], raw["pauseReason"], raw["pausedNodeId"]);
             const nodes = Array.isArray(raw["nodes"]) ? raw["nodes"] : [];
             for (const node of nodes) {
                 const isParked = parkedNodeId !== undefined && node.nodeId === parkedNodeId;

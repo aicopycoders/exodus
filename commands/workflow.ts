@@ -1324,13 +1324,19 @@ export interface WorkflowRun {
    * than #1883. A promise is therefore worth acting on and silence is not
    * worth reading anything into. `after` says what has been rendered by the
    * time it parks: "frames" means the cheap pictures came first, "storyboard"
-   * means nothing was drawn yet.
+   * means nothing was drawn yet. `selfApproves` (#2587): a paste-a-script run
+   * checks its own storyboard at that stop and goes on by itself when every
+   * check passes, so it only truly pauses when one fails. Absent on runs that
+   * wait for a click, and on every backend older than #2587.
    */
-  pauseAhead?: { nodeId: string; after: "frames" | "storyboard" };
+  pauseAhead?: { nodeId: string; after: "frames" | "storyboard"; selfApproves?: true };
 }
 
 /** #1883: the one sentence both status commands say about a coming pause. */
 export function pauseAheadLine(ahead: NonNullable<WorkflowRun["pauseAhead"]>): string {
+  if (ahead.after === "frames" && ahead.selfApproves) {
+    return "When the frames are ready, the app checks the storyboard and approves it itself if the checks pass, then goes on to the voices and clips. It only stops for your approval if a check finds a problem. The reference, cast and scene pictures are made first (a few cents each).";
+  }
   return ahead.after === "frames"
     ? "This run will pause for your approval once the frames are ready. The reference, cast and scene pictures are made first (a few cents each). Nothing bigger is spent until you approve."
     : "This run will pause for your approval once the storyboard is written. Nothing is spent on pictures, voices or clips until you approve.";
@@ -4160,6 +4166,7 @@ async function waitForRun(
   // see the dedup note in the poll loop below.
   const seen = new Map<string, string>();
   let pausedNotified = false;
+  let autoRedoNotified: string | undefined;
   const landOnPark = opts.landOnPark;
   // The park this wait ENDS on: the one `landOnPark` names (#998), or a video
   // storyboard-gate / final-watch park (#1788). Any other park keeps polling.
@@ -4195,7 +4202,16 @@ async function waitForRun(
       // announces it — don't also fire the "you've been interrupted" banner
       // mid-poll.
       const isLanding = isLandingPark(raw);
-      if (parked && !pausedNotified && !isLanding) {
+      // #2616: a final watch the automatic word redo is still changing is not a
+      // pause to act on. Say what is coming instead of the cost-gate banner.
+      const autoRedo = parked ? classifyRun(asVideoRun(raw)) : undefined;
+      if (autoRedo?.at === "running" && autoRedo.autoRedoScenes) {
+        const line = `  ${stopLines(autoRedo, runId, "")[0]}`;
+        if (line !== autoRedoNotified) {
+          autoRedoNotified = line;
+          opts.onProgressLine(line);
+        }
+      } else if (parked && !pausedNotified && !isLanding) {
         pausedNotified = true;
         // #891: dispatch the pause banner on WHY the run parked. The dashboard
         // URL comes from the injected deps (override → dev.xo → xo, same
@@ -4211,11 +4227,14 @@ async function waitForRun(
       // `⏸ awaiting approval` rather than a misleading `✓ done` (matches the final
       // formatWorkflowRun). #931: branch on the park KIND, same as the final
       // render — repair/slots/call parks leave their paused node as-is.
-      const parkedNodeId = gateParkedNodeId(
-        raw["status"] as string | undefined,
-        raw["pauseReason"] as WorkflowPauseReason | undefined,
-        raw["pausedNodeId"] as string | undefined,
-      );
+      const parkedNodeId =
+        autoRedo?.at === "running"
+          ? undefined
+          : gateParkedNodeId(
+              raw["status"] as string | undefined,
+              raw["pauseReason"] as WorkflowPauseReason | undefined,
+              raw["pausedNodeId"] as string | undefined,
+            );
       const nodes = Array.isArray(raw["nodes"]) ? (raw["nodes"] as WorkflowRunNode[]) : [];
       for (const node of nodes) {
         // #931: dedup on the RENDERED state, not status alone. A parked node can
