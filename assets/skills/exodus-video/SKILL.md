@@ -962,8 +962,11 @@ the pieces:
   reaction beat keep their length.
 - **It fades the audience reaction in and out.** A reaction beat fades in
   across any quiet start before its laugh (a generated laugh clip can hum
-  there) and fades out over its last 0.4 s. Only a reaction clip longer than
-  its beat carries its own sound on under the next line.
+  there). When a line follows, the picture moves on early and the laugh's own
+  remaining sound plays on under that line, quieter and fading out: up to
+  0.75 s, and the beat keeps at least 1 s of picture (a 1.5 s clip shows 1 s
+  and carries its last 0.5 s). A beat that ends the ad, or has under 0.4 s to
+  carry, fades out over its last 0.4 s instead.
 - **It ignores the continuous master.** It reads only `scene-NN.voice` files;
   it never opens `narration.mp3` or `manifest.narration`. A tool that lays the
   master down whole and cuts the pictures to it keeps the read intact.

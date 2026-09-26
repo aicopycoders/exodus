@@ -71,8 +71,10 @@ export const REACTION_MAX_SEC = 1.5;
  */
 export const REACTION_TAIL_SEC = 0.75;
 export const REACTION_TAIL_GAIN = 0.35;
-/** A reaction clip that ends with its beat fades out over this long instead (#2666). */
+/** A reaction clip with too little sound for a tail fades out over this long instead (#2666). */
 export const REACTION_FADE_OUT_SEC = 0.4;
+/** The least picture a reaction beat keeps when it gives up its end to a tail (#2700). */
+export const REACTION_MIN_BEAT_SEC = 1.0;
 /**
  * The air a join keeps around its words (#2388): after one clip's last word, and
  * before the next clip's first, less when the same speaker carries on than when
@@ -539,17 +541,21 @@ function placeReaction(spine, counts, reaction) {
 }
 
 /**
- * The sound a reaction beat carries under the next segment (#2406): the clip's
- * own sound past the beat (older 4 s pulls), or null when the clip ends with
- * the beat and the beat fades itself out. Replaying the beat's last stretch
- * there played its laugh twice, heard as a stutter (#2666).
+ * The sound a reaction beat carries under the next segment (#2406), as a J/L
+ * cut: the picture moves on early and the clip's sound from where it stops
+ * plays under the next line. A clip that ends with its beat gives up the
+ * beat's end, down to REACTION_MIN_BEAT_SEC, rather than replaying sound the
+ * beat already played, which was heard as a stutter (#2666, #2700). Shortens
+ * the beat, so it runs before the spine's start times are set. Null when
+ * under 0.4 s of sound would carry over; the beat fades itself out then.
  */
-function reactionTail(seg, next) {
+function carveReactionTail(seg, next) {
   const clipLen = seg.clipSeconds ?? seg.seconds;
-  const fromSec = seg.inSec + seg.seconds;
-  if (clipLen - fromSec < REACTION_FADE_OUT_SEC) return null;
-  const seconds = Math.min(REACTION_TAIL_SEC, next.seconds, clipLen - fromSec);
-  return { atSec: next.startSec, fromSec, seconds, gain: REACTION_TAIL_GAIN };
+  const overlap =
+    Math.round(Math.min(REACTION_TAIL_SEC, clipLen - seg.inSec - REACTION_MIN_BEAT_SEC, next.seconds) * 1000) / 1000;
+  if (overlap < REACTION_FADE_OUT_SEC) return null;
+  seg.seconds = Math.min(seg.seconds, Math.round((clipLen - seg.inSec - overlap) * 1000) / 1000);
+  return { fromSec: seg.inSec + seg.seconds, seconds: overlap, gain: REACTION_TAIL_GAIN };
 }
 
 /**
@@ -673,17 +679,20 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
       dropped.push({ n: c.sceneIndex, reason: `cutaway ${c.sceneIndex}: ${noCue(c)}` });
     }
   }
+  spine.forEach((seg, k) => {
+    if (!seg.reaction || seg.audio !== "clip") return;
+    const tail = spine[k + 1] ? carveReactionTail(seg, spine[k + 1]) : null;
+    if (tail) seg.reaction.tail = tail;
+    else seg.fadeOutSec = Math.min(REACTION_FADE_OUT_SEC, seg.seconds);
+    seg.fadeInSec = quietStart(readLevels(seg.file), seg.seconds);
+  });
   let total = 0;
   for (const seg of spine) {
     seg.startSec = total;
     total += seg.seconds;
   }
   spine.forEach((seg, k) => {
-    if (!seg.reaction || seg.audio !== "clip") return;
-    seg.fadeInSec = quietStart(readLevels(seg.file), seg.seconds);
-    const tail = spine[k + 1] ? reactionTail(seg, spine[k + 1]) : null;
-    if (tail) seg.reaction.tail = tail;
-    else seg.fadeOutSec = Math.min(REACTION_FADE_OUT_SEC, seg.seconds);
+    if (seg.reaction?.tail) seg.reaction.tail.atSec = spine[k + 1].startSec;
   });
 
   for (const c of waiting.filter((w) => !w.reaction)) {
