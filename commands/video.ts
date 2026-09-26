@@ -113,7 +113,8 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--director] [--wait] [--json]
+  exodus video director <runId> <on|off|follow> [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -157,6 +158,10 @@ Options:
   --review-storyboard  Stop at the storyboard so you can approve it yourself
                        (start, with --conceit). By default the app approves its
                        own storyboard when its checks pass
+  --director           Turn the trial director on for this ad (start, with
+                       --conceit). Admins only. To switch it on or off later:
+                       exodus video director <runId> on|off|follow, where
+                       follow goes back to the brand's own setting
   --wait               Wait until the run needs you (start): at the
                        storyboard, or once every piece is made
   --json               Machine-readable output
@@ -180,11 +185,13 @@ Examples:
   exodus video voices run_123 --from voices.json
   exodus video pull run_123 --out ./ad-run_123
   exodus video upload run_123 --file ./cut.mp4
+  exodus video director run_123 on
 `.trim();
 
 const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
 const SCRIPT_RUNS_PATH = "/api/v2/video/script-runs";
+const DIRECTOR_PATH = "/api/v2/video/director";
 const RUN_PATH = "/api/v2/workflow";
 const ITEMS_PATH = "/api/v2/workflow/items";
 // #1902: the rejected planner reply, fetched on demand and never on the poll.
@@ -351,7 +358,7 @@ function printDisplacedHistory(
 export type ArtifactSubset =
   | { type: "storyboard"; storyboard?: unknown; storyboardJson?: string }
   | { type: "frames"; frames?: Array<{ sceneIndex: number; imageUrl?: string }> }
-  | { type: "image"; imageUrl?: string; storageId?: string }
+  | { type: "image"; imageUrl?: string; storageId?: string; anchor?: "set-plate" | "product-sheet" }
   | {
       type: "video";
       sceneIndex?: number;
@@ -505,6 +512,22 @@ export interface VideoRun {
    *  a Show ad run is. The CLI is never told the `showId`, so this is the only
    *  thing here that tells a Show ad apart from a member's own workflow run. */
   moduleOwned?: boolean;
+  /** #2598: the director's panel (`projectDirector`, convex/lib/director.ts).
+   *  Absent on non-video runs and on backends older than #2598. */
+  director?: RunDirector;
+}
+
+export interface RunDirector {
+  on: boolean;
+  /** This run's own switch. null follows the brand's setting. */
+  runSetting: boolean | null;
+  workspaceOn: boolean;
+  status: "reviewing" | "waiting" | "done" | "stopped" | null;
+  redosUsed: number;
+  redoCap: number;
+  spendUsd: number;
+  spendCapUsd: number;
+  log: { at: number; phase: "storyboard" | "final-watch"; text: string }[];
 }
 
 /** Every read of a run goes through here. A run whose node list is missing or
@@ -1214,6 +1237,10 @@ export interface VideoManifest {
   dashboardUrl: string;
   storyboard: string | null;
   reference: string | null;
+  /** #2674: the drawn product and the empty room every storyboard picture is
+   *  built from (#2627). Null on a run that made neither. */
+  productSheet: string | null;
+  setPlate: string | null;
   music: string | null;
   /**
    * #2247: what the run says about its bed, which is a different question from
@@ -1530,13 +1557,18 @@ export function planPull(
   // retaken scene emits a second artifact, sometimes in a different container
   // (.mov replacing .mp4), so keying on the slot rather than on the filename is
   // what stops the older take being downloaded as a file nothing indexes.
+  // #2627: the set plate and product sheet ride on the reference node beside
+  // the reference picture, told apart only by their `anchor`.
   let reference: PullDownload | null = null;
+  let productSheet: PullDownload | null = null;
+  let setPlate: PullDownload | null = null;
   for (const artifact of outputsOfNodeKind(run, "reference")) {
     if (artifact.type !== "image" || !artifact.imageUrl) continue;
-    reference = {
-      file: `reference.${extFor(artifact.imageUrl, "image")}`,
-      url: artifact.imageUrl,
-    };
+    const stem = artifact.anchor ?? "reference";
+    const download = { file: `${stem}.${extFor(artifact.imageUrl, "image")}`, url: artifact.imageUrl };
+    if (artifact.anchor === "product-sheet") productSheet = download;
+    else if (artifact.anchor === "set-plate") setPlate = download;
+    else if (!artifact.anchor) reference = download;
   }
 
   const keyframeByScene = new Map<number, PullDownload>();
@@ -1717,6 +1749,8 @@ export function planPull(
 
   const downloads: PullDownload[] = [
     ...(reference ? [reference] : []),
+    ...(productSheet ? [productSheet] : []),
+    ...(setPlate ? [setPlate] : []),
     ...keyframeByScene.values(),
     ...[...voiceByScene.values()].map((v) => v.download),
     ...(narrationDownload ? [narrationDownload] : []),
@@ -1734,6 +1768,8 @@ export function planPull(
       dashboardUrl: reviewUrl(opts.dashboardUrl, run),
       storyboard,
       reference: reference?.file ?? null,
+      productSheet: productSheet?.file ?? null,
+      setPlate: setPlate?.file ?? null,
       music: music?.file ?? null,
       musicBed: musicBedState(run),
       musicHeardScenes: scenes
@@ -1765,6 +1801,8 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
   manifest.failed.push(failure);
   if (manifest.storyboard === failure.file) manifest.storyboard = null;
   if (manifest.reference === failure.file) manifest.reference = null;
+  if (manifest.productSheet === failure.file) manifest.productSheet = null;
+  if (manifest.setPlate === failure.file) manifest.setPlate = null;
   if (manifest.music === failure.file) manifest.music = null;
   for (const ref of manifest.cast) {
     if (ref.file === failure.file) ref.file = null;
@@ -1898,6 +1936,8 @@ export interface ScriptStartOptions {
   /** #2587: stop at the storyboard for the member. Absent, the app approves
    *  its own storyboard when its checks pass. */
   reviewStoryboard?: true;
+  /** #2675: start with the trial director on for this run (admins only). */
+  director?: true;
   wait: boolean;
   json: boolean;
 }
@@ -2071,6 +2111,21 @@ export function planVideoStart(
       line: "--review-storyboard works with --conceit, not --show. A Show's ad always stops at the storyboard for you.",
     };
   }
+  const directorFlags = occurrences.filter((o) => o.flag === "director");
+  // #2675: `--director false` must not start a paid review, so any value is refused.
+  if (directorFlags.some((o) => o.value !== undefined && !o.value.startsWith("--"))) {
+    return {
+      kind: "usage",
+      line: "--director takes no value. Leave it off to start without the director.",
+    };
+  }
+  const director = directorFlags.length > 0;
+  if (showId && director) {
+    return {
+      kind: "usage",
+      line: "--director works with --conceit, not --show.",
+    };
+  }
   if (showId && (videoModel || voiceMode)) {
     return {
       kind: "usage",
@@ -2130,6 +2185,7 @@ export function planVideoStart(
   if (voiceMode && isVoiceMode(voiceMode)) opts.voiceMode = voiceMode;
   if (musicChoice.music !== undefined) opts.music = musicChoice.music;
   if (reviewStoryboard) opts.reviewStoryboard = true;
+  if (director) opts.director = true;
   return { kind: "script", opts };
 }
 
@@ -2171,6 +2227,7 @@ function scriptStartedLines(
   url: string,
   card: ResolvedCard | null,
   video: StartedVideoChoice | null,
+  director: boolean,
 ): string[] {
   return [
     `Started ad run ${runId}`,
@@ -2183,6 +2240,7 @@ function scriptStartedLines(
         ]
       : ["The server did not include a resolved card."]),
     ...(video ? [`Video model: ${video.videoModel}`, `Voice: ${video.voiceMode}`] : []),
+    ...(director ? ["Director: on for this ad"] : []),
     `Watch it: ${url}`,
   ];
 }
@@ -2238,6 +2296,7 @@ export async function startScriptFlow(
     // and "nobody said" are the same request. Only "on" has anything to send.
     ...(opts.music === true ? { music: true } : {}),
     ...(opts.reviewStoryboard ? { reviewStoryboard: true } : {}),
+    ...(opts.director ? { director: true } : {}),
   });
   if (!res.ok) return errorResult(res, opts.json);
   const started = res.data as {
@@ -2260,7 +2319,7 @@ export async function startScriptFlow(
       lines: opts.json
         ? [JSON.stringify({ runId, url, card, ...(video ? { videoChoice: video } : {}) })]
         : [
-            ...scriptStartedLines(runId, url, card, video),
+            ...scriptStartedLines(runId, url, card, video, opts.director === true),
             "",
             ...(opts.reviewStoryboard
               ? ["Wait for the storyboard here instead: exodus video start … --wait"]
@@ -2277,7 +2336,7 @@ export async function startScriptFlow(
   if (opts.json) return waitJsonWithCard(waited, card, video);
   return {
     code: waited.code,
-    lines: [...scriptStartedLines(runId, url, card, video), "", ...waited.lines],
+    lines: [...scriptStartedLines(runId, url, card, video, opts.director === true), "", ...waited.lines],
   };
 }
 
@@ -2456,6 +2515,7 @@ export async function statusFlow(
             ? { storyboardNodeId: failedStoryboard.nodeId }
             : {}),
           ...(failedStoryboard?.hasRejectedDraft === true ? { hasRejectedDraft: true } : {}),
+          ...(run.director ? { director: run.director } : {}),
         }),
       ],
     };
@@ -2519,6 +2579,7 @@ export async function statusFlow(
     ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
     ...planFailureLines(failedStoryboard, runId),
     ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
+    ...(run.director ? ["", ...directorLines(run.director)] : []),
   ];
 
   if (byScene.size === 0) {
@@ -2592,6 +2653,84 @@ export async function statusFlow(
         : "Final cut: not uploaded yet.",
   );
   return { code: 0, lines };
+}
+
+// The run page's Director panel words (director-panel.tsx), so the two agree.
+const DIRECTOR_STATUS_WORDS: Record<NonNullable<RunDirector["status"]>, string> = {
+  reviewing: "Watching this run",
+  waiting: "Waiting for redos to finish",
+  done: "Done: ready for your approval",
+  stopped: "Stopped: see the last note",
+};
+const DIRECTOR_PHASE_WORDS: Record<RunDirector["log"][number]["phase"], string> = {
+  storyboard: "Storyboard",
+  "final-watch": "Final watch",
+};
+const DIRECTOR_LOG_LINES = 3;
+
+/** #2675: the Director panel as `video status` prints it, newest notes last. */
+export function directorLines(director: RunDirector): string[] {
+  const switchWords =
+    director.runSetting === null
+      ? `following the brand's setting (${director.workspaceOn ? "on" : "off"})`
+      : "switched for this ad";
+  const log = director.log.slice(-DIRECTOR_LOG_LINES);
+  return [
+    `Director: ${director.on ? "on" : "off"}, ${switchWords}`,
+    ...(director.on
+      ? [`  ${DIRECTOR_STATUS_WORDS[director.status ?? "reviewing"]}`]
+      : []),
+    `  Redos: ${director.redosUsed} of ${director.redoCap}. Spent: $${director.spendUsd.toFixed(2)} of $${director.spendCapUsd.toFixed(2)}`,
+    ...(log.length > 0
+      ? [
+          "  Latest notes:",
+          ...log.map((entry) => `    ${DIRECTOR_PHASE_WORDS[entry.phase]}: ${entry.text}`),
+        ]
+      : []),
+  ];
+}
+
+export type DirectorSwitch = boolean | null;
+
+/** `on`, `off` or `follow` (the brand's own setting), or null for anything else. */
+export function parseDirectorSwitch(word: string | undefined): { on: DirectorSwitch } | null {
+  if (word === "on") return { on: true };
+  if (word === "off") return { on: false };
+  if (word === "follow") return { on: null };
+  return null;
+}
+
+/** #2675: the run page's Director switch, from the CLI. */
+export async function directorFlow(
+  runId: string,
+  on: DirectorSwitch,
+  json: boolean,
+  deps: VideoDeps,
+): Promise<FlowResult> {
+  const res = await deps.post(DIRECTOR_PATH, { runId, on });
+  const behind = missingRouteLine(res, "exodus video director");
+  if (behind) {
+    return {
+      code: 1,
+      lines: json ? [JSON.stringify({ ok: false, status: 404, error: behind })] : [behind],
+    };
+  }
+  if (!res.ok) return errorResult(res, json);
+  if (json) return { code: 0, lines: [JSON.stringify({ runId, on })] };
+  const said =
+    on === null
+      ? `The director on ad run ${runId} now follows the brand's own setting.`
+      : `The director is ${on ? "on" : "off"} for ad run ${runId}.`;
+  return {
+    code: 0,
+    lines: [
+      said,
+      ...(on === true
+        ? ["If the ad is already waiting at the storyboard or the final watch, a review starts now."]
+        : []),
+      `See what it is doing: exodus video status ${runId}`,
+    ],
+  };
 }
 
 /**
@@ -4052,6 +4191,7 @@ export async function run(
     "voices",
     "pull",
     "upload",
+    "director",
   ];
   if (needsRunId.includes(sub) && !runId) {
     usage(`video ${sub} needs a run id: exodus video ${sub} <runId>`);
@@ -4067,6 +4207,11 @@ export async function run(
     return printResult(await statusFlow(runId, json, defaultDeps));
   }
   if (sub === "storyboard") return printResult(await storyboardFlow(runId, json, defaultDeps));
+  if (sub === "director") {
+    const choice = parseDirectorSwitch(rest[1]);
+    if (!choice) usage(`video director needs on, off or follow: exodus video director ${runId} on`);
+    return printResult(await directorFlow(runId, choice.on, json, defaultDeps));
+  }
   if (sub === "approve") {
     return printResult(
       await approveFlow(

@@ -85,7 +85,7 @@ exodus workflow run <workflowId|name> --input <field>=@script.txt --voices @voic
 exodus workflow run <workflowId|name> --input <field>=@script.txt --voice-treatment @voice-treatment.json --wait
                                                           same, with the video model speaking voices you WROTE
 exodus video status <runId>                               where it is, per scene
-exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--video-model <id>] [--voice native] [--music] [--review-storyboard] [--wait]
+exodus video start --script <file> --conceit <podcast|ugc|stage|street|personification> --style <slug> [--direction "…"] [--voice-path <path>] [--video-model <id>] [--voice native] [--music] [--review-storyboard] [--director] [--wait]
                                                           start from a script, a conceit and a look.
                                                           No music bed unless you pass --music.
                                                           The app approves its own storyboard when its
@@ -94,7 +94,11 @@ exodus video start --script <file> --conceit <podcast|ugc|stage|street|personifi
                                                           gate only when a check finds a problem, and says
                                                           why. --review-storyboard always stops there.
                                                           Each conceit has its own video model and voice;
-                                                          --video-model / --voice override them for one run
+                                                          --video-model / --voice override them for one run.
+                                                          --director turns the trial director on (admins only)
+exodus video director <runId> on|off|follow               the trial director for one run (admins only);
+                                                          follow = the brand's own setting. status shows
+                                                          what it is doing and its last three notes
 ```
 
 **From the storyboard on.**
@@ -952,8 +956,14 @@ the pieces:
   keeps about 0.15 s after its last word and about 0.1 s before its first (0.25 s
   when a different speaker answers), read from its `words.json`, so one clip
   runs into the next like one conversation. It only ever shortens a clip's
-  silence and never cuts into a word. The ad's first lead-in and last tail, a
-  narrated scene, a still and a reaction beat are left as they are.
+  silence and never cuts into a word. The ad's first clip also opens about 0.1 s
+  before its first word, so a hum a clip makes before anyone speaks is not the
+  first thing heard. The ad's last tail, a narrated scene, a still and a
+  reaction beat keep their length.
+- **It fades the audience reaction in and out.** A reaction beat fades in
+  across any quiet start before its laugh (a generated laugh clip can hum
+  there) and fades out over its last 0.4 s. Only a reaction clip longer than
+  its beat carries its own sound on under the next line.
 - **It ignores the continuous master.** It reads only `scene-NN.voice` files;
   it never opens `narration.mp3` or `manifest.narration`. A tool that lays the
   master down whole and cuts the pictures to it keeps the read intact.
@@ -968,7 +978,10 @@ the pieces:
   ad, and the music bed underneath at low level. Output is H.264 + AAC in an MP4
   with `-movflags +faststart`.
 - Flags: `--out <file>`, `--skip 2,5`, `--no-music`. It prints what went in,
-  what was left out and why, and the upload command.
+  what was left out and why, and the upload command. When a clip hums or
+  clicks where nobody speaks at an edge the cut plays, it lists each one under
+  "Sound at the edges" with its time in the cut. That is a warning to listen
+  there; the cut is made anyway.
 - Beside the MP4 it writes `cut.words.json` (every spoken word of the finished
   ad with its start and end) and `cut.srt` (the same words grouped into subtitle
   lines), named from the `--out` basename. Those times are on the finished ad's

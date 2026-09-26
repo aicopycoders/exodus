@@ -4,6 +4,7 @@
 // scene card live at sceneIndex >= HELPER_LEDGER_BASE (#2147). Each producer
 // owns a sub-range so its rows can't collide with another producer's:
 //   [900000, 910000)  guest establishing renders (#809) + product cards (#808)
+//     909000, 909001  the Reference node's set plate and product sheet (#2627)
 //   [910000, 920000)  cast identity stills (cast-anchor.ts CAST_LEDGER_BASE)
 //   [920000, 960000)  set gate room options (#2202)
 //   [960000, …)       cast gate option renders (#2202)

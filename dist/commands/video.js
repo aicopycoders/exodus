@@ -103,7 +103,8 @@ Usage:
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
   exodus video pull <runId> --out <dir> [--json]
   exodus video upload <runId> --file <cut.mp4> [--duration <sec>] [--json]
-  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--wait] [--json]
+  exodus video start --script <file> --conceit <${CONCEIT_KEYS.join("|")}> --style <${STYLE_SLUGS.join("|")}> [--direction "<note>"] [--voice-path <path>] [--video-model <id>] [--voice <native|voice-first>] [--music] [--review-storyboard] [--director] [--wait] [--json]
+  exodus video director <runId> <on|off|follow> [--json]
 
 Options:
   --out <dir>          Folder to write the pulled pieces into (pull)
@@ -147,6 +148,10 @@ Options:
   --review-storyboard  Stop at the storyboard so you can approve it yourself
                        (start, with --conceit). By default the app approves its
                        own storyboard when its checks pass
+  --director           Turn the trial director on for this ad (start, with
+                       --conceit). Admins only. To switch it on or off later:
+                       exodus video director <runId> on|off|follow, where
+                       follow goes back to the brand's own setting
   --wait               Wait until the run needs you (start): at the
                        storyboard, or once every piece is made
   --json               Machine-readable output
@@ -170,10 +175,12 @@ Examples:
   exodus video voices run_123 --from voices.json
   exodus video pull run_123 --out ./ad-run_123
   exodus video upload run_123 --file ./cut.mp4
+  exodus video director run_123 on
 `.trim();
 const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
 const SCRIPT_RUNS_PATH = "/api/v2/video/script-runs";
+const DIRECTOR_PATH = "/api/v2/video/director";
 const RUN_PATH = "/api/v2/workflow";
 const ITEMS_PATH = "/api/v2/workflow/items";
 const REJECTED_DRAFT_PATH = "/api/v2/workflow/rejected-draft";
@@ -781,13 +788,19 @@ export function planPull(run, items, opts) {
         }
     }
     let reference = null;
+    let productSheet = null;
+    let setPlate = null;
     for (const artifact of outputsOfNodeKind(run, "reference")) {
         if (artifact.type !== "image" || !artifact.imageUrl)
             continue;
-        reference = {
-            file: `reference.${extFor(artifact.imageUrl, "image")}`,
-            url: artifact.imageUrl,
-        };
+        const stem = artifact.anchor ?? "reference";
+        const download = { file: `${stem}.${extFor(artifact.imageUrl, "image")}`, url: artifact.imageUrl };
+        if (artifact.anchor === "product-sheet")
+            productSheet = download;
+        else if (artifact.anchor === "set-plate")
+            setPlate = download;
+        else if (!artifact.anchor)
+            reference = download;
     }
     const keyframeByScene = new Map();
     for (const artifact of run.nodes.flatMap((n) => n.outputs ?? [])) {
@@ -954,6 +967,8 @@ export function planPull(run, items, opts) {
     const { cast, downloads: castDownloads } = planCastRefs(run, items, castVoicePins(storyboardArtifact));
     const downloads = [
         ...(reference ? [reference] : []),
+        ...(productSheet ? [productSheet] : []),
+        ...(setPlate ? [setPlate] : []),
         ...keyframeByScene.values(),
         ...[...voiceByScene.values()].map((v) => v.download),
         ...(narrationDownload ? [narrationDownload] : []),
@@ -970,6 +985,8 @@ export function planPull(run, items, opts) {
             dashboardUrl: reviewUrl(opts.dashboardUrl, run),
             storyboard,
             reference: reference?.file ?? null,
+            productSheet: productSheet?.file ?? null,
+            setPlate: setPlate?.file ?? null,
             music: music?.file ?? null,
             musicBed: musicBedState(run),
             musicHeardScenes: scenes
@@ -1002,6 +1019,10 @@ export function markPullFailure(manifest, failure) {
         manifest.storyboard = null;
     if (manifest.reference === failure.file)
         manifest.reference = null;
+    if (manifest.productSheet === failure.file)
+        manifest.productSheet = null;
+    if (manifest.setPlate === failure.file)
+        manifest.setPlate = null;
     if (manifest.music === failure.file)
         manifest.music = null;
     for (const ref of manifest.cast) {
@@ -1238,6 +1259,20 @@ export function planVideoStart(flags, occurrences) {
             line: "--review-storyboard works with --conceit, not --show. A Show's ad always stops at the storyboard for you.",
         };
     }
+    const directorFlags = occurrences.filter((o) => o.flag === "director");
+    if (directorFlags.some((o) => o.value !== undefined && !o.value.startsWith("--"))) {
+        return {
+            kind: "usage",
+            line: "--director takes no value. Leave it off to start without the director.",
+        };
+    }
+    const director = directorFlags.length > 0;
+    if (showId && director) {
+        return {
+            kind: "usage",
+            line: "--director works with --conceit, not --show.",
+        };
+    }
     if (showId && (videoModel || voiceMode)) {
         return {
             kind: "usage",
@@ -1302,6 +1337,8 @@ export function planVideoStart(flags, occurrences) {
         opts.music = musicChoice.music;
     if (reviewStoryboard)
         opts.reviewStoryboard = true;
+    if (director)
+        opts.director = true;
     return { kind: "script", opts };
 }
 function isRecord(value) {
@@ -1331,7 +1368,7 @@ function startedVideoChoice(value) {
         return null;
     return { videoModel: value.videoModel, voiceMode: value.voiceMode };
 }
-function scriptStartedLines(runId, url, card, video) {
+function scriptStartedLines(runId, url, card, video, director) {
     return [
         `Started ad run ${runId}`,
         ...(card
@@ -1343,6 +1380,7 @@ function scriptStartedLines(runId, url, card, video) {
             ]
             : ["The server did not include a resolved card."]),
         ...(video ? [`Video model: ${video.videoModel}`, `Voice: ${video.voiceMode}`] : []),
+        ...(director ? ["Director: on for this ad"] : []),
         `Watch it: ${url}`,
     ];
 }
@@ -1390,6 +1428,7 @@ export async function startScriptFlow(opts, deps) {
         ...(opts.voiceMode ? { voiceMode: opts.voiceMode } : {}),
         ...(opts.music === true ? { music: true } : {}),
         ...(opts.reviewStoryboard ? { reviewStoryboard: true } : {}),
+        ...(opts.director ? { director: true } : {}),
     });
     if (!res.ok)
         return errorResult(res, opts.json);
@@ -1407,7 +1446,7 @@ export async function startScriptFlow(opts, deps) {
             lines: opts.json
                 ? [JSON.stringify({ runId, url, card, ...(video ? { videoChoice: video } : {}) })]
                 : [
-                    ...scriptStartedLines(runId, url, card, video),
+                    ...scriptStartedLines(runId, url, card, video, opts.director === true),
                     "",
                     ...(opts.reviewStoryboard
                         ? ["Wait for the storyboard here instead: exodus video start … --wait"]
@@ -1424,7 +1463,7 @@ export async function startScriptFlow(opts, deps) {
         return waitJsonWithCard(waited, card, video);
     return {
         code: waited.code,
-        lines: [...scriptStartedLines(runId, url, card, video), "", ...waited.lines],
+        lines: [...scriptStartedLines(runId, url, card, video, opts.director === true), "", ...waited.lines],
     };
 }
 const POLL_INTERVAL_MS = 5000;
@@ -1549,6 +1588,7 @@ export async function statusFlow(runId, json, deps) {
                         ? { storyboardNodeId: failedStoryboard.nodeId }
                         : {}),
                     ...(failedStoryboard?.hasRejectedDraft === true ? { hasRejectedDraft: true } : {}),
+                    ...(run.director ? { director: run.director } : {}),
                 }),
             ],
         };
@@ -1598,6 +1638,7 @@ export async function statusFlow(runId, json, deps) {
         ...(stop.at === "running" && run.pauseAhead ? [pauseAheadLine(run.pauseAhead)] : []),
         ...planFailureLines(failedStoryboard, runId),
         ...warnings.map((w) => `Heads-up (${w.step}): ${w.warning}`),
+        ...(run.director ? ["", ...directorLines(run.director)] : []),
     ];
     if (byScene.size === 0) {
         lines.push("", "No scenes yet — this run hasn't made anything to look at.");
@@ -1659,6 +1700,72 @@ export async function statusFlow(runId, json, deps) {
             ? `Final cut: uploaded. Approve it with: exodus video approve ${runId}`
             : "Final cut: not uploaded yet.");
     return { code: 0, lines };
+}
+const DIRECTOR_STATUS_WORDS = {
+    reviewing: "Watching this run",
+    waiting: "Waiting for redos to finish",
+    done: "Done: ready for your approval",
+    stopped: "Stopped: see the last note",
+};
+const DIRECTOR_PHASE_WORDS = {
+    storyboard: "Storyboard",
+    "final-watch": "Final watch",
+};
+const DIRECTOR_LOG_LINES = 3;
+export function directorLines(director) {
+    const switchWords = director.runSetting === null
+        ? `following the brand's setting (${director.workspaceOn ? "on" : "off"})`
+        : "switched for this ad";
+    const log = director.log.slice(-DIRECTOR_LOG_LINES);
+    return [
+        `Director: ${director.on ? "on" : "off"}, ${switchWords}`,
+        ...(director.on
+            ? [`  ${DIRECTOR_STATUS_WORDS[director.status ?? "reviewing"]}`]
+            : []),
+        `  Redos: ${director.redosUsed} of ${director.redoCap}. Spent: $${director.spendUsd.toFixed(2)} of $${director.spendCapUsd.toFixed(2)}`,
+        ...(log.length > 0
+            ? [
+                "  Latest notes:",
+                ...log.map((entry) => `    ${DIRECTOR_PHASE_WORDS[entry.phase]}: ${entry.text}`),
+            ]
+            : []),
+    ];
+}
+export function parseDirectorSwitch(word) {
+    if (word === "on")
+        return { on: true };
+    if (word === "off")
+        return { on: false };
+    if (word === "follow")
+        return { on: null };
+    return null;
+}
+export async function directorFlow(runId, on, json, deps) {
+    const res = await deps.post(DIRECTOR_PATH, { runId, on });
+    const behind = missingRouteLine(res, "exodus video director");
+    if (behind) {
+        return {
+            code: 1,
+            lines: json ? [JSON.stringify({ ok: false, status: 404, error: behind })] : [behind],
+        };
+    }
+    if (!res.ok)
+        return errorResult(res, json);
+    if (json)
+        return { code: 0, lines: [JSON.stringify({ runId, on })] };
+    const said = on === null
+        ? `The director on ad run ${runId} now follows the brand's own setting.`
+        : `The director is ${on ? "on" : "off"} for ad run ${runId}.`;
+    return {
+        code: 0,
+        lines: [
+            said,
+            ...(on === true
+                ? ["If the ad is already waiting at the storyboard or the final watch, a review starts now."]
+                : []),
+            `See what it is doing: exodus video status ${runId}`,
+        ],
+    };
 }
 export async function rejectedDraftFlow(runId, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
@@ -2729,6 +2836,7 @@ export async function run(flags, occurrences) {
         "voices",
         "pull",
         "upload",
+        "director",
     ];
     if (needsRunId.includes(sub) && !runId) {
         usage(`video ${sub} needs a run id: exodus video ${sub} <runId>`);
@@ -2741,6 +2849,12 @@ export async function run(flags, occurrences) {
     }
     if (sub === "storyboard")
         return printResult(await storyboardFlow(runId, json, defaultDeps));
+    if (sub === "director") {
+        const choice = parseDirectorSwitch(rest[1]);
+        if (!choice)
+            usage(`video director needs on, off or follow: exodus video director ${runId} on`);
+        return printResult(await directorFlow(runId, choice.on, json, defaultDeps));
+    }
     if (sub === "approve") {
         return printResult(await approveFlow(runId, { json, approveStaleCut: flags["approve-stale-cut"] === true }, defaultDeps));
     }

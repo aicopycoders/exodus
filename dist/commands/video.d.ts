@@ -63,6 +63,7 @@ export type ArtifactSubset = {
     type: "image";
     imageUrl?: string;
     storageId?: string;
+    anchor?: "set-plate" | "product-sheet";
 } | {
     type: "video";
     sceneIndex?: number;
@@ -159,6 +160,22 @@ export interface VideoRun {
     };
     workflowId?: string;
     moduleOwned?: boolean;
+    director?: RunDirector;
+}
+export interface RunDirector {
+    on: boolean;
+    runSetting: boolean | null;
+    workspaceOn: boolean;
+    status: "reviewing" | "waiting" | "done" | "stopped" | null;
+    redosUsed: number;
+    redoCap: number;
+    spendUsd: number;
+    spendCapUsd: number;
+    log: {
+        at: number;
+        phase: "storyboard" | "final-watch";
+        text: string;
+    }[];
 }
 export declare function asVideoRun(data: unknown): VideoRun;
 export interface NodeItem {
@@ -331,6 +348,8 @@ export interface VideoManifest {
     dashboardUrl: string;
     storyboard: string | null;
     reference: string | null;
+    productSheet: string | null;
+    setPlate: string | null;
     music: string | null;
     musicBed: MusicBedState;
     musicHeardScenes: number[];
@@ -382,6 +401,7 @@ export interface ScriptStartOptions {
     voiceMode?: VoiceMode;
     music?: boolean;
     reviewStoryboard?: true;
+    director?: true;
     wait: boolean;
     json: boolean;
 }
@@ -413,6 +433,12 @@ export declare function waitFlow(runId: string, opts: {
     maxPolls?: number;
 }, deps: VideoDeps): Promise<FlowResult>;
 export declare function statusFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function directorLines(director: RunDirector): string[];
+export type DirectorSwitch = boolean | null;
+export declare function parseDirectorSwitch(word: string | undefined): {
+    on: DirectorSwitch;
+} | null;
+export declare function directorFlow(runId: string, on: DirectorSwitch, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function rejectedDraftFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function storyboardFlow(runId: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function approveFlow(runId: string, opts: {

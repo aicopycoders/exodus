@@ -5,7 +5,7 @@
 // bed go underneath, and one MP4 comes out ready to upload. A reaction
 // cutaway is the exception: it is its own short beat in the spine right after
 // its cued line ends, heard with its own sound while the speaker is silent,
-// and its sound fades out quietly under the next line rather than stopping.
+// fading in across any quiet start and out rather than stopping dead.
 //
 //   node first-cut.mjs <pulled-dir> [--out cut.mp4] [--skip 2,5] [--no-music]
 //
@@ -71,6 +71,8 @@ export const REACTION_MAX_SEC = 1.5;
  */
 export const REACTION_TAIL_SEC = 0.75;
 export const REACTION_TAIL_GAIN = 0.35;
+/** A reaction clip that ends with its beat fades out over this long instead (#2666). */
+export const REACTION_FADE_OUT_SEC = 0.4;
 /**
  * The air a join keeps around its words (#2388): after one clip's last word, and
  * before the next clip's first, less when the same speaker carries on than when
@@ -135,6 +137,13 @@ const LEVEL_WINDOW_SEC = 0.02;
 const SOUND_DB = -35;
 const QUIET_DB = -50;
 const SETTLED_WINDOWS = 10;
+/**
+ * #2666: in a gap gone quiet, a fainter sound counts when it stands this far
+ * over the gap's median level and reaches FAINT_SOUND_DB, so a grunt in near
+ * silence goes while a soft breath and room tone stay (scout trim.ts).
+ */
+const SOUND_OVER_FLOOR_DB = 25;
+const FAINT_SOUND_DB = -45;
 /** The directions that ask for a pause (scout clip-qc.ts PAUSE_DIRECTION, NO_PAUSE_DIRECTION, lineWrittenPause). */
 const PAUSE_DIRECTION =
   /\bpaus(e|es|ed|ing)\b|\bsilence\b|\(beat\)|\b(a|one|brief|short|quick|small|little|long)\s+beat\b|\bbeat\s*(,|before|after|then)/i;
@@ -221,7 +230,9 @@ export function sentenceGapCuts(words, lines, levels = null) {
  * #2554: a sound between two words that holds no heard word, from where the
  * earlier word fades under QUIET_DB to where SETTLED_WINDOWS of quiet resume
  * before the later word, or null when there is none or it runs into the later
- * word. Mirrors scout trim.ts soundBetween.
+ * word. A sound heard only against the gap's quiet (#2666) must come after the
+ * gap settles, so the earlier word's own release stays. Mirrors scout trim.ts
+ * soundBetween.
  */
 function soundBetween(levels, fromSec, toSec) {
   const { db, windowSec } = levels;
@@ -229,9 +240,13 @@ function soundBetween(levels, fromSec, toSec) {
   const last = Math.min(windowAt(toSec), db.length);
   let quiet = windowAt(fromSec);
   while (quiet < last && db[quiet] >= QUIET_DB) quiet++;
+  const gap = db.slice(quiet, last).sort((a, b) => a - b);
+  const faint = Math.min(SOUND_DB, Math.max(FAINT_SOUND_DB, gap[gap.length >> 1] + SOUND_OVER_FLOOR_DB));
+  const calm = settledQuiet(db, quiet);
+  const loud = (i) => db[i] >= (calm >= 0 && i >= calm + SETTLED_WINDOWS ? faint : SOUND_DB);
   let resumed = -1;
   for (let i = quiet; i < last; i = resumed + SETTLED_WINDOWS) {
-    while (i < last && db[i] < SOUND_DB) i++;
+    while (i < last && !loud(i)) i++;
     if (i >= last) break;
     const settled = settledQuiet(db, i);
     if (settled < 0 || settled + SETTLED_WINDOWS > last) break;
@@ -264,11 +279,14 @@ export function levelsFromPcm(pcm, sampleRate) {
   return { windowSec: LEVEL_WINDOW_SEC, db };
 }
 
-/** A clip's loudness windows, or null when its audio cannot be decoded. */
-function clipLevels(file) {
+/** A clip's loudness windows, or null when its audio cannot be decoded; `filter` shapes the sound first. */
+function clipLevels(file, filter = null) {
   const res = spawnSync(
     "ffmpeg",
-    ["-v", "error", "-i", file, "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+    [
+      "-v", "error", "-i", file, "-map", "0:a:0", "-ac", "1", "-ar", "16000",
+      ...(filter ? ["-af", filter] : []), "-f", "s16le", "-",
+    ],
     { maxBuffer: 1 << 28 },
   );
   if (res.status !== 0 || !res.stdout?.length) return null;
@@ -421,10 +439,12 @@ export function cueEndInSegment(seg, counts, cueLineId) {
  * Cut the dead air out of each join between clips that play their own sound: a
  * clip's lead-in silence stacked on the previous clip's tail ran past a second
  * (#2388). Each side comes back to a beat that reads as one conversation, a
- * longer one when someone new answers. Only ever shortens, never into a word,
- * and leaves the ad's first lead-in and last tail alone; a clip whose closing
- * line cues a reaction is not the ad's end, since the beat follows it. Trims
- * land on whole frames so the picture and its sound stay the same length.
+ * longer one when someone new answers. Only ever shortens, never into a word.
+ * The ad's first lead-in comes back to the same-speaker beat too, since a clip
+ * can hum before its first word (#2666); its last tail is left alone, and a
+ * clip whose closing line cues a reaction is not the ad's end, since the beat
+ * follows it. Trims land on whole frames so the picture and its sound stay the
+ * same length.
  *
  * The beat is measured from the clip's scripted words when the script is heard
  * in order, and a cut stops short of a sound made up before or after the line
@@ -435,14 +455,14 @@ function trimJoins(spine, reactionCues, scriptLines) {
     if (seg.source !== "clip" || seg.audio !== "clip" || !seg.words?.length) return;
     const prev = spine[k - 1];
     const sameSpeaker = Boolean(prev?.lastSpeaker) && prev.lastSpeaker === seg.firstSpeaker;
-    const lead = sameSpeaker ? JOIN_LEAD_SAME_SPEAKER_SEC : JOIN_LEAD_NEW_SPEAKER_SEC;
+    const lead = sameSpeaker || !prev ? JOIN_LEAD_SAME_SPEAKER_SEC : JOIN_LEAD_NEW_SPEAKER_SEC;
     const span = scriptedSpan(seg.words, seg.lineIds.map((id) => scriptLines.get(id)?.text));
     const line = span ? seg.words.slice(span.first, span.last + 1) : seg.words;
     const before = span ? seg.words.slice(0, span.first) : [];
     const after = span ? seg.words.slice(span.last + 1) : [];
     const firstWord = Math.min(...line.map((w) => w.s));
     const lastWord = Math.max(...line.map((w) => w.e));
-    let inSec = prev ? Math.max(0, floorFrame(firstWord - lead)) : 0;
+    let inSec = Math.max(0, floorFrame(firstWord - lead));
     if (before.length > 0) {
       const clear = ceilFrame(Math.max(...before.map((w) => w.e)) + EXTRA_CLEARANCE_SEC);
       inSec = Math.max(inSec, Math.min(clear, floorFrame(firstWord)));
@@ -520,15 +540,26 @@ function placeReaction(spine, counts, reaction) {
 
 /**
  * The sound a reaction beat carries under the next segment (#2406): the clip's
- * own sound past the beat when it has some (older 4 s pulls), else its last
- * stretch replayed, so a clip exactly as long as its beat still fades out.
+ * own sound past the beat (older 4 s pulls), or null when the clip ends with
+ * the beat and the beat fades itself out. Replaying the beat's last stretch
+ * there played its laugh twice, heard as a stutter (#2666).
  */
 function reactionTail(seg, next) {
   const clipLen = seg.clipSeconds ?? seg.seconds;
-  const beatEnd = seg.inSec + seg.seconds;
-  const fromSec = Math.max(0, Math.min(beatEnd, clipLen - REACTION_TAIL_SEC));
+  const fromSec = seg.inSec + seg.seconds;
+  if (clipLen - fromSec < REACTION_FADE_OUT_SEC) return null;
   const seconds = Math.min(REACTION_TAIL_SEC, next.seconds, clipLen - fromSec);
   return { atSec: next.startSec, fromSec, seconds, gain: REACTION_TAIL_GAIN };
+}
+
+/**
+ * #2666: how long a reaction beat fades in. A generated laugh clip can hum
+ * before the laugh starts, so the fade runs across that quiet start, up to its
+ * first sound; without the clip's loudness it is the plain edge fade.
+ */
+function quietStart(levels, seconds) {
+  const first = levels ? levels.db.findIndex((d) => d >= SOUND_DB) : -1;
+  return first > 0 ? Math.min(seconds, Math.max(EDGE_FADE_SEC, first * levels.windowSec)) : EDGE_FADE_SEC;
 }
 
 export function buildTimeline({ manifest, storyboard, skip, probe, exists, readWords, readLevels = () => null }) {
@@ -648,9 +679,11 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
     total += seg.seconds;
   }
   spine.forEach((seg, k) => {
-    const next = spine[k + 1];
-    if (!seg.reaction || seg.audio !== "clip" || !next) return;
-    seg.reaction.tail = reactionTail(seg, next);
+    if (!seg.reaction || seg.audio !== "clip") return;
+    seg.fadeInSec = quietStart(readLevels(seg.file), seg.seconds);
+    const tail = spine[k + 1] ? reactionTail(seg, spine[k + 1]) : null;
+    if (tail) seg.reaction.tail = tail;
+    else seg.fadeOutSec = Math.min(REACTION_FADE_OUT_SEC, seg.seconds);
   });
 
   for (const c of waiting.filter((w) => !w.reaction)) {
@@ -739,9 +772,12 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
     filters.push(`${norm(`${i}:v`)}${fit.length ? `,${fit.join(",")}` : ""}[v${i}]`);
     // A segment split around a reaction beat starts partway into its sound too.
     const skipIn = inSec > 0.001 ? `atrim=start=${sec(inSec)},asetpts=PTS-STARTPTS,` : "";
+    const [fadeIn, fadeOut] = [seg.fadeInSec ?? EDGE_FADE_SEC, seg.fadeOutSec ?? EDGE_FADE_SEC];
+    // A cubic rise keeps a reaction's quiet start near silent until its laugh (#2666).
+    const rise = fadeIn > EDGE_FADE_SEC ? ":curve=cub" : "";
     const fitLength =
-      `apad,atrim=0:${sec(seg.seconds)},afade=t=in:d=${EDGE_FADE_SEC},` +
-      `afade=t=out:st=${sec(seg.seconds - EDGE_FADE_SEC)}:d=${EDGE_FADE_SEC}`;
+      `apad,atrim=0:${sec(seg.seconds)},afade=t=in:d=${sec(fadeIn)}${rise},` +
+      `afade=t=out:st=${sec(seg.seconds - fadeOut)}:d=${sec(fadeOut)}`;
     const fitSound = `${LOUDNORM},${fitLength}`;
     if (seg.audio === "narration") {
       const v = addInput("-i", resolve(seg.voice));
@@ -883,9 +919,12 @@ export function inTheCut(timeline) {
     if (seg.reaction) {
       const sound = seg.audio === "clip" ? "its own sound" : "silent: the clip has no sound";
       const tail = seg.reaction.tail;
-      const fades = tail
+      const fadeIn =
+        seg.fadeInSec > EDGE_FADE_SEC ? `, fading in over its quiet first ${seg.fadeInSec.toFixed(2)}s` : "";
+      const fadeOut = tail
         ? `, fading out under the next line at ${tail.atSec.toFixed(2)}s over ${tail.seconds.toFixed(2)}s`
-        : "";
+        : seg.fadeOutSec ? `, fading out over its last ${seg.fadeOutSec.toFixed(2)}s` : "";
+      const fades = fadeIn + fadeOut;
       rows.push({
         n: seg.sceneIndex,
         line:
@@ -911,6 +950,108 @@ export function inTheCut(timeline) {
     });
   }
   return rows.sort((a, b) => a.n - b.n).map((r) => r.line);
+}
+
+/**
+ * #2666: a generated clip can hum or click where nobody speaks, and the cut
+ * plays that stretch with nothing over it. A hum is HUM_BAND's share of the
+ * sound (the 1 kHz whine heard before a first word) holding for HUM_MIN_SEC
+ * over HUM_FLOOR_DB; a click is a sound of at most CLICK_MAX_WINDOWS with
+ * quiet on both sides, loud as the gap cutter reads a sound in near silence.
+ */
+export const HUM_BAND = "highpass=f=800,highpass=f=800,lowpass=f=1500,lowpass=f=1500";
+// White noise measures about -13.5 dB through HUM_BAND at 16 kHz (-10.6 dB on
+// paper), and the four hums #2666 was calibrated on held -6 to -10 dB.
+const HUM_SHARE_DB = -10;
+const HUM_FLOOR_DB = -70;
+const HUM_MIN_SEC = 0.16;
+const CLICK_MAX_WINDOWS = 3;
+
+/**
+ * Where the cut plays a clip's sound with no word in it, in the clip's own
+ * time: before a dialogue clip's first word, after its last, and a reaction's
+ * quiet start (under its cubic fade-in when the cut fades it).
+ */
+function edgeStretches(seg, levels) {
+  const inSec = seg.inSec ?? 0;
+  if (seg.reaction) {
+    const quiet = quietStart(levels, seg.seconds);
+    if (quiet <= EDGE_FADE_SEC) return [];
+    const fadeIn = seg.fadeInSec ?? 0;
+    return [{ side: "before its laugh", from: inSec, to: inSec + quiet, at: seg.startSec, fadeIn }];
+  }
+  if (!seg.words?.length) return [];
+  // inSec and the words are on the clip's timeline with its sentence gaps
+  // taken out; the levels are the file's own, so each edge goes back through
+  // the cuts before it.
+  const raw = (t) => {
+    let at = t;
+    for (const c of seg.cuts ?? []) if (c.s <= at) at += c.e - c.s;
+    return at;
+  };
+  const first = seg.words[0].s;
+  const last = Math.max(...seg.words.map((w) => w.e));
+  const shown = seg.seconds - (seg.holdSec ?? 0);
+  return [
+    { side: "before its first word", from: raw(inSec), to: raw(inSec + first), at: seg.startSec, fadeIn: 0 },
+    {
+      side: "after its last word", from: raw(inSec + last), to: raw(inSec + shown),
+      at: seg.startSec + last, fadeIn: 0,
+    },
+  ];
+}
+
+/**
+ * The hums and clicks the cut plays at the edges of its clips, one line each,
+ * for the caller to listen to. It never changes the cut. readEdgeLevels(file)
+ * gives { windowSec, db, bandDb } from time 0, or null.
+ */
+export function edgeSounds(timeline, readEdgeLevels) {
+  const found = [];
+  for (const seg of timeline.spine) {
+    if (seg.source !== "clip" || seg.audio !== "clip") continue;
+    const levels = readEdgeLevels(seg.file);
+    if (!levels) continue;
+    const { windowSec, db, bandDb } = levels;
+    for (const stretch of edgeStretches(seg, levels)) {
+      const from = Math.ceil(stretch.from / windowSec - 1e-9);
+      const to = Math.min(db.length, Math.floor(stretch.to / windowSec + 1e-9));
+      if (to - from < 2) continue;
+      const heard = [];
+      for (let i = from; i < to; i++) {
+        const into = (i + 0.5) * windowSec - stretch.from;
+        const faded = stretch.fadeIn > 0 && into < stretch.fadeIn;
+        const gain = faded ? 60 * Math.log10(Math.max(1e-3, into / stretch.fadeIn)) : 0;
+        heard.push({ i, db: db[i] + gain, share: bandDb[i] - db[i] });
+      }
+      const cutAt = (i) => stretch.at + i * windowSec - stretch.from;
+      const where = `scene ${seg.sceneIndex}, ${stretch.side}`;
+      let run = 0;
+      let longest = { length: 0, end: 0 };
+      heard.forEach((w, k) => {
+        run = w.db >= HUM_FLOOR_DB && w.share >= HUM_SHARE_DB ? run + 1 : 0;
+        if (run > longest.length) longest = { length: run, end: k };
+      });
+      if (longest.length * windowSec >= HUM_MIN_SEC - 1e-9) {
+        const start = heard[longest.end - longest.length + 1].i;
+        found.push(
+          `${where}: a hum for ${(longest.length * windowSec).toFixed(2)}s at ${cutAt(start).toFixed(2)}s in the cut`,
+        );
+      }
+      const sorted = heard.map((w) => w.db).sort((a, b) => a - b);
+      const loud = Math.max(FAINT_SOUND_DB, sorted[sorted.length >> 1] + SOUND_OVER_FLOOR_DB);
+      for (let k = 1; k < heard.length - 1; k++) {
+        if (heard[k].db < loud || heard[k - 1].db >= QUIET_DB) continue;
+        let end = k;
+        while (end < heard.length && heard[end].db >= loud) end++;
+        if (end < heard.length && heard[end].db < QUIET_DB && end - k <= CLICK_MAX_WINDOWS) {
+          found.push(`${where}: a click at ${cutAt(heard[k].i).toFixed(2)}s in the cut`);
+        }
+        k = end;
+      }
+    }
+  }
+  return found;
 }
 
 export function noWordTimes(timeline) {
@@ -1048,6 +1189,15 @@ function main() {
   }
   const silent = noWordTimes(timeline);
   if (silent.length > 0) console.log(`No word times: ${silent.join(", ")}`);
+  const edges = edgeSounds(timeline, (file) => {
+    const levels = clipLevels(here(file));
+    const band = levels && clipLevels(here(file), HUM_BAND);
+    return band ? { ...levels, bandDb: band.db } : null;
+  });
+  if (edges.length > 0) {
+    console.log("Sound at the edges (listen before uploading; the cut is unchanged):");
+    for (const line of edges) console.log("  " + line);
+  }
   console.log(`Room tone: under the whole ad. Music bed: ${music ?? "none"}`);
   console.log(`Upload it: exodus video upload ${manifest.runId} --file ${out}`);
 }
