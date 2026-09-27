@@ -150,8 +150,9 @@ Options:
   --voice-path <path>  How the voices are made (start)
   --video-model <id>   Which video model films this ad, instead of the kind of
                        ad's own default (start, with --conceit)
-  --voice <mode>       native: the video model speaks the lines. voice-first:
-                       the lines are recorded first (start, with --conceit)
+  --voice <mode>       voice-first (the default): the lines are recorded
+                       first. native: the video model speaks the lines
+                       (start, with --conceit)
   --music              Put a music bed under the ad (start). An ad has no music
                        unless you ask for it here
   --no-music           Leave the music bed off (start), which it already is
@@ -358,7 +359,14 @@ function printDisplacedHistory(
 export type ArtifactSubset =
   | { type: "storyboard"; storyboard?: unknown; storyboardJson?: string }
   | { type: "frames"; frames?: Array<{ sceneIndex: number; imageUrl?: string }> }
-  | { type: "image"; imageUrl?: string; storageId?: string; anchor?: "set-plate" | "product-sheet" }
+  | {
+      type: "image";
+      imageUrl?: string;
+      storageId?: string;
+      anchor?: "set-plate" | "product-sheet" | "filled-plate";
+      /** #2868: a filled plate's objects, as their lines read. */
+      holds?: string[];
+    }
   | {
       type: "video";
       sceneIndex?: number;
@@ -1231,6 +1239,11 @@ export interface RunVideoChoice {
  *  music into a scene. Matched by code, never by its wording. */
 export const MUSIC_HEARD_CODE = "music-heard";
 
+export interface ManifestFilledPlate {
+  file: string | null;
+  holds: string[];
+}
+
 export interface VideoManifest {
   runId: string;
   pulledAt: string;
@@ -1241,6 +1254,10 @@ export interface VideoManifest {
    *  built from (#2627). Null on a run that made neither. */
   productSheet: string | null;
   setPlate: string | null;
+  /** #2874: the holder drawn filled (#2868), in stage order, and the objects
+   *  each holds. A stage whose plate failed its check is absent, so the file
+   *  number counts kept plates; `holds` names the stage. */
+  filledPlates: ManifestFilledPlate[];
   music: string | null;
   /**
    * #2247: what the run says about its bed, which is a different question from
@@ -1562,14 +1579,26 @@ export function planPull(
   let reference: PullDownload | null = null;
   let productSheet: PullDownload | null = null;
   let setPlate: PullDownload | null = null;
+  // #2874: keyed by what the stage holds, because the outputs carry no stage
+  // number and a stage whose plate failed its check is left out of them.
+  const filledByStage = new Map<string, { holds: string[]; url: string }>();
   for (const artifact of outputsOfNodeKind(run, "reference")) {
     if (artifact.type !== "image" || !artifact.imageUrl) continue;
+    if (artifact.anchor === "filled-plate") {
+      const holds = artifact.holds ?? [];
+      filledByStage.set(JSON.stringify(holds), { holds, url: artifact.imageUrl });
+      continue;
+    }
     const stem = artifact.anchor ?? "reference";
     const download = { file: `${stem}.${extFor(artifact.imageUrl, "image")}`, url: artifact.imageUrl };
     if (artifact.anchor === "product-sheet") productSheet = download;
     else if (artifact.anchor === "set-plate") setPlate = download;
     else if (!artifact.anchor) reference = download;
   }
+  const filledPlates = [...filledByStage.values()].map((plate, i) => ({
+    holds: plate.holds,
+    download: { file: `filled-plate-${i + 1}.${extFor(plate.url, "image")}`, url: plate.url },
+  }));
 
   const keyframeByScene = new Map<number, PullDownload>();
   for (const artifact of run.nodes.flatMap((n) => n.outputs ?? [])) {
@@ -1751,6 +1780,7 @@ export function planPull(
     ...(reference ? [reference] : []),
     ...(productSheet ? [productSheet] : []),
     ...(setPlate ? [setPlate] : []),
+    ...filledPlates.map((p) => p.download),
     ...keyframeByScene.values(),
     ...[...voiceByScene.values()].map((v) => v.download),
     ...(narrationDownload ? [narrationDownload] : []),
@@ -1770,6 +1800,7 @@ export function planPull(
       reference: reference?.file ?? null,
       productSheet: productSheet?.file ?? null,
       setPlate: setPlate?.file ?? null,
+      filledPlates: filledPlates.map((p) => ({ file: p.download.file, holds: p.holds })),
       music: music?.file ?? null,
       musicBed: musicBedState(run),
       musicHeardScenes: scenes
@@ -1803,6 +1834,9 @@ export function markPullFailure(manifest: VideoManifest, failure: PullFailure): 
   if (manifest.reference === failure.file) manifest.reference = null;
   if (manifest.productSheet === failure.file) manifest.productSheet = null;
   if (manifest.setPlate === failure.file) manifest.setPlate = null;
+  for (const plate of manifest.filledPlates) {
+    if (plate.file === failure.file) plate.file = null;
+  }
   if (manifest.music === failure.file) manifest.music = null;
   for (const ref of manifest.cast) {
     if (ref.file === failure.file) ref.file = null;

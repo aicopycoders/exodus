@@ -63,7 +63,8 @@ export type ArtifactSubset = {
     type: "image";
     imageUrl?: string;
     storageId?: string;
-    anchor?: "set-plate" | "product-sheet";
+    anchor?: "set-plate" | "product-sheet" | "filled-plate";
+    holds?: string[];
 } | {
     type: "video";
     sceneIndex?: number;
@@ -342,6 +343,10 @@ export interface RunVideoChoice {
     voiceModeLabel: string;
 }
 export declare const MUSIC_HEARD_CODE = "music-heard";
+export interface ManifestFilledPlate {
+    file: string | null;
+    holds: string[];
+}
 export interface VideoManifest {
     runId: string;
     pulledAt: string;
@@ -350,6 +355,7 @@ export interface VideoManifest {
     reference: string | null;
     productSheet: string | null;
     setPlate: string | null;
+    filledPlates: ManifestFilledPlate[];
     music: string | null;
     musicBed: MusicBedState;
     musicHeardScenes: number[];

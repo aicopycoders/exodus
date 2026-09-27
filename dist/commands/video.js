@@ -140,8 +140,9 @@ Options:
   --voice-path <path>  How the voices are made (start)
   --video-model <id>   Which video model films this ad, instead of the kind of
                        ad's own default (start, with --conceit)
-  --voice <mode>       native: the video model speaks the lines. voice-first:
-                       the lines are recorded first (start, with --conceit)
+  --voice <mode>       voice-first (the default): the lines are recorded
+                       first. native: the video model speaks the lines
+                       (start, with --conceit)
   --music              Put a music bed under the ad (start). An ad has no music
                        unless you ask for it here
   --no-music           Leave the music bed off (start), which it already is
@@ -790,9 +791,15 @@ export function planPull(run, items, opts) {
     let reference = null;
     let productSheet = null;
     let setPlate = null;
+    const filledByStage = new Map();
     for (const artifact of outputsOfNodeKind(run, "reference")) {
         if (artifact.type !== "image" || !artifact.imageUrl)
             continue;
+        if (artifact.anchor === "filled-plate") {
+            const holds = artifact.holds ?? [];
+            filledByStage.set(JSON.stringify(holds), { holds, url: artifact.imageUrl });
+            continue;
+        }
         const stem = artifact.anchor ?? "reference";
         const download = { file: `${stem}.${extFor(artifact.imageUrl, "image")}`, url: artifact.imageUrl };
         if (artifact.anchor === "product-sheet")
@@ -802,6 +809,10 @@ export function planPull(run, items, opts) {
         else if (!artifact.anchor)
             reference = download;
     }
+    const filledPlates = [...filledByStage.values()].map((plate, i) => ({
+        holds: plate.holds,
+        download: { file: `filled-plate-${i + 1}.${extFor(plate.url, "image")}`, url: plate.url },
+    }));
     const keyframeByScene = new Map();
     for (const artifact of run.nodes.flatMap((n) => n.outputs ?? [])) {
         if (artifact.type !== "frames")
@@ -969,6 +980,7 @@ export function planPull(run, items, opts) {
         ...(reference ? [reference] : []),
         ...(productSheet ? [productSheet] : []),
         ...(setPlate ? [setPlate] : []),
+        ...filledPlates.map((p) => p.download),
         ...keyframeByScene.values(),
         ...[...voiceByScene.values()].map((v) => v.download),
         ...(narrationDownload ? [narrationDownload] : []),
@@ -987,6 +999,7 @@ export function planPull(run, items, opts) {
             reference: reference?.file ?? null,
             productSheet: productSheet?.file ?? null,
             setPlate: setPlate?.file ?? null,
+            filledPlates: filledPlates.map((p) => ({ file: p.download.file, holds: p.holds })),
             music: music?.file ?? null,
             musicBed: musicBedState(run),
             musicHeardScenes: scenes
@@ -1023,6 +1036,10 @@ export function markPullFailure(manifest, failure) {
         manifest.productSheet = null;
     if (manifest.setPlate === failure.file)
         manifest.setPlate = null;
+    for (const plate of manifest.filledPlates) {
+        if (plate.file === failure.file)
+            plate.file = null;
+    }
     if (manifest.music === failure.file)
         manifest.music = null;
     for (const ref of manifest.cast) {
