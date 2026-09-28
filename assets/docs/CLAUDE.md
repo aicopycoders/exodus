@@ -83,6 +83,7 @@ These are not pipelines. They are Luke's methods written as skills, so the think
 | `find-competitors` | Who is actually strong in a niche, on Meta first and Amazon second. Ranked competitor sheet and a watch list. Optional scripts for Atria and the Meta Ad Library via Apify (each needs its own key; they bill per result and say the plan back before spending). |
 | `patterns-and-gaps` | What repeats and matters across own ads, competitor ads, organic content, and research, read layer by layer, and the three kinds of gap. |
 | `anatomy-of-ads` | The parts list of an ad (Messaging × Creative). Write a brief, dissect any ad into the same parts, tag a batch so patterns can be counted. Also the vocabulary the other skills use. |
+| `swipe` | Swipe a winning ad for the active brand at one of three closeness levels (1 same scene, 2 new scene same beats, 3 same bones new drama). Gathers the ad, product, and level, then calls the `swipe-narrative-agent` Genesis bot (needs `GENESIS_API_KEY` plus a provider key). |
 | `copy-instincts` | See, Attract, Make. Run on a draft that already exists (hook, ad, mechanism paragraph) to take it from good to great. |
 | `bot-builder` | Build a custom bot the way Luke and Mario build the Genesis bots (SEAK), and put it where it runs: an Exodus workflow Prompt node, a Genesis bot, or a skill. |
 | `remember-that` | Bank one reaction mid-session ("remember that", "never do X") into `STANDARDS.md`, and push approved winning lines to the matching Exodus bank. |
