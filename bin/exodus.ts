@@ -49,8 +49,9 @@ const OTHER_COMMANDS = new Set([
 // "write from a source other than a brief" surface — only brief-mode writing
 // ships today, so they stay runnable for power users but are unadvertised
 // until that layer is production-ready.
-// `video` is admin-only (#958), so listing it would offer members a door they
-// can never open.
+// `video` is for admins and video beta testers only (#958, #3251). Most members
+// have neither, so listing it would offer them a door they can't open; the
+// people who can use it reach it through `exodus video --help` and the skill.
 const HIDDEN_COMMANDS = new Set([
   "creative",
   "template",

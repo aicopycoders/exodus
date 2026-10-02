@@ -7,6 +7,7 @@ import { missingRouteLine } from "../lib/route-support.js";
 import { hasBinary } from "../lib/preflight.js";
 import { ASSET_UPLOAD_POLICY, pauseAheadLine, } from "./workflow.js";
 import { HELPER_LEDGER_BASE, SET_OPTION_LEDGER_BASE } from "../lib/helperLedgerBase.js";
+import { customerAnswer, customerRunPage, customerStageIsWorking, customerStageLines, customerStatusLines, customerStoryboardLines, customerVoicesLines, } from "./video-customer.js";
 const CONCEIT_KEYS = ["podcast", "ugc", "stage", "street", "personification"];
 const VOICE_MODES = ["native", "voice-first"];
 const STYLE_SLUGS = [
@@ -86,7 +87,8 @@ The whole loop, in order:
   9. Make your cut from those files.
 
   10. exodus video upload <runId> --file cut.mp4
-      Attaches your cut to the run and prints the page to approve it on.
+      Attaches your cut to the run and prints the page to watch it on. On a
+      One-shot run the upload delivers the ad, so step 11 is not needed.
 
   11. exodus video approve <runId>
       Or click Approve on the page from step 10. If you redid a clip after
@@ -97,7 +99,7 @@ Usage:
   exodus video status <runId> [--rejected-draft] [--json]
   exodus video storyboard <runId> [--json]
   exodus video approve <runId> [--approve-stale-cut] [--json]
-  exodus video retry-frame <runId> --node <nodeId> --scene <n> [--note "..."] [--json]
+  exodus video retry-frame <runId> [--node <nodeId>] --scene <n> [--note "..."] [--json]
   exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "..."] [--voice-first] [--json]
   exodus video revoice <runId> (--scene <n> | --all) [--node <nodeId>] [--json]
   exodus video voices <runId> [--set <character>=<voiceId>] [--clear <character>] [--from <file.json>] [--json]
@@ -112,7 +114,8 @@ Options:
   --duration <sec>     How long your cut is, in seconds. Only needed when the
                        length can't be read off the file itself
   --note "<text>"      How to steer one redo (retry-frame, retry-clip)
-  --node <nodeId>      Which scene-frames node holds the still (retry-frame).
+  --node <nodeId>      Which scene-frames node holds the still (retry-frame;
+                       admins pass it, beta testers leave it off).
                        Which video step holds the clip, when a scene has one on
                        more than one step (retry-clip, revoice)
   --scene <n>          Which scene to redo. One scene only, a whole number
@@ -158,8 +161,16 @@ Options:
   --json               Machine-readable output
   --help, -h           Print this help
 
-Video is admin-only. If every command here answers "video isn't enabled for
-this key", your dashboard user needs the admin role on this brand.
+Who can use what. Admins get every command here. Beta testers with video
+switched on get these, on their own brands: start (--script, --conceit,
+--style, --direction, --music, --review-storyboard), status, storyboard,
+approve (the storyboard), voices, retry-frame --scene <n> (redo one scene's
+picture while the storyboard waits), pull (the finished video, each scene's
+clip and voice, and the music) and upload. These stay admin-only:
+start --video-model / --voice / --voice-path / --director, director,
+status --rejected-draft, retry-clip and revoice.
+If a command answers "video isn't enabled for this key", the run id is wrong,
+the command is admin-only, or video isn't switched on for your dashboard user.
 
 Examples:
   exodus workflow list
@@ -182,8 +193,8 @@ const SHOWS_PATH = "/api/v2/shows";
 const RUNS_PATH = "/api/v2/video/runs";
 const SCRIPT_RUNS_PATH = "/api/v2/video/script-runs";
 const DIRECTOR_PATH = "/api/v2/video/director";
-const RUN_PATH = "/api/v2/workflow";
-const ITEMS_PATH = "/api/v2/workflow/items";
+export const RUN_PATH = "/api/v2/workflow";
+export const ITEMS_PATH = "/api/v2/workflow/items";
 const REJECTED_DRAFT_PATH = "/api/v2/workflow/rejected-draft";
 const REJECTED_DRAFT_NOT_ON_THIS_SERVER = "This Exodus server does not keep rejected drafts yet, so there is nothing to read. It arrives " +
     "with the next server update.";
@@ -197,10 +208,10 @@ const VOICE_FIRST_NOT_ON_THIS_SERVER = "This Exodus server cannot redo a clip vo
     "was spent. It arrives with the next server update.";
 const REVOICE_NOT_ON_THIS_SERVER = "This Exodus server does not have the voice redo yet, so nothing was started and nothing " +
     "was spent. It arrives with the next server update.";
-const FINAL_PATH = "/api/v2/video/final";
+export const FINAL_PATH = "/api/v2/video/final";
 export const VOICES_PATH = "/api/v2/video/voices";
-const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
-const ASSETS_PATH = "/api/v2/workflows/assets";
+export const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
+export const ASSETS_PATH = "/api/v2/workflows/assets";
 function withoutJudgeFields({ judgeDetail: _d, judgeSeverity: _s, ...rest }) {
     return rest;
 }
@@ -305,7 +316,9 @@ export const defaultDeps = {
     dashboardUrl: getDashboardUrl(),
 };
 export const VIDEO_NOT_FOUND_MESSAGE = "video isn't enabled for this key\n" +
-    "Either your dashboard user needs the admin role on this brand (video is admin-only), or that run id doesn't exist here. Check the id, then ask Brad about the role.";
+    "One of three things: that run id doesn't exist on this brand, this command is for admins only " +
+    "(director, status --rejected-draft, retry-clip, revoice), or video isn't " +
+    "switched on for your dashboard user on this brand. Check the id first, then ask Brad.";
 export function videoApiError(res) {
     const behind = missingRouteLine(res, "exodus video");
     if (behind)
@@ -313,6 +326,9 @@ export function videoApiError(res) {
     if (res.status === 404)
         return VIDEO_NOT_FOUND_MESSAGE;
     return formatApiError(res);
+}
+function adminOnlyResult(line, json) {
+    return { code: 1, lines: json ? [JSON.stringify({ ok: false, error: line })] : [line] };
 }
 function errorResult(res, json) {
     return {
@@ -375,11 +391,17 @@ export function classifyRun(run) {
             };
         }
         if (parkedAtFinalWatch(run)) {
-            const autoRedoScenes = run.nodes
-                .filter((n) => n.kind === "video")
-                .flatMap((n) => n.autoRedoScenes ?? []);
-            if (autoRedoScenes.length > 0)
-                return { at: "running", stage: "video", autoRedoScenes };
+            const videoNodes = run.nodes.filter((n) => n.kind === "video");
+            const autoRedoScenes = videoNodes.flatMap((n) => n.autoRedoScenes ?? []);
+            const autoRedoReasons = videoNodes.flatMap((n) => n.autoRedoReasons ?? []);
+            if (autoRedoScenes.length > 0) {
+                return {
+                    at: "running",
+                    stage: "video",
+                    autoRedoScenes,
+                    ...(autoRedoReasons.length > 0 ? { autoRedoReasons } : {}),
+                };
+            }
             const missingScenes = run.nodes
                 .filter((n) => n.kind === "video")
                 .flatMap((n) => n.missingScenes ?? []);
@@ -556,13 +578,26 @@ export function stopLines(stop, runId, runUrl) {
         ];
     }
     if (stop.autoRedoScenes?.length)
-        return [autoRedoLine(stop.autoRedoScenes)];
+        return [autoRedoLine(stop.autoRedoScenes, stop.autoRedoReasons)];
     return [`Working: ${stageWord(stop.stage)}.`];
 }
-function autoRedoLine(scenes) {
+function autoRedoLine(scenes, reasons = []) {
+    const reasonOf = new Map(reasons.map((r) => [r.sceneIndex, r.reason]));
+    const groups = new Map();
+    for (const scene of [...scenes].sort((a, b) => a - b)) {
+        const reason = reasonOf.get(scene);
+        groups.set(reason, [...(groups.get(reason) ?? []), scene]);
+    }
     const one = scenes.length === 1;
-    return (`Working: the app is redoing ${scenesPhrase(scenes)} on ${one ? "its" : "their"} own because ` +
-        `${one ? "it" : "they"} repeated words. The ad isn't ready to watch until ${one ? "it lands" : "they land"}.`);
+    const clauses = [...groups].map(([reason, group], i) => {
+        const own = i === 0 ? ` on ${group.length === 1 ? "its" : "their"} own` : "";
+        return `${scenesPhrase(group)}${own}${reason ? ` because ${reason}` : ""}`;
+    });
+    const listed = clauses.length === 1
+        ? clauses[0]
+        : `${clauses.slice(0, -1).join(", ")}, and ${clauses[clauses.length - 1]}`;
+    return (`Working: the app is redoing ${listed}. ` +
+        `The ad isn't ready to watch until ${one ? "it lands" : "they land"}.`);
 }
 export function failedStoryboardNode(run) {
     return run.nodes.find((n) => n.kind === "storyboard" && n.status === "failed");
@@ -638,6 +673,8 @@ function clipFromArtifact(sceneIndex, artifact) {
         rawStorageId: artifact.rawStorageId ?? null,
         voiceMode: artifact.voiceMode ?? null,
         voiceFirstBlockedBy: artifact.voiceFirstBlockedBy ?? null,
+        voicePitchHz: artifact.voicePitchHz ?? null,
+        voicePitchMethod: artifact.voicePitchMethod ?? null,
     };
 }
 function keyframeDownload(sceneIndex, imageUrl) {
@@ -797,7 +834,8 @@ export function planPull(run, items, opts) {
             continue;
         if (artifact.anchor === "filled-plate") {
             const holds = artifact.holds ?? [];
-            filledByStage.set(JSON.stringify(holds), { holds, url: artifact.imageUrl });
+            const lid = artifact.lid;
+            filledByStage.set(JSON.stringify([holds, lid ?? null]), { holds, url: artifact.imageUrl, ...(lid ? { lid } : {}) });
             continue;
         }
         const stem = artifact.anchor ?? "reference";
@@ -809,9 +847,14 @@ export function planPull(run, items, opts) {
         else if (!artifact.anchor)
             reference = download;
     }
-    const filledPlates = [...filledByStage.values()].map((plate, i) => ({
+    const stageKeys = [...new Set([...filledByStage.values()].map((plate) => JSON.stringify(plate.holds)))];
+    const filledPlates = [...filledByStage.values()].map((plate) => ({
         holds: plate.holds,
-        download: { file: `filled-plate-${i + 1}.${extFor(plate.url, "image")}`, url: plate.url },
+        ...(plate.lid ? { lid: plate.lid } : {}),
+        download: {
+            file: `filled-plate-${stageKeys.indexOf(JSON.stringify(plate.holds)) + 1}${plate.lid ? "-lid-closed" : ""}.${extFor(plate.url, "image")}`,
+            url: plate.url,
+        },
     }));
     const keyframeByScene = new Map();
     for (const artifact of run.nodes.flatMap((n) => n.outputs ?? [])) {
@@ -968,6 +1011,8 @@ export function planPull(run, items, opts) {
             rawStorageId: clip ? clip.rawStorageId : null,
             voiceMode: clip ? clip.voiceMode : null,
             voiceFirstBlockedBy: clip ? clip.voiceFirstBlockedBy : null,
+            voicePitchHz: clip ? clip.voicePitchHz : null,
+            voicePitchMethod: clip ? clip.voicePitchMethod : null,
             clipStatus: item?.status ?? "missing",
             error: item?.error ?? null,
             flagged: item?.flagged === true,
@@ -999,7 +1044,7 @@ export function planPull(run, items, opts) {
             reference: reference?.file ?? null,
             productSheet: productSheet?.file ?? null,
             setPlate: setPlate?.file ?? null,
-            filledPlates: filledPlates.map((p) => ({ file: p.download.file, holds: p.holds })),
+            filledPlates: filledPlates.map((p) => ({ file: p.download.file, holds: p.holds, ...(p.lid ? { lid: p.lid } : {}) })),
             music: music?.file ?? null,
             musicBed: musicBedState(run),
             musicHeardScenes: scenes
@@ -1058,6 +1103,8 @@ export function markPullFailure(manifest, failure) {
             scene.rawStorageId = null;
             scene.voiceMode = null;
             scene.voiceFirstBlockedBy = null;
+            scene.voicePitchHz = null;
+            scene.voicePitchMethod = null;
         }
         if (scene.voice === failure.file)
             scene.voice = null;
@@ -1449,6 +1496,9 @@ export async function startScriptFlow(opts, deps) {
     });
     if (!res.ok)
         return errorResult(res, opts.json);
+    const customerStart = customerAnswer(res.data);
+    if (customerStart)
+        return customerStartedResult(customerStart, opts, deps);
     const started = res.data;
     if (!started.runId) {
         return { code: 1, lines: ["The server started the ad but did not say which run it is."] };
@@ -1483,6 +1533,27 @@ export async function startScriptFlow(opts, deps) {
         lines: [...scriptStartedLines(runId, url, card, video, opts.director === true), "", ...waited.lines],
     };
 }
+async function customerStartedResult(started, opts, deps) {
+    const { runId, dashboardUrl } = started;
+    const head = [`Started video ${runId}`, `Watch it: ${dashboardUrl}`];
+    if (opts.wait) {
+        const waited = await waitFlow(runId, { json: opts.json, url: dashboardUrl }, deps);
+        return opts.json ? waited : { code: waited.code, lines: [...head, "", ...waited.lines] };
+    }
+    if (opts.json)
+        return { code: 0, lines: [JSON.stringify(started)] };
+    return {
+        code: 0,
+        lines: [
+            ...head,
+            "",
+            opts.reviewStoryboard
+                ? "It stops at the storyboard for you to approve."
+                : "The app approves the storyboard itself if its checks pass. It only stops for you if they find a problem.",
+            `Check in whenever: exodus video status ${runId}`,
+        ],
+    };
+}
 const POLL_INTERVAL_MS = 5000;
 const MAX_POLLS = 720;
 export async function waitFlow(runId, opts, deps) {
@@ -1499,11 +1570,30 @@ export async function waitFlow(runId, opts, deps) {
             const failed = errorResult(res, opts.json);
             return { code: failed.code, lines: [...lines, ...failed.lines] };
         }
+        const customer = customerAnswer(res.data);
+        if (customer) {
+            const page = customerRunPage(deps.dashboardUrl, runId);
+            if (customerStageIsWorking(customer.stage)) {
+                const progress = customerStageLines(customer, page)[0];
+                if (progress !== lastProgress) {
+                    lastProgress = progress;
+                    if (!opts.json)
+                        lines.push(progress);
+                }
+                continue;
+            }
+            return {
+                code: customer.stage === "failed" ? 1 : 0,
+                lines: opts.json
+                    ? [JSON.stringify(customer)]
+                    : [...lines, ...customerStageLines(customer, page), `Watch it on the dashboard: ${page}`],
+            };
+        }
         const run = asVideoRun(res.data);
         const stop = classifyRun(run);
         if (stop.at === "running") {
             const progress = stop.autoRedoScenes?.length
-                ? autoRedoLine(stop.autoRedoScenes)
+                ? autoRedoLine(stop.autoRedoScenes, stop.autoRedoReasons)
                 : `Working: ${stageWord(stop.stage)}…`;
             if (progress !== lastProgress) {
                 lastProgress = progress;
@@ -1573,6 +1663,13 @@ export async function statusFlow(runId, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
+    const customer = customerAnswer(runRes.data);
+    if (customer) {
+        return {
+            code: 0,
+            lines: json ? [JSON.stringify(customer)] : customerStatusLines(customer, deps.dashboardUrl),
+        };
+    }
     const run = asVideoRun(runRes.data);
     const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!itemsRes.ok)
@@ -1788,6 +1885,9 @@ export async function rejectedDraftFlow(runId, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
+    if (customerAnswer(runRes.data)) {
+        return adminOnlyResult("exodus video status --rejected-draft is for admins.", json);
+    }
     const node = failedStoryboardNode(asVideoRun(runRes.data));
     if (!node) {
         const note = "The storyboard on this run didn't fail, so there is no rejected draft to read.";
@@ -1827,6 +1927,10 @@ export async function storyboardFlow(runId, json, deps) {
     const res = await deps.get(`${STORYBOARD_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!res.ok)
         return errorResult(res, json);
+    const board = customerAnswer(res.data);
+    if (board) {
+        return { code: 0, lines: json ? [JSON.stringify(board)] : customerStoryboardLines(board) };
+    }
     const cards = res.data;
     if (json)
         return { code: 0, lines: [JSON.stringify(cards)] };
@@ -1965,14 +2069,34 @@ export async function flagFlow(runId, note, json, deps) {
     };
 }
 export async function retryFrameFlow(runId, nodeId, sceneIndex, note, json, deps) {
+    if (nodeId === undefined) {
+        const board = await deps.get(`${STORYBOARD_PATH}?runId=${encodeURIComponent(runId)}`);
+        if (!board.ok)
+            return errorResult(board, json);
+        if (!customerAnswer(board.data)) {
+            return { code: 1, lines: ["video retry-frame needs --node <nodeId>."] };
+        }
+    }
     const res = await deps.post(SCENE_RETRY_PATH, {
         runId,
-        nodeId,
+        ...(nodeId === undefined ? {} : { nodeId }),
         sceneIndex,
         ...(note ? { note } : {}),
     });
     if (!res.ok)
         return errorResult(res, json);
+    if (customerAnswer(res.data)) {
+        if (json)
+            return { code: 0, lines: [JSON.stringify({ ok: true, runId, sceneIndex })] };
+        return {
+            code: 0,
+            lines: [
+                `Redrawing scene ${sceneIndex}'s picture. The other scenes stay as they are.`,
+                ...(note ? ["Your note isn't used on this redo."] : []),
+                `See it when it's done: exodus video storyboard ${runId}`,
+            ],
+        };
+    }
     const triggerRunId = res.data.triggerRunId;
     if (json) {
         return {
@@ -2073,6 +2197,10 @@ export async function retryClipFlow(runId, target, { note, voiceFirst = false },
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
+    if (customerAnswer(runRes.data)) {
+        return adminOnlyResult("Redoing a finished clip is for admins. To redo a scene's picture while your storyboard " +
+            `waits for you: exodus video retry-frame ${runId} --scene <n>`, json);
+    }
     const run = asVideoRun(runRes.data);
     const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!itemsRes.ok)
@@ -2206,6 +2334,9 @@ export async function revoiceFlow(runId, target, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
+    if (customerAnswer(runRes.data)) {
+        return adminOnlyResult("exodus video revoice is for admins.", json);
+    }
     const run = asVideoRun(runRes.data);
     const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!itemsRes.ok)
@@ -2372,6 +2503,10 @@ export async function voicesFlow(runId, voices, json, deps) {
         : await deps.get(`${VOICES_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!res.ok)
         return errorResult(res, json);
+    const customer = customerAnswer(res.data);
+    if (customer) {
+        return { code: 0, lines: json ? [JSON.stringify(customer)] : customerVoicesLines(customer) };
+    }
     const sheet = res.data;
     if (json)
         return { code: 0, lines: [JSON.stringify({ ok: true, ...sheet })] };
@@ -2461,10 +2596,105 @@ function musicLines(manifest) {
     }
     return lines;
 }
+export function planCustomerPull(run, items, meta) {
+    const downloads = [];
+    const take = (file, url) => {
+        downloads.push({ file, url });
+        return file;
+    };
+    const scenes = new Map();
+    let music = null;
+    for (const item of items) {
+        if (item.kind === "music") {
+            if (music === null && item.url)
+                music = take(`music.${extFor(item.url, "audio")}`, item.url);
+            continue;
+        }
+        if (!isPullSceneIndex(item.sceneIndex))
+            continue;
+        const scene = scenes.get(item.sceneIndex) ?? { index: item.sceneIndex, clip: null, voice: null };
+        if (item.url && item.kind === "clip" && scene.clip === null) {
+            scene.clip = take(`${scenePrefix(item.sceneIndex)}.${extFor(item.url, "video")}`, item.url);
+        }
+        if (item.url && item.kind === "voice" && scene.voice === null) {
+            scene.voice = take(`${scenePrefix(item.sceneIndex)}.voice.${extFor(item.url, "audio")}`, item.url);
+        }
+        scenes.set(item.sceneIndex, scene);
+    }
+    const videoUrl = run.video?.url;
+    const video = videoUrl ? take(`video.${extFor(videoUrl, "video")}`, videoUrl) : null;
+    return {
+        downloads,
+        manifest: {
+            runId: run.runId,
+            pulledAt: meta.pulledAt,
+            dashboardUrl: customerRunPage(meta.dashboardUrl, run.runId),
+            scenes: [...scenes.values()].sort((a, b) => a.index - b.index),
+            music,
+            video,
+        },
+    };
+}
+async function customerPullFlow(run, dir, json, deps) {
+    const runId = run.runId;
+    const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
+    if (!itemsRes.ok)
+        return errorResult(itemsRes, json);
+    const items = customerAnswer(itemsRes.data)?.items ?? [];
+    const { downloads, manifest } = planCustomerPull(run, items, {
+        pulledAt: new Date(deps.now()).toISOString(),
+        dashboardUrl: deps.dashboardUrl,
+    });
+    deps.mkdirp(dir);
+    const failures = (await runPool(downloads.map((download) => () => downloadWithRetry(download, dir, deps)), PULL_CONCURRENCY)).filter((f) => f !== null);
+    const landed = (file) => file !== null && !failures.some((f) => f.file === file) ? file : null;
+    for (const scene of manifest.scenes) {
+        scene.clip = landed(scene.clip);
+        scene.voice = landed(scene.voice);
+    }
+    manifest.music = landed(manifest.music);
+    manifest.video = landed(manifest.video);
+    const manifestPath = path.join(dir, "manifest.json");
+    deps.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const code = failures.length > 0 ? 1 : 0;
+    if (json) {
+        return { code, lines: [JSON.stringify({ runId, dir, wrote: downloads.length - failures.length + 1, manifest })] };
+    }
+    if (downloads.length === 0) {
+        return {
+            code: 0,
+            lines: [
+                "Nothing to download yet. This video hasn't made any pieces.",
+                `Check where it is: exodus video status ${runId}`,
+            ],
+        };
+    }
+    return {
+        code,
+        lines: [
+            `Pulled ${downloads.length - failures.length + 1} files into ${dir}`,
+            `Every piece is listed in ${manifestPath}.`,
+            ...(manifest.video ? [] : ["The finished video isn't ready yet, so only the scene pieces came down."]),
+            ...(failures.length > 0
+                ? [
+                    "",
+                    `${failures.length} file${failures.length === 1 ? "" : "s"} did not download:`,
+                    ...failures.map((f) => `  ${f.file}: ${f.error}`),
+                    "Run the same command again to retry.",
+                ]
+                : []),
+            "",
+            `When your cut is ready: exodus video upload ${runId} --file cut.mp4`,
+        ],
+    };
+}
 export async function pullFlow(runId, dir, json, deps) {
     const runRes = await deps.get(`${RUN_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!runRes.ok)
         return errorResult(runRes, json);
+    const customer = customerAnswer(runRes.data);
+    if (customer)
+        return customerPullFlow(customer, dir, json, deps);
     const run = asVideoRun(runRes.data);
     const itemsRes = await deps.get(`${ITEMS_PATH}?runId=${encodeURIComponent(runId)}`);
     if (!itemsRes.ok)
@@ -2756,21 +2986,42 @@ export async function uploadFlow(runId, filePath, durationFlag, json, deps) {
     const attached = attaching.value;
     if (!attached.ok)
         return errorResult(attached, json);
+    const customerFinal = customerAnswer(attached.data);
+    if (customerFinal) {
+        const { finalWatchUrl, delivered } = customerFinal;
+        if (json) {
+            return {
+                code: 0,
+                lines: [JSON.stringify({ ok: true, runId, assetId, durationSec, finalWatchUrl, delivered })],
+            };
+        }
+        return {
+            code: 0,
+            lines: [
+                `Uploaded your cut (${durationSec.toFixed(1)}s).${delivered ? " Your video is delivered." : ""}`,
+                `Watch it here: ${finalWatchUrl}`,
+            ],
+        };
+    }
     const final = attached.data;
     const finalWatchUrl = final.finalWatchUrl ?? reviewUrl(deps.dashboardUrl, { _id: runId });
+    const delivered = final.delivered === true;
     if (json) {
         return {
             code: 0,
-            lines: [JSON.stringify({ ok: true, runId, assetId, durationSec, finalWatchUrl })],
+            lines: [JSON.stringify({ ok: true, runId, assetId, durationSec, finalWatchUrl, delivered })],
         };
     }
+    const uploaded = `Uploaded your cut (${durationSec.toFixed(1)}s).`;
     return {
         code: 0,
-        lines: [
-            `Uploaded your cut (${durationSec.toFixed(1)}s).`,
-            `Watch it here: ${finalWatchUrl}`,
-            `Approve it there, or run: exodus video approve ${runId}`,
-        ],
+        lines: delivered
+            ? [`${uploaded} Your ad is delivered.`, `Watch it here: ${finalWatchUrl}`]
+            : [
+                uploaded,
+                `Watch it here: ${finalWatchUrl}`,
+                `Approve it there, or run: exodus video approve ${runId}`,
+            ],
     };
 }
 const VALUE_FLAGS = new Set([
@@ -2882,9 +3133,7 @@ export async function run(flags, occurrences) {
         return printResult(await flagFlow(runId, note, json, defaultDeps));
     }
     if (sub === "retry-frame") {
-        const nodeId = flagString(flags, "node");
-        if (!nodeId)
-            usage("video retry-frame needs --node <nodeId>.");
+        const nodeId = nonBlank(flagString(flags, "node"));
         const sceneRaw = flagString(flags, "scene");
         if (sceneRaw === undefined) {
             usage("video retry-frame needs --scene <n>, the scene index to redo.");

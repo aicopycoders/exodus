@@ -1,6 +1,6 @@
 ---
 name: exodus-video
-description: Make a video ad with Exodus from the terminal. The main path is script-first: run a saved video workflow with `npx @aicopycoders/exodus workflow run`. You read and approve the storyboard, pull every finished piece (per-scene clips, the narration track and per-scene voice, keyframes, cast identity stills, word timings, the music bed) into a folder with `exodus video pull`, and upload a finished cut for approval. Exodus makes the pieces; the cut is made outside it, in whatever editor the user wants — this skill hands over the pieces and the facts about them, it does not prescribe an editor. Use it whenever the user has invoked Exodus and wants anything to do with a video ad, an ad run's clips or storyboard, "pull the pieces", "stitch it together", "make the cut", "upload my cut", or checking on a video run ("exodus, make a video ad from this script", "exodus, is my video run done", "exodus, pull the clips for run X and cut them", "exodus, what's wrong with scene 3", "exodus video status"). Also use it when the user ran an `npx @aicopycoders/exodus video` command or the `exodus` hub skill routed here. Video is admin-only: "video isn't enabled for this key" means either the dashboard user lacks the admin role or the run id is wrong, so check the id and then say so; do not retry. Never claim generic video-editing asks ("edit this mp4", "add captions to my reel") without Exodus context; in shared folders those belong to the user's other tools. Running or authoring workflows generally is `exodus-workflow`; static image ads are `exodus-image`; copy is `exodus-write`.
+description: Make a video ad with Exodus from the terminal. The main path is script-first: run a saved video workflow with `npx @aicopycoders/exodus workflow run`. You read and approve the storyboard, pull every finished piece (per-scene clips, the narration track and per-scene voice, keyframes, cast identity stills, word timings, the music bed) into a folder with `exodus video pull`, and upload a finished cut for approval. Exodus makes the pieces; the cut is made outside it, in whatever editor the user wants — this skill hands over the pieces and the facts about them, it does not prescribe an editor. Use it whenever the user has invoked Exodus and wants anything to do with a video ad, an ad run's clips or storyboard, "pull the pieces", "stitch it together", "make the cut", "upload my cut", or checking on a video run ("exodus, make a video ad from this script", "exodus, is my video run done", "exodus, pull the clips for run X and cut them", "exodus, what's wrong with scene 3", "exodus video status"). Also use it when the user ran an `npx @aicopycoders/exodus video` command or the `exodus` hub skill routed here. Admins get every video command; beta testers with video switched on get start, status, storyboard, approve, voices, retry-frame, pull and upload on their own brands (see "Beta testers"). "video isn't enabled for this key" means the run id is wrong, the command is admin-only, or video isn't switched on for that dashboard user, so check the id and then say so; do not retry. Never claim generic video-editing asks ("edit this mp4", "add captions to my reel") without Exodus context; in shared folders those belong to the user's other tools. Running or authoring workflows generally is `exodus-workflow`; static image ads are `exodus-image`; copy is `exodus-write`.
 ---
 
 # Video: make the pieces, cut the ad, hand it back
@@ -46,17 +46,57 @@ family (`familyTree.ts`). Those family names stay the code's names.
 ## Before anything
 
 - `npx @aicopycoders/exodus video --help` and `workflow --help` are the
-  authoritative flag lists. The `video` verb is admin-only and hidden from the
-  top-level `--help`; that is expected, not a broken install.
-- **Video is admin-only**, and says so two different ways.
-  - "video isn't enabled for this key", from a `video` verb, has two causes the
-    CLI cannot tell apart: the user is not an admin on this brand, or the run id
-    does not exist. Check the id first; if it is right, they need the admin role.
+  authoritative flag lists. The `video` verb is hidden from the top-level
+  `--help` because most members can't use it; that is expected, not a broken
+  install.
+- **Who can use video.** Admins get everything in this file. A beta tester
+  (video switched on for their dashboard user) gets a smaller set on their own
+  brands, listed under "Beta testers" below. Two refusals:
+  - "video isn't enabled for this key", from a `video` verb, has three causes
+    the CLI cannot tell apart: the run id does not exist on this brand, the
+    command is admin-only, or video isn't switched on for this user. Check the
+    id first, then check the command against "Beta testers".
   - "Video workflows aren't available on your account. Ask an admin if you need
-    video.", from `workflow run`, is unambiguous — `startRun` refuses any graph
-    containing a video node for a non-admin (`convex/workflows.ts:6471`).
+    video.", from `workflow run`, is unambiguous. `startRun` refuses any graph
+    containing a video node for a non-admin, beta testers included. A beta
+    tester starts with `exodus video start` instead.
 
   No flag or retry fixes either one.
+
+## Beta testers
+
+A beta tester's key gets the same video the dashboard's Video page makes, and
+never how it is made. Every answer to them says `"view": "customer"`, and the
+CLI words it the way the run page does. On their own brands they can:
+
+- `video start --script <file> --conceit <key> --style <slug>` with
+  `--direction`, `--music`, `--review-storyboard` and `--wait`. Any other start
+  flag is refused with one sentence naming it. The answer is the run id and the
+  link to the video's page.
+- `video status <runId>`: where the video is, in plain words (waiting in line,
+  planning, drawing, storyboard ready for review, filming, ready with its link,
+  or stopped and why). `--json` prints the server's answer as it came.
+- `video storyboard <runId>`: each scene's line and picture, while the
+  storyboard waits for review.
+- `video approve <runId>`: approves the storyboard. Nothing else.
+- `video voices <runId>`: who speaks, their current voice, and the voices on
+  the tester's own ElevenLabs account. `--set <character>=<voiceId>` picks one,
+  until the storyboard is approved.
+- `video retry-frame <runId> --scene <n>`: redraws one scene's picture while
+  the storyboard waits. No `--node`; the server finds the step.
+- `video pull <runId> --out <dir>`: the finished video (`video.<ext>`), each
+  scene's clip (`scene-NN.<ext>`) and voice (`scene-NN.voice.<ext>`), and the
+  music (`music.<ext>`), with a `manifest.json` holding only `runId`,
+  `pulledAt`, `dashboardUrl`, `scenes` (`index`, `clip`, `voice`), `music` and
+  `video`. A file that did not download is `null` there. Nothing else in "The
+  handover" below applies to them.
+- `video upload <runId> --file <cut>`: attaches their cut and prints the page
+  to watch it on.
+
+Admin-only, answered "video isn't enabled for this key" (or, for retry-clip and
+revoice, a sentence saying they are for admins): `director`,
+`status --rejected-draft`, `retry-clip`, `revoice`, and the start flags
+`--video-model`, `--voice`, `--voice-path` and `--director`.
 - Other failures: `npx @aicopycoders/exodus doctor` first, then follow what it prints.
 - `ffprobe` on the PATH lets `upload` read the cut's length by itself. Without
   it, `upload` falls back to parsing an MP4's own header, and for anything else
@@ -109,6 +149,7 @@ exodus video voices <runId>                               who speaks and with wh
 exodus video voices <runId> --set <character>=<voiceId>   give a character a voice
 exodus video approve <runId>                              keep going
 exodus video retry-frame <runId> --node <nodeId> --scene <n>  redo one still at the pixel gate
+                                                          (a beta tester leaves --node off)
 exodus video status <runId>                               where it is, per scene
 exodus video pull <runId> --out ./ad-<runId>              every piece + manifest.json
 exodus video retry-clip <runId> --scene <n> [--node <nodeId>] [--note "…"] [--voice-first]
@@ -215,8 +256,8 @@ on its own.
 ## What the CLI can and cannot do
 
 Verified against the CLI and the server, not assumed. Everything here is
-admin-gated on top. Five things worth knowing before you promise a user
-anything:
+about the admin tools; a beta tester has only what "Beta testers" lists. Five
+things worth knowing before you promise a user anything:
 
 - **A workflow only stops for your cut if its video node asks to.** `finalWatch`
   defaults to `false` (`convex/lib/workflow/catalog.ts:780`), and the run only

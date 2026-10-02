@@ -52,7 +52,7 @@ Cheap, one query. It tells you whether this brand already has a primer.
 - **✗ Not ready** — no primer yet. Proceed to Step 1.
 - **✓ Ready** — a primer is already saved. **Don't rebuild blind.** Surface it and offer the lighter moves first:
   - `npx @aicopycoders/exodus primer show` — print the saved primer so the user can see what's there.
-  - Rebuild only if the user explicitly wants to replace it (they've got better winning ads, the product changed). A rebuild *replaces* the existing primer.
+  - Rebuild only if the user explicitly wants a newer one (they've got better winning ads, the product changed). A rebuild adds a new primer and makes it your default; the old one stays in your list.
 
 This follows the same "check first, don't re-ask" discipline as the `exodus-foundation` skill. Use the status result to decide what to do — don't open by asking the user where they want to start.
 
@@ -67,10 +67,15 @@ WHO IT'S FOR:
 OFFER / PRICE (optional):
 PROOF / NUMBERS (optional):
 
-WINNING ADS (paste 10, full copy; fewer is OK — tell me if you have none):
---- Ad 1: …
---- Ad 2: …
+WINNING ADS (paste 10, full copy; fewer is OK — tell me if you have none).
+Paste each ad on the lines under its "--- Ad N:" line, and leave that line as it is:
+--- Ad 1:
+(ad 1, full copy)
+--- Ad 2:
+(ad 2, full copy)
 ```
+
+Leave nothing after "Ad 1:" — no name or title. The builder names every ad itself, and text on that line would have to be guessed as either a name or the ad's first line.
 
 State plainly that the product facts matter as much as the ads — the winning ads frequently don't name the product, and you will **not** invent it. If the user says they have *no* winning ads, stop here and jump to the **No-Ads Branch** below; don't push them to manufacture examples.
 
@@ -86,7 +91,7 @@ npx @aicopycoders/exodus primer --file state/primer-submission.md --yes
 
 The build reads every ad and writes the full module taxonomy. **The `--yes` is load-bearing in Claude Code:** without it, the final "accept & save" prompt silently no-ops in the non-TTY shell and the primer is never saved (the symptom that forced a `printf 'a\n' |` hack before this flag existed). With `--yes`, the command builds and saves in one shot and prints the same `✓ saved` / `✓ ready` output.
 
-If a primer already exists, `--yes` rebuilds in place (replaces it) rather than prompting — which is what you want when the user has explicitly asked to rebuild.
+If a primer already exists, `--yes` builds and saves without prompting — which is what you want when the user has explicitly asked to rebuild. It adds a new primer and makes it your default; the old one stays in your list.
 
 ### Step 4 — Verify
 

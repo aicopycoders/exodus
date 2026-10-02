@@ -52,8 +52,10 @@ const stereo = "aresample=48000,aformat=channel_layouts=stereo";
  * loudnorm stamps its output about 0.1 s late (its look-ahead), so a later
  * atrim by time kept that much less sound than picture and every join pulled
  * the sound further ahead (#2387). Re-stamping by sample count undoes it.
+ * Its input is padded to 3 s, its look-ahead window: Debian's ffmpeg 5.1 (the
+ * worker's) all but silenced a shorter sound (#3006). Every use trims after.
  */
-const LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,asetpts=N/SR/TB";
+const LOUDNORM = "apad=whole_dur=3,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,asetpts=N/SR/TB";
 /** A fade this short at each edge of a segment's sound stops a hard cut in the room tone clicking. */
 const EDGE_FADE_SEC = 0.015;
 /** Air after the last spoken word of a narrated scene, so the line lands. */
@@ -371,6 +373,7 @@ export function scenePlans(storyboard) {
       cueLineId: typeof scene.cueLineId === "string" ? scene.cueLineId : null,
       cutawayType: typeof scene.cutawayType === "string" ? scene.cutawayType : null,
       durationSec: typeof scene.durationSec === "number" ? scene.durationSec : null,
+      actionTailSec: typeof scene.actionTailSec === "number" && scene.actionTailSec > 0 ? scene.actionTailSec : 0,
     });
   }
   return plans;
@@ -381,10 +384,13 @@ export function scenePlans(storyboard) {
  * voice plus a beat of air, to the next whole frame, because the voice is never
  * altered. A clip that runs longer is trimmed; a clip that runs shorter holds
  * its last frame for the difference. A still (no clip) simply runs the voice's length.
+ * A scene marked with actionTailSec keeps that long after the voice, up to the clip's
+ * end, so the set-down it ends on is seen (#3199).
  */
-export function fitNarration({ clipSeconds, voiceSeconds }) {
-  const target = ceilFrame(voiceSeconds + TAIL_AIR_SEC);
-  if (clipSeconds === null) return { seconds: target, holdSec: 0, trimmedBy: 0 };
+export function fitNarration({ clipSeconds, voiceSeconds, actionTailSec = 0 }) {
+  const aired = ceilFrame(voiceSeconds + TAIL_AIR_SEC);
+  if (clipSeconds === null) return { seconds: aired, holdSec: 0, trimmedBy: 0 };
+  const target = Math.max(aired, Math.min(clipSeconds, ceilFrame(voiceSeconds + actionTailSec)));
   if (target <= clipSeconds) {
     return { seconds: target, holdSec: 0, trimmedBy: clipSeconds - target };
   }
@@ -451,6 +457,8 @@ export function cueEndInSegment(seg, counts, cueLineId) {
  * The beat is measured from the clip's scripted words when the script is heard
  * in order, and a cut stops short of a sound made up before or after the line
  * ("Hmm", "Um"), even at the ad's own edges (#2541). Sounds inside the line stay.
+ * A scene the storyboard marks with actionTailSec keeps that long after its last
+ * word, so the action it ends on (her setting the mat down, #3199) is seen.
  */
 function trimJoins(spine, reactionCues, scriptLines) {
   spine.forEach((seg, k) => {
@@ -472,7 +480,7 @@ function trimJoins(spine, reactionCues, scriptLines) {
     const endsAd = k === spine.length - 1 && !reactionCues.has(seg.lineIds.at(-1));
     let outSec = endsAd
       ? after.length > 0 ? ceilFrame(lastWord + TAIL_AIR_SEC) : seg.seconds
-      : ceilFrame(lastWord + JOIN_TAIL_SEC);
+      : ceilFrame(lastWord + Math.max(JOIN_TAIL_SEC, seg.actionTailSec ?? 0));
     if (after.length > 0) {
       const clear = floorFrame(Math.min(...after.map((w) => w.s)) - EXTRA_CLEARANCE_SEC);
       outSec = Math.min(outSec, Math.max(clear, ceilFrame(lastWord)));
@@ -616,9 +624,12 @@ export function buildTimeline({ manifest, storyboard, skip, probe, exists, readW
       const base = {
         sceneIndex: n, source: "clip", file: scene.clip, clipSeconds: clip.seconds, inSec: 0,
         lineIds: plan.lineIds, firstSpeaker: plan.firstSpeaker, lastSpeaker: plan.lastSpeaker,
+        actionTailSec: plan.actionTailSec ?? 0,
       };
       if (voice && (narrated || !clip.hasAudio)) {
-        const fit = fitNarration({ clipSeconds: clip.seconds, voiceSeconds: probe(voice).seconds });
+        const fit = fitNarration({
+          clipSeconds: clip.seconds, voiceSeconds: probe(voice).seconds, actionTailSec: plan.actionTailSec ?? 0,
+        });
         const how = [];
         if (fit.trimmedBy > 0.05) how.push(`clip trimmed ${clip.seconds.toFixed(1)}s -> ${fit.seconds.toFixed(1)}s`);
         if (fit.holdSec > 0.05) how.push(`last frame held ${fit.holdSec.toFixed(1)}s`);
@@ -812,10 +823,12 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
     pairs.push(`[v${i}][a${i}]`);
   }
 
-  // A clip whose audio ends before its video would otherwise end the whole cut
-  // there under -shortest; padding lets the video decide the length.
   filters.push(`${pairs.join("")}concat=n=${pairs.length}:v=1:a=1[vcat][voicecat]`);
-  filters.push(`[voicecat]apad[voice]`);
+  // The sound is padded or cut to the picture's exact length, so every stream
+  // ends on its own. No -shortest: ffmpeg 8 held the whole ad's frames for it,
+  // and Debian's ffmpeg 5.1 (the worker's) never ended at all (#2988).
+  const pictureSec = timeline.spine.reduce((sum, seg) => sum + seg.seconds, 0);
+  filters.push(`[voicecat]apad,atrim=end=${pictureSec.toFixed(6)}[voice]`);
 
   let videoLabel = "vcat";
   timeline.cutaways.forEach((c, j) => {
@@ -853,7 +866,7 @@ export function buildFfmpegArgs(timeline, { resolve, music, out }) {
     "-map", `[${videoLabel}]`, "-map", `[${audioLabel}]`,
     "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-r", String(FPS),
     "-c:a", "aac", "-b:a", "192k",
-    "-movflags", "+faststart", "-shortest",
+    "-movflags", "+faststart",
     out,
   ];
 }
@@ -1076,6 +1089,15 @@ function fail(code, message) {
   process.exit(code);
 }
 
+/** A refusal the CLI prints to stderr and exits with `code`, so another caller can do the same or not. */
+export class FirstCutError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "FirstCutError";
+    this.code = code;
+  }
+}
+
 function parseArgs(argv) {
   const opts = { dir: undefined, out: undefined, skip: new Set(), music: true };
   for (let i = 0; i < argv.length; i++) {
@@ -1091,26 +1113,29 @@ function parseArgs(argv) {
   return opts;
 }
 
-function main() {
-  const opts = parseArgs(process.argv.slice(2));
-
+/**
+ * The whole cut, as the CLI makes it, for any caller (#2988: the worker cuts a
+ * Video-page run with this). Renders `out` (default <dir>/cut.mp4) and its word
+ * sidecars, and throws FirstCutError where the CLI would exit. The CLI's report
+ * is printed by main() from what this returns.
+ */
+export function firstCut({ dir, out: outOpt, skip = new Set(), music: musicOn = true }) {
   for (const bin of ["ffmpeg", "ffprobe"]) {
     if (spawnSync(bin, ["-version"]).status !== 0) {
-      fail(2, `${bin} is not installed. Install ffmpeg (brew install ffmpeg / apt install ffmpeg).`);
+      throw new FirstCutError(2, `${bin} is not installed. Install ffmpeg (brew install ffmpeg / apt install ffmpeg).`);
     }
   }
   const encoders = spawnSync("ffmpeg", ["-hide_banner", "-encoders"]).stdout?.toString() ?? "";
   if (!/\blibx264\b/.test(encoders)) {
-    fail(2, "This ffmpeg has no libx264 encoder (H.264). Install a full ffmpeg build: brew install ffmpeg / apt install ffmpeg.");
+    throw new FirstCutError(2, "This ffmpeg has no libx264 encoder (H.264). Install a full ffmpeg build: brew install ffmpeg / apt install ffmpeg.");
   }
 
-  const dir = opts.dir;
   const manifestPath = path.join(dir, "manifest.json");
   if (!existsSync(manifestPath)) {
-    fail(2, `${manifestPath} not found. Run: exodus video pull <runId> --out ${dir}`);
+    throw new FirstCutError(2, `${manifestPath} not found. Run: exodus video pull <runId> --out ${dir}`);
   }
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  const out = path.resolve(opts.out ?? path.join(dir, "cut.mp4"));
+  const out = path.resolve(outOpt ?? path.join(dir, "cut.mp4"));
   const here = (file) => path.join(dir, file);
   const exists = (file) => Boolean(file) && existsSync(here(file));
 
@@ -1143,7 +1168,7 @@ function main() {
   const timeline = buildTimeline({
     manifest,
     storyboard,
-    skip: opts.skip,
+    skip,
     probe,
     exists,
     readWords: (file) => {
@@ -1153,10 +1178,10 @@ function main() {
     readLevels: (file) => clipLevels(here(file)),
   });
   if (timeline.spine.length === 0) {
-    fail(1, `No scene has a clip or a keyframe. Check: exodus video status ${manifest.runId}`);
+    throw new FirstCutError(1, `No scene has a clip or a keyframe. Check: exodus video status ${manifest.runId}`);
   }
 
-  const music = opts.music && exists(manifest.music) ? manifest.music : null;
+  const music = musicOn && exists(manifest.music) ? manifest.music : null;
   const ffmpegArgs = buildFfmpegArgs(timeline, {
     resolve: here,
     music: music ? here(music) : null,
@@ -1165,7 +1190,7 @@ function main() {
   const res = spawnSync("ffmpeg", ffmpegArgs, { stdio: "inherit" });
   if (res.status !== 0) {
     const quoted = ffmpegArgs.map((a) => (/[\s\[\];]/.test(a) ? `'${a}'` : a)).join(" ");
-    fail(1, `ffmpeg failed. The command it ran:\n  ffmpeg ${quoted}`);
+    throw new FirstCutError(1, `ffmpeg failed. The command it ran:\n  ffmpeg ${quoted}`);
   }
 
   const rows = wordRows(timeline);
@@ -1181,7 +1206,22 @@ function main() {
   const duration = execFileSync("ffprobe", [
     "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", out,
   ]).toString().trim();
-  console.log(`Wrote ${out} (${Number(duration).toFixed(1)}s, ${WIDTH}x${HEIGHT})`);
+  return { out, durationSec: Number(duration), manifest, timeline, music, rows, sidecars };
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  let cut;
+  try {
+    cut = firstCut(opts);
+  } catch (e) {
+    if (e instanceof FirstCutError) fail(e.code, e.message);
+    throw e;
+  }
+  const { out, durationSec, manifest, timeline, music, rows, sidecars } = cut;
+  const here = (file) => path.join(opts.dir, file);
+
+  console.log(`Wrote ${out} (${durationSec.toFixed(1)}s, ${WIDTH}x${HEIGHT})`);
   console.log("In the cut:");
   for (const line of inTheCut(timeline)) console.log("  " + line);
   if (timeline.left.length > 0) {
@@ -1211,4 +1251,12 @@ function main() {
   console.log(`Upload it: exodus video upload ${manifest.runId} --file ${out}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+// #2988: the basename test too, because a bundler that inlines this file into
+// its entry would otherwise run the CLI inside whatever imported it.
+if (
+  process.argv[1] &&
+  path.basename(process.argv[1]) === "first-cut.mjs" &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main();
+}

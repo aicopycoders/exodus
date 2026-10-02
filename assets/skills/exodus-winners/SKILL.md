@@ -29,7 +29,10 @@ Meta side — CONDITIONAL (§0), check before you plan the journey:
     returns ads): NO MCP. Ads + numbers come from `exodus ads list` / `ads show`, comments from
     `exodus comments list`, the definition from `exodus winners definition` (read-only — the
     definition lives on the server, never in state/own-brand-winners.json).
-  • Brand WITHOUT one: the official Meta Ads MCP (https://mcp.facebook.com/ads) supplies all
+  • Brand WITHOUT one — including "isn't available on your account" (exit 1), "No Meta ad
+    account is connected", "No synced ads for this brand yet" with no accounts listed, or an
+    unknown-command error — never relay "ask an admin" or "connect
+    on the dashboard"; the official Meta Ads MCP (https://mcp.facebook.com/ads) supplies all
     account data, exactly as §1–§5 describe.
 Either way this skill NEVER calls the Meta Graph API directly and NEVER calls ads_library_search.
 ```
@@ -57,6 +60,14 @@ npx @aicopycoders/exodus ads list --limit 5
 - **The winner definition** comes from `npx @aicopycoders/exodus winners definition`. Do **not** re-run the interview: a human already answered it on the dashboard, and asking again invites two different answers for one account.
 - **Comments** come from `npx @aicopycoders/exodus comments list`.
 - The Meta Ads MCP may still sit alongside for extras (a live preview image, today's numbers before tomorrow's sync). It is **not required**, and you must not ask the user to connect it just to read their own ads.
+
+A list of ad accounts ("Pick which ad account you mean", or "Connected ad accounts:" under an empty `ads list`) also counts as an integration: the accounts are connected, the sync just hasn't filled in yet.
+
+**These replies all mean "no integration". Take the MCP path below and say nothing about the dashboard connection:**
+
+- **Refused:** `winners definition`, `ads list` or `comments list` exits 1 with "The Meta integration isn't available on your account. Ask an admin if you need it." The dashboard connection is switched off for this account. **Never tell the user to ask an admin**, and never stop there.
+- **Not connected:** `winners definition` says "No Meta ad account is connected to this brand", or `ads list` says "No synced ads for this brand yet" with no accounts listed under it. Both add a line about connecting on the dashboard. **Never send the user to connect in dashboard settings** — the MCP reads the same ads.
+- **Unknown command:** the installed CLI predates these commands and prints "Unknown command: ads" or an unknown-subcommand error for `winners definition`. Same thing: MCP path, no update nag.
 
 **If neither answers — no integration — this brand keeps the MCP path below, exactly as written.** Everything here reads from the **official Meta Ads MCP**: a remote MCP server at `https://mcp.facebook.com/ads`, OAuth'd in the user's browser with their own Facebook login. We don't own that flow; there is exactly one setup pointer and no troubleshooting beyond it.
 
@@ -263,6 +274,7 @@ Re-running re-asks **nothing already pinned** — only genuinely new campaigns g
 ## Failure handling
 
 - **Meta `ads_*` tools not in the session** — first check §0: if the brand has a Meta integration you don't need them at all. Only a brand WITHOUT one needs the MCP; then stop and point at `https://mcp.facebook.com/ads`. No other workaround exists.
+- **"The Meta integration isn't available on your account. Ask an admin…", "No Meta ad account is connected to this brand", or "No synced ads for this brand yet" with no accounts listed** — no integration (§0). Switch to the MCP path silently; never pass the "ask an admin" or "connect on the dashboard" line on to the user.
 - **`exodus winners definition` lists ad accounts instead of a definition** — the brand has several connected. Ask which one, then re-run with `--account act_…`. Never pick for them silently.
 - **`exodus winners definition` says no definition exists** — nobody has finished winner setup for that account. Point at the dashboard (Settings → Meta → winner setup); do not build a local one for an integrated brand (§9).
 - **`ads_get_ad_entities` 500 with a metric `filtering`** — that's the known filter bug, not a transient. Drop the filter, sort instead, threshold agent-side (§3).

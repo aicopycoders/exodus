@@ -185,7 +185,7 @@ export async function checkWhoami(): Promise<CheckResult> {
         todo: true,
         label: "Brand primer",
         detail: `${d.workspaceSlug} has no primer yet — set one up to unlock the pipelines`,
-        fix: `say "exodus, set up my brand primer" (or run \`npx ${pkgRef()} foundation\` from a source doc, or paste it at /settings?tab=brands&brand=${d.workspaceSlug})`,
+        fix: `say "exodus, set up my brand primer" (or run \`npx ${pkgRef()} foundation\` from a source doc, or paste it in the dashboard at Library → Materials → Primers (/library/materials?section=primer))`,
       };
     }
     return {

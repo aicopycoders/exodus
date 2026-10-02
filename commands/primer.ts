@@ -13,12 +13,21 @@ builder reads your winning ads + product facts and writes a modular primer
 document the writers use to construct new ads. Once it's saved, the brand is
 ready for Genesis.
 
+Every save (the interactive build, \`set\`, or \`add\`) adds a new primer to
+your list and makes it your default — the old one stays in your list. To
+switch back to an older one, use Make default on the dashboard's
+Library → Materials → Primers.
+
 The build also seeds a HOOK BANK from the primer's HOOK section. Add a HEADLINE
 BANK separately with \`exodus primer headlines\`. Both banks are injected into the
 hook/headline writing stages as brand-specific examples.
 
 Subcommands:
   exodus primer                 Interactive build (paste ads → review → save)
+  exodus primer list            List this brand's primers (id, name, size, default/archived)
+  exodus primer add --name <n> --file <path>
+                                 Add a primer from a file. Makes it your default;
+                                 the old one stays in your list.
   exodus primer status          Show whether this brand has a primer / is ready
   exodus primer show            Print the saved primer
   exodus primer set --file <path>
@@ -27,6 +36,9 @@ Subcommands:
   exodus primer headlines       Save the headline bank (paste, or --file/--stdin/--value)
   exodus primer steering        Set a primer's "always use / don't use" steering
   exodus primer steering show   Print the steering saved for all four primers
+
+Add --name <n> to any save (the interactive build, set, or add) to name it.
+Default name when omitted: "Brand primer <date>".
 
 Steering picks one of the four primers and sets the brand's guidance for it —
 the same "always use / don't use" the dashboard Primer editor writes. The
@@ -47,7 +59,9 @@ Interactive build flags:
                   the submission from stdin.
   --yes           Build and save without the interactive confirmation — for
                   non-interactive shells like Claude Code. Pairs with --file
-                  (or --file -); rebuilds in place if a primer already exists.
+                  (or --file -). If a primer already exists, rebuilds and
+                  saves without asking — that adds a new default; the old one
+                  stays in your list.
 
 The submission should include 10+ winning ads (full copy) and the product name
 and core function. Differentiators, proof points, customer stories, offer
@@ -87,6 +101,8 @@ interface BuildStatusResp {
   // Legacy: hook bank only (older dashboards). Superseded by `sections`.
   hookBank?: string;
   error?: string;
+  /** Ads the build couldn't sort, kept under new-buyer ads (#3228). */
+  unsortedAds?: number;
 }
 
 interface SetResp {
@@ -102,6 +118,27 @@ interface SetResp {
 interface ShowResp {
   brand?: { name: string; slug: string };
   primer: string | null;
+}
+
+// One row of `exodus primer list` (T11): id, name, size, and the two marks.
+interface PrimerListItem {
+  id: string;
+  name: string;
+  chars: number;
+  isDefault: boolean;
+  archived: boolean;
+}
+interface ListResp {
+  primers: PrimerListItem[];
+}
+
+// `exodus primer add --name <n> --file <path>` (T11): the same shape as
+// SetResp (chars/ready/missing/split), plus the row's id and the name it was
+// given — so afterPrimerSaved() reports it exactly like a `set`.
+interface AddResp extends SetResp {
+  added: boolean;
+  id: string;
+  name: string;
 }
 
 interface ApiError {
@@ -256,13 +293,23 @@ async function buildPrimer(
     const primer = (data.primer ?? "").trim();
     if (!primer) fail("primer build returned empty output");
     console.log(""); // close the progress-dot line
+    const unsorted = data.unsortedAds ?? 0;
+    if (unsorted > 0) {
+      const ads = unsorted === 1 ? "1 ad couldn't be sorted, so it's" : `${unsorted} ads couldn't be sorted, so they're`;
+      console.log(`  ! ${ads} under new-buyer ads. Check where they belong.`);
+    }
     return { primer, missing: data.missing ?? [] };
   }
   fail("primer build timed out; check the dashboard and retry");
 }
 
-async function savePrimer(value: string): Promise<SetResp> {
-  const res = await apiPostDashboard<SetResp | ApiError>("/api/primer/set", { value });
+// name (D3, T11): forwarded to /api/primer/set as `name`, which T3a already
+// accepts. Omitted when not given — the server then falls back to
+// "Brand primer <date>".
+async function savePrimer(value: string, name?: string): Promise<SetResp> {
+  const body: { value: string; name?: string } = { value };
+  if (name) body.name = name;
+  const res = await apiPostDashboard<SetResp | ApiError>("/api/primer/set", body);
   if (!res.ok) {
     printApiError("save failed", res.status, res.data);
     process.exit(1);
@@ -299,10 +346,7 @@ function reportSplit(split: SetResp["split"]): void {
     console.log(
       "    These primers are empty. Re-run `exodus primer` with ads for those",
     );
-    console.log(
-      "    categories to populate them. Until then, runs for those categories",
-    );
-    console.log("    fall back to your other primer.");
+    console.log("    categories to populate them.");
   }
 }
 
@@ -372,9 +416,10 @@ async function afterPrimerSaved(result: SetResp): Promise<void> {
 async function confirmAndSave(
   build: { primer: string; missing: string[] },
   autoYes = false,
+  name?: string,
 ): Promise<boolean> {
   if (autoYes) {
-    const result = await savePrimer(build.primer);
+    const result = await savePrimer(build.primer, name);
     console.log(`\n  ✓ saved primer (${result.chars} chars).`);
     await afterPrimerSaved(result);
     return true;
@@ -392,7 +437,7 @@ async function confirmAndSave(
       "a",
     );
     if (choice === "a") {
-      const result = await savePrimer(build.primer);
+      const result = await savePrimer(build.primer, name);
       console.log(`\n  ✓ saved primer (${result.chars} chars).`);
       await afterPrimerSaved(result);
       return true;
@@ -403,7 +448,7 @@ async function confirmAndSave(
         console.log("  → editor exited empty / non-zero. Try again.");
         continue;
       }
-      const result = await savePrimer(edited);
+      const result = await savePrimer(edited, name);
       console.log(`\n  ✓ saved primer (${result.chars} chars, edited).`);
       await afterPrimerSaved(result);
       return true;
@@ -437,6 +482,59 @@ async function runShow(): Promise<void> {
   console.log(data.primer);
 }
 
+// exodus primer list (T11, #14): id, name, size, the Default mark and the
+// archived mark. Switching the Default back to an older primer stays on the
+// dashboard (Make default) — this command only lists.
+async function runList(): Promise<void> {
+  const res = await apiGetDashboard<ListResp | ApiError>("/api/primer/list");
+  if (!res.ok) {
+    printApiError("list failed", res.status, res.data);
+    process.exit(1);
+  }
+  const { primers } = res.data as ListResp;
+  if (!primers.length) {
+    console.log("No primers saved for this brand yet. Run: exodus primer");
+    return;
+  }
+  console.log("");
+  for (const p of primers) {
+    const marks = [p.isDefault ? "default" : null, p.archived ? "archived" : null]
+      .filter((m): m is string => m !== null)
+      .join(", ");
+    console.log(
+      `  ${p.id}  ${p.name}  (${p.chars.toLocaleString("en-US")} chars)${marks ? `  [${marks}]` : ""}`,
+    );
+  }
+  console.log("");
+}
+
+// exodus primer add --name <n> --file <path> (T11, #17): adds one and makes
+// it the Default (D3) — there is NO --default flag, because every add
+// already becomes the Default. Deliberately narrower than `set`/the
+// interactive build: no --value/--stdin, just a required name and a file,
+// for a scriptable one-shot "add this primer" call.
+async function runAdd(flags: Record<string, string | boolean>): Promise<void> {
+  const name = typeof flags.name === "string" ? flags.name.trim() : "";
+  if (!name) {
+    fail("--name <n> is required. Usage: exodus primer add --name <n> --file <path>");
+  }
+  const filePath = typeof flags.file === "string" ? flags.file : "";
+  if (!filePath) {
+    fail("--file <path> is required. Usage: exodus primer add --name <n> --file <path>");
+  }
+  const value = filePath === "-" ? await readAllStdin() : readFileArg(filePath);
+  if (!value.trim()) fail("file is empty");
+
+  const res = await apiPostDashboard<AddResp | ApiError>("/api/primer/add", { name, value });
+  if (!res.ok) {
+    printApiError("add failed", res.status, res.data);
+    process.exit(1);
+  }
+  const result = res.data as AddResp;
+  console.log(`✓ added primer "${result.name}" (${result.chars} chars). It's your default now.`);
+  await afterPrimerSaved(result);
+}
+
 async function runSet(flags: Record<string, string | boolean>): Promise<void> {
   let value: string | null = null;
   if (typeof flags.value === "string") {
@@ -449,7 +547,8 @@ async function runSet(flags: Record<string, string | boolean>): Promise<void> {
   if (value === null || !value.trim()) {
     fail("missing or empty content. provide --value <text> | --file <path> | --stdin (or --file -).");
   }
-  const result = await savePrimer(value);
+  const name = typeof flags.name === "string" ? flags.name.trim() || undefined : undefined;
+  const result = await savePrimer(value, name);
   console.log(`✓ saved primer (${result.chars} chars).`);
   console.log(
     result.ready
@@ -482,15 +581,18 @@ async function runHeadlines(flags: Record<string, string | boolean>): Promise<vo
 
 async function runInteractive(flags: Record<string, string | boolean>): Promise<void> {
   const autoYes = flags.yes === true;
+  const name = typeof flags.name === "string" ? flags.name.trim() || undefined : undefined;
   const status = await fetchStatus();
   printStatus(status);
-  // With --yes and an existing primer, skip the prompt and rebuild in place —
-  // the interactive choice would hang in a non-TTY shell.
+  // With --yes and an existing primer, skip the prompt and save without
+  // asking — the interactive choice would hang in a non-TTY shell. Either
+  // way a rebuild adds a new primer and makes it the default (D3); the old
+  // one stays in the brand's list.
   if (status.hasPrimer && !autoYes) {
     const choice = await promptChoice(
       "This brand already has a primer. Rebuild it?",
       [
-        { key: "r", label: "rebuild (replace it)" },
+        { key: "r", label: "rebuild (adds a new one, makes it your default)" },
         { key: "s", label: "show the current one" },
         { key: "q", label: "quit" },
       ],
@@ -506,7 +608,7 @@ async function runInteractive(flags: Record<string, string | boolean>): Promise<
   const submission = await collectSubmission(flags);
   for (;;) {
     const build = await buildPrimer(submission);
-    const saved = await confirmAndSave(build, autoYes);
+    const saved = await confirmAndSave(build, autoYes, name);
     if (saved) return;
     const again = await promptChoice(
       "Build again from the same submission?",
@@ -699,6 +801,14 @@ export async function run(flags: Record<string, string | boolean>): Promise<void
   }
   if (sub === "show") {
     await runShow();
+    return;
+  }
+  if (sub === "list") {
+    await runList();
+    return;
+  }
+  if (sub === "add") {
+    await runAdd(flags);
     return;
   }
   if (sub === "set") {

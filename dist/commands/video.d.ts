@@ -1,11 +1,17 @@
 import { type ApiResponse } from "../lib/client.js";
 import type { FlagOccurrence } from "../lib/args.js";
 import { type RunProvenance, type WorkflowRun } from "./workflow.js";
+import { type CustomerItem, type CustomerRun } from "./video-customer.js";
 declare const CONCEIT_KEYS: readonly ["podcast", "ugc", "stage", "street", "personification"];
 declare const VOICE_MODES: readonly ["native", "voice-first"];
 type VoiceMode = (typeof VOICE_MODES)[number];
 export declare const helpText: string;
+export declare const RUN_PATH = "/api/v2/workflow";
+export declare const ITEMS_PATH = "/api/v2/workflow/items";
+export declare const FINAL_PATH = "/api/v2/video/final";
 export declare const VOICES_PATH = "/api/v2/video/voices";
+export declare const ASSET_UPLOAD_URL_PATH = "/api/v2/workflows/asset-upload-url";
+export declare const ASSETS_PATH = "/api/v2/workflows/assets";
 export interface ClipWord {
     w: string;
     s: number;
@@ -65,6 +71,7 @@ export type ArtifactSubset = {
     storageId?: string;
     anchor?: "set-plate" | "product-sheet" | "filled-plate";
     holds?: string[];
+    lid?: "closed";
 } | {
     type: "video";
     sceneIndex?: number;
@@ -79,6 +86,8 @@ export type ArtifactSubset = {
     rawStorageId?: string;
     voiceMode?: "voice-first";
     voiceFirstBlockedBy?: string[];
+    voicePitchHz?: number;
+    voicePitchMethod?: string;
 } | {
     type: "audio";
     sceneIndex?: number;
@@ -121,6 +130,11 @@ export interface VideoRunNode {
     outputs?: ArtifactSubset[];
     missingScenes?: MissingScene[];
     autoRedoScenes?: number[];
+    autoRedoReasons?: AutoRedoReason[];
+}
+export interface AutoRedoReason {
+    sceneIndex: number;
+    reason: string;
 }
 export interface MissingScene {
     sceneIndex: number;
@@ -247,6 +261,7 @@ export type RunStop = {
     at: "running";
     stage: string;
     autoRedoScenes?: number[];
+    autoRedoReasons?: AutoRedoReason[];
 } | {
     at: "storyboard-gate";
     nodeId?: string;
@@ -314,6 +329,8 @@ export interface ManifestScene {
     rawStorageId: string | null;
     voiceMode: "voice-first" | null;
     voiceFirstBlockedBy: string[] | null;
+    voicePitchHz: number | null;
+    voicePitchMethod: string | null;
     clipStatus: string;
     error: string | null;
     flagged: boolean;
@@ -346,6 +363,7 @@ export declare const MUSIC_HEARD_CODE = "music-heard";
 export interface ManifestFilledPlate {
     file: string | null;
     holds: string[];
+    lid?: "closed";
 }
 export interface VideoManifest {
     runId: string;
@@ -452,7 +470,7 @@ export declare function approveFlow(runId: string, opts: {
     approveStaleCut: boolean;
 }, deps: VideoDeps): Promise<FlowResult>;
 export declare function flagFlow(runId: string, note: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
-export declare function retryFrameFlow(runId: string, nodeId: string, sceneIndex: number, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
+export declare function retryFrameFlow(runId: string, nodeId: string | undefined, sceneIndex: number, note: string | undefined, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export type ClipRedoPlan = {
     ok: true;
     nodeId: string;
@@ -533,6 +551,25 @@ export type VoiceMap = Record<string, string | {
 export declare function parseVoiceFlags(occurrences: FlagOccurrence[], readFile: (path: string) => string): VoiceMap | null;
 export declare function voicesFlow(runId: string, voices: VoiceMap | null, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function voiceSheetLines(sheet: CastVoiceSheet): string[];
+export interface CustomerManifest {
+    runId: string;
+    pulledAt: string;
+    dashboardUrl: string;
+    scenes: Array<{
+        index: number;
+        clip: string | null;
+        voice: string | null;
+    }>;
+    music: string | null;
+    video: string | null;
+}
+export declare function planCustomerPull(run: CustomerRun, items: CustomerItem[], meta: {
+    pulledAt: string;
+    dashboardUrl: string;
+}): {
+    downloads: PullDownload[];
+    manifest: CustomerManifest;
+};
 export declare function pullFlow(runId: string, dir: string, json: boolean, deps: VideoDeps): Promise<FlowResult>;
 export declare function parseMvhdDurationSec(bytes: Uint8Array): number | null;
 export declare const NO_DURATION_MESSAGE: string;

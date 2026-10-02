@@ -15,7 +15,8 @@ workspace this key is bound to. Prints:
 
 Run this BEFORE any pipeline command to confirm you're pointed at the right
 brand. If "foundation: NOT READY" appears, ask an admin to complete the
-brand's foundation at /settings?tab=brands&brand=<slug>.
+brand's foundation in the dashboard at Library → Materials → Primers
+(/library/materials?section=primer).
 `.trim();
 export async function run() {
     const res = await apiGet("/api/v2/whoami");
